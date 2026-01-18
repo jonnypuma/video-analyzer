@@ -1,6 +1,6 @@
 # 🎬 Video Analyzer | HDR Detection
 
-High‑performance media library inspector for HDR content with deep metadata extraction, flexible filtering, and data cleanup tooling.
+Video analyzer and library for HDR content with deep metadata extraction, flexible filtering, and data cleanup tooling.
 
 ---
 
