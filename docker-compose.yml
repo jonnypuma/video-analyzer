@@ -1,0 +1,26 @@
+services:
+
+  video-analyzer:
+    build: ./app
+    container_name: video-analyzer
+    image: video-analyzer
+    user: "1000:1000"
+    ports:
+      - "6002:6002"
+    volumes:
+      - /yourmount/Movies:/Movies:ro
+      - /yourmount2/Movies:/Movies2:ro
+      - /yourmount/TV:ro
+      - NFSMOUNT:/NFSMOUNT #if you have remote NFS shares, needs to be mounted as external volumes (See below)
+      - ./app/results:/output
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=${TZ}
+      
+volumes: #if you have remote NFS server mounts, add them here
+  NFSMOUNT:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=192.168.2.9,rw,nfsvers=3 #NFS mount server IP
+      device: :/Media #shared folder on NFS mount server     
