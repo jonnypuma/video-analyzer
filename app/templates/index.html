@@ -594,13 +594,13 @@
         .btn-scan-toggle { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 10px; height: 100%; background: #3498db; }
         .scan-dropdown { position: absolute; top: 100%; left: 0; margin-top: 6px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 6px 0; min-width: 160px; z-index: 200; display: none; }
         .scan-dropdown.active { display: block; }
-        .scan-dropdown button { width: 100%; background: transparent; border: none; color: #ddd; text-align: left; padding: 6px 12px; cursor: pointer; }
+        .scan-dropdown button { width: 100%; background: transparent; border: none; color: #ddd; text-align: left; padding: 6px 12px; cursor: pointer; font-size: 0.9em; }
         .scan-dropdown button:hover { background: #2a2a2a; color: #fff; }
         .scan-menu-item { position: relative; }
         .scan-menu-item::after {
             content: ""; position: absolute; top: 0; right: -8px; width: 8px; height: 100%;
         }
-        .scan-menu-label { padding: 6px 12px; cursor: pointer; color: #ddd; }
+        .scan-menu-label { padding: 6px 12px; cursor: pointer; color: #ddd; font-size: 0.9em; }
         .scan-menu-label:hover { background: #2a2a2a; color: #fff; }
         .scan-submenu { position: absolute; top: 0; left: 100%; margin-left: 6px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 6px 0; min-width: 220px; display: none; }
         .scan-menu-item:hover .scan-submenu { display: block; }
@@ -975,6 +975,7 @@
         <button onclick="contextRescan()">Rescan</button>
         <button onclick="openBulkEdit()">Bulk Edit/Rescan</button>
         <button onclick="contextCopyPath()">Copy Path</button>
+        <button id="ctx-remove-db" style="color:#e74c3c;" onclick="contextRemoveFromDb()">Remove item from DB</button>
         <div class="context-divider"></div>
         <button onclick="selectAllRows()">Select All on Page</button>
         <button onclick="selectAllFilteredRows()">Select All Filtered</button>
@@ -1196,6 +1197,10 @@
                         <input type="number" id="min-size" placeholder="50" style="width: 50px;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
                         <span style="font-size: 0.7em; color: #e67e22; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">LOGS:</span>
                         <input type="number" id="log-limit" value="200" placeholder="200" style="width: 50px;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
+                        <div style="display:flex; align-items:center; gap:5px; margin-left: 5px;">
+                            <input type="checkbox" id="chk-scan-extras" class="set-chk" style="width:16px; height:16px;">
+                            <span style="font-size: 0.7em; color: #e67e22; font-weight: bold;">Scan Extras</span>
+                        </div>
                         <span style="font-size: 0.7em; color: #2ecc71; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">REFRESH(S):</span>
                         <input type="number" id="scan-refresh" value="60" placeholder="60" style="width: 50px; text-align: center; color: #2ecc71;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
                         <span style="font-size: 0.7em; color: #9b59b6; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">BATCH:</span>
@@ -3761,6 +3766,12 @@
         menu.style.left = `${evt.pageX}px`;
         menu.style.top = `${evt.pageY}px`;
         menu.classList.add('active');
+        const removeBtn = document.getElementById('ctx-remove-db');
+        if (removeBtn) {
+            const count = selectedPaths.size;
+            if (count > 1) removeBtn.innerText = `Remove ${count} item(s) from DB`;
+            else removeBtn.innerText = 'Remove item from DB';
+        }
     }
 
     function closeContextMenu() {
@@ -3786,6 +3797,17 @@
             navigator.clipboard.writeText(contextMenuPath).then(() => showToast('Path copied'));
         } else {
             showToast('Copy not supported');
+        }
+    }
+
+    function contextRemoveFromDb() {
+        closeContextMenu();
+        if (selectedPaths.size > 1) {
+            promptDelete();
+            return;
+        }
+        if (contextMenuPath) {
+            promptDelete(contextMenuPath);
         }
     }
 
@@ -5235,6 +5257,10 @@
                     if (forceMain) forceMain.checked = checked;
                     if (forceModal) forceModal.checked = checked;
                 }
+                if (data.scan_extras !== undefined) {
+                    const extrasEl = document.getElementById('chk-scan-extras');
+                    if (extrasEl) extrasEl.checked = data.scan_extras === 'true' || data.scan_extras === true;
+                }
                 if (data.visible_cols) applyVisibleCols(data.visible_cols, !!data.column_widths);
                 if (data.column_order) {
                     try {
@@ -5348,7 +5374,8 @@
             batch_size: document.getElementById('batch-size').value,
             rpu_fel_threshold: document.getElementById('rpu-threshold').value,
             force_rescan: document.getElementById('chk-force')?.checked || false,
-            column_order: JSON.stringify(getColumnOrder())
+            column_order: JSON.stringify(getColumnOrder()),
+            scan_extras: document.getElementById('chk-scan-extras')?.checked || false
         };
 
         try {

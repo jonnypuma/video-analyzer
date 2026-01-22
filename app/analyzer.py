@@ -299,7 +299,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_year ON videos (year)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_media_type ON videos (media_type)")
         
-        defaults = {'threads': '4', 'skip_words': 'trailer,sample', 'min_size_mb': '50', 'refresh_interval': '60', 'notif_style': 'modal', 'force_rescan': 'false', 'column_order': '', 'scan_folders': '[]'}
+        defaults = {'threads': '4', 'skip_words': 'trailer,sample', 'min_size_mb': '50', 'refresh_interval': '60', 'notif_style': 'modal', 'force_rescan': 'false', 'column_order': '', 'scan_folders': '[]', 'scan_extras': 'false'}
         for k, v in defaults.items(): conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
     log_debug("Database ready.")
@@ -534,7 +534,25 @@ def parse_kodi_nfo(nfo_path: str) -> dict:
         tree = ET.parse(nfo_path)
         root = tree.getroot()
     except (ET.ParseError, OSError, UnicodeDecodeError):
-        return {}
+        try:
+            with open(nfo_path, "rb") as f:
+                raw = f.read()
+            text = raw.decode("utf-8", errors="replace")
+            text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+            # Try parsing full text first
+            root = ET.fromstring(text)
+        except Exception:
+            try:
+                # Fallback: extract the first valid root block
+                for tag in ("movie", "tvshow", "episodedetails", "episode"):
+                    match = re.search(rf"<{tag}[\s\S]*?</{tag}>", text, re.IGNORECASE)
+                    if match:
+                        root = ET.fromstring(match.group(0))
+                        break
+                else:
+                    return {}
+            except Exception:
+                return {}
 
     def find_text(tag_name: str) -> str | None:
         target = tag_name.lower()
@@ -587,6 +605,7 @@ def parse_kodi_nfo(nfo_path: str) -> dict:
     else:
         data['show_title'] = find_any_text(['showtitle', 'tvshowtitle', 'seriesname', 'showname'])
         data['episode_title'] = find_text('title')
+        data['title'] = find_text('title')
         data['year'] = parse_year(find_text('premiered') or find_text('aired') or find_text('year'))
 
     return data
@@ -630,6 +649,22 @@ def find_kodi_nfo_candidates(file_path: str, media_type_hint: str | None) -> lis
     same_stem = file_path_obj.with_suffix('.nfo')
     if same_stem.exists():
         candidates.append(str(same_stem))
+    else:
+        try:
+            def normalize(name: str) -> str:
+                name = re.sub(r'[._]+', ' ', name)
+                name = re.sub(r'\s+', ' ', name).strip().lower()
+                return name
+            target_norm = normalize(file_path_obj.stem)
+            nfo_files = list(file_path_obj.parent.glob('*.nfo'))
+            for nfo in nfo_files:
+                if normalize(nfo.stem) == target_norm:
+                    candidates.append(str(nfo))
+                    break
+            if not candidates and len(nfo_files) == 1:
+                candidates.append(str(nfo_files[0]))
+        except OSError:
+            pass
     if media_type_hint == 'tv':
         # tvshow.nfo often lives in the series root (up to a few levels up)
         for parent in [file_path_obj.parent, file_path_obj.parent.parent, file_path_obj.parent.parent.parent]:
@@ -637,13 +672,25 @@ def find_kodi_nfo_candidates(file_path: str, media_type_hint: str | None) -> lis
             if tvshow_nfo.exists():
                 candidates.append(str(tvshow_nfo))
     else:
-        movie_nfo = file_path_obj.parent / 'movie.nfo'
-        if movie_nfo.exists():
-            candidates.append(str(movie_nfo))
+        # movie.nfo or folder-named .nfo can live a few levels up
+        for parent in [file_path_obj.parent, file_path_obj.parent.parent, file_path_obj.parent.parent.parent]:
+            movie_nfo = parent / 'movie.nfo'
+            if movie_nfo.exists():
+                candidates.append(str(movie_nfo))
+            folder_nfo = parent / f"{parent.name}.nfo"
+            if folder_nfo.exists():
+                candidates.append(str(folder_nfo))
         tvshow_nfo = file_path_obj.parent / 'tvshow.nfo'
         if tvshow_nfo.exists():
             candidates.append(str(tvshow_nfo))
-    return candidates
+    # Keep order but dedupe
+    seen = set()
+    ordered = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+    return ordered
 
 def guess_show_title_from_path(file_path: str) -> str | None:
     try:
@@ -846,7 +893,7 @@ def analyze_file_deep(path: str) -> dict:
                     result['show_title'] = nfo_data['show_title']
                 if not result['episode_title'] and nfo_data.get('episode_title'):
                     result['episode_title'] = nfo_data['episode_title']
-                if not result['movie_title'] and nfo_data.get('media_type') == 'movie' and nfo_data.get('title'):
+                if not result['movie_title'] and nfo_data.get('title') and (nfo_data.get('media_type') == 'movie' or result['media_type'] != 'tv'):
                     result['movie_title'] = nfo_data['title']
 
             if not result['show_title'] and result['media_type'] == 'tv':
@@ -1480,8 +1527,10 @@ def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dic
             result['season'] = nfo_data['season']
         if current.get('episode') is None and nfo_data.get('episode') is not None:
             result['episode'] = nfo_data['episode']
-        if not current.get('movie_title') and nfo_data.get('media_type') == 'movie' and nfo_data.get('title'):
-            result['movie_title'] = nfo_data['title']
+        if not current.get('movie_title') and nfo_data.get('title'):
+            media_type_val = current.get('media_type') or result.get('media_type')
+            if nfo_data.get('media_type') == 'movie' or media_type_val != 'tv':
+                result['movie_title'] = nfo_data['title']
 
     if not current.get('show_title') and (current.get('media_type') or result.get('media_type')) == 'tv':
         result['show_title'] = result.get('show_title') or guess_show_title_from_path(file_path)
@@ -1701,7 +1750,8 @@ def build_scan_paths_from_folders(scan_folders: list, target_vols: list | None, 
     return scan_paths, path_to_vol
 
 def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: dict, 
-                          skip_words: list, min_size: int, force_rescan: bool, start_time: float) -> tuple[list, set]:
+                          skip_words: list, min_size: int, force_rescan: bool, start_time: float,
+                          scan_extras: bool) -> tuple[list, set]:
     """
     Scan directories and collect files that need to be analyzed.
     
@@ -1747,7 +1797,26 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
                 dir_count += 1
                 if dir_count <= 10 or dir_count % 100 == 0:
                     log_debug(f"[CRAWL] [{current_vol}] Traversing directory {dir_count}: {root}", "INFO")
-                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                if not scan_extras:
+                    def should_skip_extras(parent_dir: str) -> bool:
+                        try:
+                            season_dir = re.compile(r'^(season[\s._-]*\d+|s\d{1,2})$', re.IGNORECASE)
+                            with os.scandir(parent_dir) as it:
+                                for entry in it:
+                                    name = entry.name
+                                    if entry.is_file():
+                                        if name.lower().endswith('.nfo'):
+                                            return True
+                                        if pathlib.Path(name).suffix.lower() in VIDEO_EXTENSIONS:
+                                            return True
+                                    elif entry.is_dir():
+                                        if season_dir.match(name):
+                                            return True
+                        except OSError:
+                            return False
+                        return False
+                    dirs[:] = [d for d in dirs if not (d.lower() == 'extras' and should_skip_extras(root))]
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
                 
                 for f in files:
                     ext = os.path.splitext(f)[1].lower()
@@ -2056,6 +2125,7 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
         
         skip_words = [w.strip().lower() for w in settings.get('skip_words', '').split(',') if w.strip()]
         min_size = int(settings.get('min_size_mb', 0)) * 1024 * 1024
+        scan_extras = str(settings.get('scan_extras', 'false')).lower() == 'true'
         
         log_debug(f"[STARTED] Scan started. Threads={final_threads}. Force={force_rescan}. Debug={DEBUG_MODE}", "INFO")
         
@@ -2087,7 +2157,7 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
                 if folder_paths:
                     scan_paths, path_to_vol = folder_paths, folder_map
         files_to_scan, all_found_files = collect_files_to_scan(scan_paths, path_to_vol, processed_map, 
-                                                               skip_words, min_size, force_rescan, start_time)
+                                                               skip_words, min_size, force_rescan, start_time, scan_extras)
         
         metrics = {"metrics_sum": {"bitrate": 0.0, "width": 0, "height": 0, "file_size": 0},
                    "metrics_count": {"bitrate": 0, "width": 0, "height": 0, "file_size": 0}}
@@ -2873,7 +2943,7 @@ def get_videos() -> Response:
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size', 'video_source': 'video_source', 'source_format': 'source_format', 'video_codec': 'video_codec', 'is_3d': 'is_3d', 'edition': 'edition', 'year': 'year', 'media_type': 'media_type', 'show_title': 'show_title', 'season': 'season', 'episode': 'episode', 'movie_title': 'movie_title', 'episode_title': 'episode_title', 'cll': 'max_cll', 'fall': 'max_fall'}
     db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
 
-    with get_db() as conn:
+    with get_db_readonly() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
         rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
         
@@ -3221,28 +3291,35 @@ def handle_settings() -> Response:
     """
     if request.method == 'POST':
         d = request.json
-        with get_db() as conn:
-            if 'mode' in d:
-                conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_mode', ?)", (d['mode'],))
-                conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_value', ?)", (d['value'],))
-                if scheduler: scheduler.remove_all_jobs()
-                if scheduler and d['mode'] == 'daily': h, m = d['value'].split(':'); scheduler.add_job(run_scan, 'cron', hour=h, minute=m)
-                elif scheduler and d['mode'] == 'interval': scheduler.add_job(run_scan, 'interval', hours=int(d['value']))
-            if 'threads' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('threads', ?)", (str(d['threads']),))
-            if 'skip_words' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('skip_words', ?)", (d['skip_words'],))
-            if 'min_size_mb' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('min_size_mb', ?)", (str(d['min_size_mb']),))
-            if 'log_limit' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_limit', ?)", (str(d['log_limit']),))
-            if 'refresh_interval' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('refresh_interval', ?)", (str(d['refresh_interval']),))
-            if 'visible_cols' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('visible_cols', ?)", (d['visible_cols'],))
-            if 'column_widths' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('column_widths', ?)", (d['column_widths'],))
-            if 'sort_order' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sort_order', ?)", (d['sort_order'],))
-            if 'notif_style' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('notif_style', ?)", (d['notif_style'],))
-            if 'batch_size' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('batch_size', ?)", (str(d['batch_size']),))
-            if 'rpu_fel_threshold' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('rpu_fel_threshold', ?)", (str(d['rpu_fel_threshold']),))
-            if 'force_rescan' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_rescan', ?)", (str(d['force_rescan']).lower(),))
-            if 'column_order' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('column_order', ?)", (d['column_order'],))
-            if 'scan_folders' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_folders', ?)", (d['scan_folders'],))
-        return jsonify({"status": "success"})
+        try:
+            with get_db() as conn:
+                if 'mode' in d:
+                    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_mode', ?)", (d['mode'],))
+                    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_value', ?)", (d['value'],))
+                    if scheduler: scheduler.remove_all_jobs()
+                    if scheduler and d['mode'] == 'daily': h, m = d['value'].split(':'); scheduler.add_job(run_scan, 'cron', hour=h, minute=m)
+                    elif scheduler and d['mode'] == 'interval': scheduler.add_job(run_scan, 'interval', hours=int(d['value']))
+                if 'threads' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('threads', ?)", (str(d['threads']),))
+                if 'skip_words' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('skip_words', ?)", (d['skip_words'],))
+                if 'min_size_mb' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('min_size_mb', ?)", (str(d['min_size_mb']),))
+                if 'log_limit' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_limit', ?)", (str(d['log_limit']),))
+                if 'refresh_interval' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('refresh_interval', ?)", (str(d['refresh_interval']),))
+                if 'visible_cols' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('visible_cols', ?)", (d['visible_cols'],))
+                if 'column_widths' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('column_widths', ?)", (d['column_widths'],))
+                if 'sort_order' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sort_order', ?)", (d['sort_order'],))
+                if 'notif_style' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('notif_style', ?)", (d['notif_style'],))
+                if 'batch_size' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('batch_size', ?)", (str(d['batch_size']),))
+                if 'rpu_fel_threshold' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('rpu_fel_threshold', ?)", (str(d['rpu_fel_threshold']),))
+                if 'force_rescan' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_rescan', ?)", (str(d['force_rescan']).lower(),))
+                if 'column_order' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('column_order', ?)", (d['column_order'],))
+                if 'scan_folders' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_folders', ?)", (d['scan_folders'],))
+                if 'scan_extras' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_extras', ?)", (str(d['scan_extras']).lower(),))
+            return jsonify({"status": "success"})
+        except Exception as e:
+            import traceback
+            log_debug(f"Settings save failed: {e}", "ERROR")
+            log_debug(traceback.format_exc(), "ERROR")
+            return jsonify({"status": "error", "message": str(e)}), 500
     else:
         with get_db() as conn: res = dict(conn.execute("SELECT key, value FROM settings").fetchall())
         return jsonify(res)
