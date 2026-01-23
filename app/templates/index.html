@@ -110,7 +110,10 @@
         #stat-duration { font-family: 'Consolas', 'Monaco', monospace; letter-spacing: -1px; }
 
         /* --- CONTROL STACK & BUTTON --- */
-        .control-stack { display: grid; grid-template-columns: auto 1fr; gap: 15px; margin-bottom: 20px; height: 62px; }
+        .control-stack {
+            display: grid; grid-template-columns: auto 1fr; gap: 15px; margin-bottom: 20px; height: 62px;
+            position: sticky; top: var(--sticky-action-top, 0px); z-index: 70; background: #0f0f0f;
+        }
         .action-panel, .automation-bar, #progress-container {
             height: 100%; display: flex; align-items: center; box-sizing: border-box;
             background: #0f0f0f; border: 1px solid #222; border-radius: 12px; padding: 0 10px;
@@ -690,7 +693,8 @@
         /* CAROUSEL */
         .controls-wrapper {
             display: flex; align-items: center; background: #1a1a1a; padding: 10px; 
-            border-radius: 12px; border: 1px solid #333; gap: 10px; margin-bottom: 10px;
+            border-radius: 12px; border: 1px solid #333; gap: 10px; margin-bottom: -1px;
+            position: sticky; top: var(--sticky-controls-top, 0px); z-index: 65;
         }
         .filter-carousel {
             display: flex; gap: 10px; overflow-x: auto; white-space: nowrap; scroll-behavior: smooth;
@@ -3193,28 +3197,63 @@
         const tableScroll = document.querySelector('.table-scroll');
         const table = document.querySelector('.table-scroll table');
         const thead = table ? table.querySelector('thead') : null;
+        const headerScrollbarPanel = document.getElementById('header-scrollbar-panel');
+        const colMenu = document.getElementById('colMenu');
         if (!tableWrap || !table || !thead) return;
 
         const headerHeight = thead.offsetHeight;
         const ribbon = document.querySelector('.summary-ribbon');
         const ribbonRect = ribbon ? ribbon.getBoundingClientRect() : null;
         const ribbonOffset = ribbonRect && ribbonRect.bottom > 0 ? Math.round(ribbonRect.height) : 0;
+        const actionBlock = document.querySelector('.control-stack');
+        const actionHeight = actionBlock ? actionBlock.offsetHeight : 0;
+        const controlsPanel = document.querySelector('.controls-wrapper');
+        const controlsHeight = controlsPanel ? controlsPanel.offsetHeight : 0;
+        const headerTop = Math.max(0, ribbonOffset + actionHeight + controlsHeight - 1);
+
+        document.documentElement.style.setProperty('--sticky-action-top', `${ribbonOffset}px`);
+        document.documentElement.style.setProperty('--sticky-controls-top', `${ribbonOffset + actionHeight}px`);
         const wrapRect = tableWrap.getBoundingClientRect();
+        const scrollRect = tableScroll ? tableScroll.getBoundingClientRect() : table.getBoundingClientRect();
         const tableRect = table.getBoundingClientRect();
-        const shouldStick = wrapRect.top <= ribbonOffset && wrapRect.bottom > headerHeight + ribbonOffset;
+        const shouldStick = wrapRect.top <= headerTop && wrapRect.bottom > headerHeight + headerTop;
 
         if (shouldStick) {
             tableWrap.classList.add('sticky-active');
             thead.style.position = 'fixed';
-            thead.style.top = `${ribbonOffset}px`;
-            thead.style.left = `${tableRect.left}px`;
-            thead.style.width = `${tableRect.width}px`;
-            thead.style.zIndex = '40';
+            thead.style.top = `${headerTop}px`;
+            const scrollLeft = tableScroll ? tableScroll.scrollLeft : 0;
+            thead.style.left = `${scrollRect.left}px`;
+            thead.style.width = `${scrollRect.width}px`;
+            thead.style.zIndex = '45';
             thead.style.background = '#111';
-            if (tableScroll) {
-                thead.style.transform = `translateX(-${tableScroll.scrollLeft}px)`;
-            }
+            thead.style.transform = `translateX(-${scrollLeft}px)`;
+            thead.style.overflow = 'hidden';
             table.style.paddingTop = `${headerHeight}px`;
+            const delHeader = thead.querySelector('th.col-del');
+            if (delHeader) {
+                delHeader.style.position = 'absolute';
+                delHeader.style.top = '0';
+                delHeader.style.right = '0';
+                delHeader.style.left = '';
+                delHeader.style.zIndex = '50';
+                delHeader.style.background = '#111';
+            }
+            if (colMenu) {
+                colMenu.style.position = 'fixed';
+                colMenu.style.top = `${headerTop}px`;
+                colMenu.style.left = `${scrollRect.left}px`;
+                colMenu.style.width = `${Math.max(0, scrollRect.width - 40)}px`;
+                colMenu.style.right = '';
+                colMenu.style.zIndex = '55';
+            }
+            if (headerScrollbarPanel) {
+                headerScrollbarPanel.style.position = 'fixed';
+                headerScrollbarPanel.style.top = `${headerTop + headerHeight}px`;
+                headerScrollbarPanel.style.left = `${scrollRect.left}px`;
+                headerScrollbarPanel.style.width = `${scrollRect.width}px`;
+                headerScrollbarPanel.style.zIndex = '39';
+            }
         } else {
             tableWrap.classList.remove('sticky-active');
             thead.style.position = '';
@@ -3224,7 +3263,34 @@
             thead.style.zIndex = '';
             thead.style.background = '';
             thead.style.transform = '';
+            thead.style.overflow = '';
             table.style.paddingTop = '';
+            const delHeader = thead.querySelector('th.col-del');
+            if (delHeader) {
+                delHeader.style.position = '';
+                delHeader.style.top = '';
+                delHeader.style.right = '';
+                delHeader.style.left = '';
+                delHeader.style.zIndex = '';
+                delHeader.style.background = '';
+            }
+            if (colMenu) {
+                colMenu.style.position = '';
+                colMenu.style.top = '';
+                colMenu.style.left = '';
+                colMenu.style.width = '';
+                colMenu.style.right = '';
+                colMenu.style.zIndex = '';
+            }
+            if (headerScrollbarPanel) {
+                headerScrollbarPanel.style.position = '';
+                headerScrollbarPanel.style.top = '';
+                headerScrollbarPanel.style.left = '';
+                headerScrollbarPanel.style.width = '';
+                headerScrollbarPanel.style.zIndex = '';
+                headerScrollbarPanel.style.display = '';
+            }
+            setTimeout(() => syncHeaderScrollbar(), 0);
         }
     }
 
