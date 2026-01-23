@@ -265,7 +265,10 @@ def init_db() -> None:
                          last_scanned TEXT, resolution TEXT, bitrate_mbps REAL, scan_error TEXT,
                          is_hybrid INTEGER DEFAULT 0, secondary_hdr TEXT,
                          width INTEGER, height INTEGER, file_size INTEGER, bl_compatibility_id TEXT,
-                         audio_codecs TEXT, audio_langs TEXT, audio_channels TEXT, subtitles TEXT, max_cll TEXT, max_fall TEXT,
+                        audio_codecs TEXT, audio_langs TEXT, audio_channels TEXT, subtitles TEXT, max_cll TEXT, max_fall TEXT,
+                        fps REAL, aspect_ratio TEXT,
+                        imdb_id TEXT, tvdb_id TEXT, tmdb_id TEXT, rotten_id TEXT, metacritic_id TEXT, trakt_id TEXT,
+                        imdb_rating REAL, tvdb_rating REAL, tmdb_rating REAL, rotten_rating REAL, metacritic_rating REAL, trakt_rating REAL,
                          scan_attempts INTEGER DEFAULT 0,
                          video_source TEXT, source_format TEXT, video_codec TEXT, is_3d INTEGER DEFAULT 0, edition TEXT, year INTEGER,
                          media_type TEXT, show_title TEXT, season INTEGER, episode INTEGER, movie_title TEXT, episode_title TEXT,
@@ -276,6 +279,9 @@ def init_db() -> None:
             required_cols = {
                 'audio_codecs': 'TEXT', 'audio_langs': 'TEXT', 'audio_channels': 'TEXT', 'subtitles': 'TEXT', 
                 'max_cll': 'TEXT', 'max_fall': 'TEXT', 'scan_attempts': 'INTEGER DEFAULT 0',
+                'fps': 'REAL', 'aspect_ratio': 'TEXT',
+                'imdb_id': 'TEXT', 'tvdb_id': 'TEXT', 'tmdb_id': 'TEXT', 'rotten_id': 'TEXT', 'metacritic_id': 'TEXT', 'trakt_id': 'TEXT',
+                'imdb_rating': 'REAL', 'tvdb_rating': 'REAL', 'tmdb_rating': 'REAL', 'rotten_rating': 'REAL', 'metacritic_rating': 'REAL', 'trakt_rating': 'REAL',
                 'video_source': 'TEXT', 'source_format': 'TEXT', 'video_codec': 'TEXT', 
                 'is_3d': 'INTEGER DEFAULT 0', 'edition': 'TEXT', 'year': 'INTEGER',
                 'media_type': 'TEXT', 'show_title': 'TEXT', 'season': 'INTEGER', 'episode': 'INTEGER',
@@ -584,6 +590,51 @@ def parse_kodi_nfo(nfo_path: str) -> dict:
         except ValueError:
             return None
 
+    def parse_rating_text(text: str | None) -> float | None:
+        if not text:
+            return None
+        match = re.search(r'(\d+(?:\.\d+)?)', text)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    def find_uniqueid(unique_type: str) -> str | None:
+        for node in root.iter():
+            if node.tag.split('}')[-1].lower() != 'uniqueid':
+                continue
+            if node.attrib.get('type', '').lower() == unique_type.lower() and node.text:
+                return node.text.strip()
+        return None
+
+    def apply_ratings_block(data: dict) -> None:
+        for node in root.iter():
+            if node.tag.split('}')[-1].lower() != 'rating':
+                continue
+            name = (node.attrib.get('name') or '').lower()
+            value_node = None
+            for child in node:
+                if child.tag.split('}')[-1].lower() == 'value':
+                    value_node = child
+                    break
+            rating_val = parse_rating_text(value_node.text.strip() if value_node is not None and value_node.text else None)
+            if rating_val is None:
+                continue
+            if name == 'imdb':
+                data['imdb_rating'] = rating_val
+            elif name in ('themoviedb', 'tmdb'):
+                data['tmdb_rating'] = rating_val
+            elif name == 'tvdb':
+                data['tvdb_rating'] = rating_val
+            elif name == 'trakt':
+                data['trakt_rating'] = rating_val
+            elif name in ('rottentomatoes', 'rotten'):
+                data['rotten_rating'] = rating_val
+            elif name == 'metacritic':
+                data['metacritic_rating'] = rating_val
+
     tag = (root.tag or '').lower()
     data: dict[str, Any] = {}
 
@@ -598,19 +649,47 @@ def parse_kodi_nfo(nfo_path: str) -> dict:
         if episode_text and episode_text.isdigit():
             data['episode'] = int(episode_text)
         data['year'] = parse_year(find_text('premiered') or find_text('aired') or find_text('year'))
+        data['imdb_id'] = find_uniqueid('imdb') or find_text('imdbid')
+        data['tvdb_id'] = find_uniqueid('tvdb') or find_text('tvdbid')
+        data['tmdb_id'] = find_uniqueid('tmdb') or find_text('tmdbid')
+        data['trakt_id'] = find_uniqueid('trakt') or find_text('traktid')
+        data['rotten_id'] = find_any_text(['rottentomatoesid', 'rottentomatoes', 'rottenid', 'rottentomatoes_id'])
+        data['metacritic_id'] = find_any_text(['metacriticid', 'metacritic', 'metacritic_id'])
+        apply_ratings_block(data)
     elif tag == 'tvshow':
         data['media_type'] = 'tv'
         data['show_title'] = find_any_text(['title', 'showtitle', 'tvshowtitle', 'seriesname', 'showname'])
         data['year'] = parse_year(find_text('premiered') or find_text('year'))
+        data['imdb_id'] = find_uniqueid('imdb') or find_text('imdbid')
+        data['tvdb_id'] = find_uniqueid('tvdb') or find_text('tvdbid')
+        data['tmdb_id'] = find_uniqueid('tmdb') or find_text('tmdbid')
+        data['trakt_id'] = find_uniqueid('trakt') or find_text('traktid')
+        data['rotten_id'] = find_any_text(['rottentomatoesid', 'rottentomatoes', 'rottenid', 'rottentomatoes_id'])
+        data['metacritic_id'] = find_any_text(['metacriticid', 'metacritic', 'metacritic_id'])
+        apply_ratings_block(data)
     elif tag == 'movie':
         data['media_type'] = 'movie'
         data['title'] = find_text('title')
         data['year'] = parse_year(find_text('year') or find_text('premiered') or find_text('releasedate'))
+        data['imdb_id'] = find_uniqueid('imdb') or find_text('imdbid')
+        data['tvdb_id'] = find_uniqueid('tvdb') or find_text('tvdbid')
+        data['tmdb_id'] = find_uniqueid('tmdb') or find_text('tmdbid')
+        data['trakt_id'] = find_uniqueid('trakt') or find_text('traktid')
+        data['rotten_id'] = find_any_text(['rottentomatoesid', 'rottentomatoes', 'rottenid', 'rottentomatoes_id'])
+        data['metacritic_id'] = find_any_text(['metacriticid', 'metacritic', 'metacritic_id'])
+        apply_ratings_block(data)
     else:
         data['show_title'] = find_any_text(['showtitle', 'tvshowtitle', 'seriesname', 'showname'])
         data['episode_title'] = find_text('title')
         data['title'] = find_text('title')
         data['year'] = parse_year(find_text('premiered') or find_text('aired') or find_text('year'))
+        data['imdb_id'] = find_uniqueid('imdb') or find_text('imdbid')
+        data['tvdb_id'] = find_uniqueid('tvdb') or find_text('tvdbid')
+        data['tmdb_id'] = find_uniqueid('tmdb') or find_text('tmdbid')
+        data['trakt_id'] = find_uniqueid('trakt') or find_text('traktid')
+        data['rotten_id'] = find_any_text(['rottentomatoesid', 'rottentomatoes', 'rottenid', 'rottentomatoes_id'])
+        data['metacritic_id'] = find_any_text(['metacriticid', 'metacritic', 'metacritic_id'])
+        apply_ratings_block(data)
 
     return data
 
@@ -816,6 +895,9 @@ def analyze_file_deep(path: str) -> dict:
         'is_hybrid': 0, 'error': None,
         'audio_codecs': [], 'audio_langs': [], 'audio_channels': [], 'subtitles': [], 
         'max_cll': None, 'max_fall': None,
+        'fps': None, 'aspect_ratio': None,
+        'imdb_id': None, 'tvdb_id': None, 'tmdb_id': None, 'rotten_id': None, 'metacritic_id': None, 'trakt_id': None,
+        'imdb_rating': None, 'tvdb_rating': None, 'tmdb_rating': None, 'rotten_rating': None, 'metacritic_rating': None, 'trakt_rating': None,
         'video_source': None, 'source_format': None, 'video_codec': None, 
         'is_3d': 0, 'edition': None, 'year': None,
         'media_type': None, 'show_title': None, 'season': None, 'episode': None, 'movie_title': None, 'episode_title': None
@@ -875,6 +957,30 @@ def analyze_file_deep(path: str) -> dict:
         elif width >= 1900 or height >= 1000: result['resolution'] = "1080p"
         elif width >= 1200 or height >= 700: result['resolution'] = "720p"
         else: result['resolution'] = "SD"
+
+        dar = video_stream.get('display_aspect_ratio')
+        if isinstance(dar, str) and ':' in dar:
+            try:
+                num, den = dar.split(':', 1)
+                num_val = float(num)
+                den_val = float(den)
+                if den_val:
+                    result['aspect_ratio'] = f"{(num_val / den_val):.2f}".rstrip('0').rstrip('.')
+            except (ValueError, ZeroDivisionError):
+                pass
+        if not result.get('aspect_ratio') and width and height:
+            result['aspect_ratio'] = f"{(width / height):.2f}".rstrip('0').rstrip('.')
+
+        fps_raw = video_stream.get('avg_frame_rate') or video_stream.get('r_frame_rate')
+        if fps_raw and isinstance(fps_raw, str) and '/' in fps_raw:
+            try:
+                num, den = fps_raw.split('/', 1)
+                num_val = float(num)
+                den_val = float(den)
+                if den_val:
+                    result['fps'] = round(num_val / den_val, 3)
+            except (ValueError, ZeroDivisionError):
+                pass
         
         bit_raw = video_stream.get('bit_rate') or probe_data.get('format', {}).get('bit_rate')
         if bit_raw: result['bitrate'] = round(int(bit_raw) / 1_000_000, 2)
@@ -915,6 +1021,30 @@ def analyze_file_deep(path: str) -> dict:
                     result['show_title'] = nfo_data['show_title']
                 if not result['episode_title'] and nfo_data.get('episode_title'):
                     result['episode_title'] = nfo_data['episode_title']
+                if not result.get('imdb_id') and nfo_data.get('imdb_id'):
+                    result['imdb_id'] = nfo_data['imdb_id']
+                if not result.get('tvdb_id') and nfo_data.get('tvdb_id'):
+                    result['tvdb_id'] = nfo_data['tvdb_id']
+                if not result.get('tmdb_id') and nfo_data.get('tmdb_id'):
+                    result['tmdb_id'] = nfo_data['tmdb_id']
+                if not result.get('rotten_id') and nfo_data.get('rotten_id'):
+                    result['rotten_id'] = nfo_data['rotten_id']
+                if not result.get('metacritic_id') and nfo_data.get('metacritic_id'):
+                    result['metacritic_id'] = nfo_data['metacritic_id']
+                if not result.get('trakt_id') and nfo_data.get('trakt_id'):
+                    result['trakt_id'] = nfo_data['trakt_id']
+                if result.get('imdb_rating') is None and nfo_data.get('imdb_rating') is not None:
+                    result['imdb_rating'] = nfo_data['imdb_rating']
+                if result.get('tvdb_rating') is None and nfo_data.get('tvdb_rating') is not None:
+                    result['tvdb_rating'] = nfo_data['tvdb_rating']
+                if result.get('tmdb_rating') is None and nfo_data.get('tmdb_rating') is not None:
+                    result['tmdb_rating'] = nfo_data['tmdb_rating']
+                if result.get('rotten_rating') is None and nfo_data.get('rotten_rating') is not None:
+                    result['rotten_rating'] = nfo_data['rotten_rating']
+                if result.get('metacritic_rating') is None and nfo_data.get('metacritic_rating') is not None:
+                    result['metacritic_rating'] = nfo_data['metacritic_rating']
+                if result.get('trakt_rating') is None and nfo_data.get('trakt_rating') is not None:
+                    result['trakt_rating'] = nfo_data['trakt_rating']
                 if not result['movie_title'] and nfo_data.get('title') and (nfo_data.get('media_type') == 'movie' or result['media_type'] != 'tv'):
                     result['movie_title'] = nfo_data['title']
 
@@ -1335,6 +1465,9 @@ def _create_error_result(error_msg: str) -> dict:
         'is_hybrid': 0, 'error': error_msg,
         'audio_codecs': [], 'audio_langs': [], 'audio_channels': [], 'subtitles': [], 
         'max_cll': None, 'max_fall': None,
+        'fps': None, 'aspect_ratio': None,
+        'imdb_id': None, 'tvdb_id': None, 'tmdb_id': None, 'rotten_id': None, 'metacritic_id': None, 'trakt_id': None,
+        'imdb_rating': None, 'tvdb_rating': None, 'tmdb_rating': None, 'rotten_rating': None, 'metacritic_rating': None, 'trakt_rating': None,
         'video_source': None, 'source_format': None, 'video_codec': None,
         'is_3d': 0, 'edition': None, 'year': None,
         'media_type': None, 'show_title': None, 'season': None, 'episode': None, 'movie_title': None, 'episode_title': None
@@ -1402,6 +1535,9 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
                 "height": 0, "file_size": 0,
                 "bl_compatibility_id": None,
                 "audio_codecs": [], "audio_langs": [], "audio_channels": [], "subtitles": [], "max_cll": None, "max_fall": None,
+                "fps": None, "aspect_ratio": None,
+                "imdb_id": None, "tvdb_id": None, "tmdb_id": None, "rotten_id": None, "metacritic_id": None, "trakt_id": None,
+                "imdb_rating": None, "tvdb_rating": None, "tmdb_rating": None, "rotten_rating": None, "metacritic_rating": None, "trakt_rating": None,
                 "scan_attempts": 0,
                 "video_source": None, "source_format": None, "video_codec": None,
                 "is_3d": 0, "edition": None, "year": None, "media_type": None,
@@ -1422,6 +1558,9 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
                 "height": 0, "file_size": 0,
                 "bl_compatibility_id": None,
                 "audio_codecs": [], "audio_langs": [], "audio_channels": [], "subtitles": [], "max_cll": None, "max_fall": None,
+                "fps": None, "aspect_ratio": None,
+                "imdb_id": None, "tvdb_id": None, "tmdb_id": None, "rotten_id": None, "metacritic_id": None, "trakt_id": None,
+                "imdb_rating": None, "tvdb_rating": None, "tmdb_rating": None, "rotten_rating": None, "metacritic_rating": None, "trakt_rating": None,
                 "scan_attempts": 0,
                 "video_source": None, "source_format": None, "video_codec": None,
                 "is_3d": 0, "edition": None, "year": None, "media_type": None,
@@ -1441,6 +1580,9 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
             "height": 0, "file_size": 0,
             "bl_compatibility_id": None,
             "audio_codecs": [], "audio_langs": [], "audio_channels": [], "subtitles": [], "max_cll": None, "max_fall": None,
+            "fps": None, "aspect_ratio": None,
+            "imdb_id": None, "tvdb_id": None, "tmdb_id": None, "rotten_id": None, "metacritic_id": None, "trakt_id": None,
+            "imdb_rating": None, "tvdb_rating": None, "tmdb_rating": None, "rotten_rating": None, "metacritic_rating": None, "trakt_rating": None,
             "scan_attempts": 0,
             "video_source": None, "source_format": None, "video_codec": None,
             "is_3d": 0, "edition": None, "year": None, "media_type": None,
@@ -1518,6 +1660,11 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
         "bl_compatibility_id": meta['bl_compatibility_id'],
         "audio_codecs": meta['audio_codecs'], "audio_langs": meta['audio_langs'], "audio_channels": meta['audio_channels'],
         "subtitles": meta['subtitles'], "max_cll": meta['max_cll'], "max_fall": meta['max_fall'],
+        "fps": meta.get('fps'), "aspect_ratio": meta.get('aspect_ratio'),
+        "imdb_id": meta.get('imdb_id'), "tvdb_id": meta.get('tvdb_id'), "tmdb_id": meta.get('tmdb_id'),
+        "rotten_id": meta.get('rotten_id'), "metacritic_id": meta.get('metacritic_id'), "trakt_id": meta.get('trakt_id'),
+        "imdb_rating": meta.get('imdb_rating'), "tvdb_rating": meta.get('tvdb_rating'), "tmdb_rating": meta.get('tmdb_rating'),
+        "rotten_rating": meta.get('rotten_rating'), "metacritic_rating": meta.get('metacritic_rating'), "trakt_rating": meta.get('trakt_rating'),
         "scan_attempts": 0,  # Will be updated in run_scan based on previous attempts
         "video_source": meta['video_source'], "source_format": meta['source_format'], "video_codec": meta['video_codec'],
         "is_3d": meta['is_3d'], "edition": meta['edition'], "year": meta['year'],
@@ -1564,6 +1711,12 @@ def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dic
             media_type_val = current.get('media_type') or result.get('media_type')
             if nfo_data.get('media_type') == 'movie' or media_type_val != 'tv':
                 result['movie_title'] = nfo_data['title']
+        for key in (
+            'imdb_id', 'tvdb_id', 'tmdb_id', 'rotten_id', 'metacritic_id', 'trakt_id',
+            'imdb_rating', 'tvdb_rating', 'tmdb_rating', 'rotten_rating', 'metacritic_rating', 'trakt_rating'
+        ):
+            if current.get(key) is None and nfo_data.get(key) is not None:
+                result[key] = nfo_data[key]
 
     if not current.get('show_title') and (current.get('media_type') or result.get('media_type')) == 'tv':
         result['show_title'] = result.get('show_title') or guess_show_title_from_path(file_path)
@@ -1646,10 +1799,16 @@ def save_batch_to_db(data_list: list) -> None:
             conn.executemany("""INSERT OR REPLACE INTO videos 
                 (filename, category, profile, el_type, container, source_vol, full_path, last_scanned, 
                  resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, 
-                 file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, validation_flag) 
+                 file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio,
+                 imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id,
+                 imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating,
+                 scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, validation_flag) 
                 VALUES (:filename, :category, :profile, :el_type, :container, :source_vol, :full_path, :last_scanned, 
                  :resolution, :bitrate_mbps, :scan_error, :is_hybrid, :secondary_hdr, :width, :height, 
-                 :file_size, :bl_compatibility_id, :audio_codecs, :audio_langs, :audio_channels, :subtitles, :max_cll, :max_fall, :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :validation_flag)""", sanitized_list)
+                 :file_size, :bl_compatibility_id, :audio_codecs, :audio_langs, :audio_channels, :subtitles, :max_cll, :max_fall, :fps, :aspect_ratio,
+                 :imdb_id, :tvdb_id, :tmdb_id, :rotten_id, :metacritic_id, :trakt_id,
+                 :imdb_rating, :tvdb_rating, :tmdb_rating, :rotten_rating, :metacritic_rating, :trakt_rating,
+                 :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :validation_flag)""", sanitized_list)
             if DEBUG_MODE:
                 for item in sanitized_list:
                     log_debug(f"Saved to DB: {item['filename']} -> {item['category']} {item['profile']} (error: {item.get('scan_error', 'None')})", "DEBUG")
@@ -2719,9 +2878,9 @@ def download_csv() -> Response:
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size'}
     db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
     with get_db() as conn:
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
+        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
     si = io.StringIO()
-    csv.writer(si).writerows([['Filename', 'Cat', 'Prof', 'EL', 'Cont', 'Vol', 'Path', 'Date', 'Res', 'Bitrate', 'Error', 'Hybrid', 'SecHDR', 'Width', 'Height', 'Size', 'BL_ID', 'Audio', 'AudioCh', 'Subs', 'MaxCLL']] + list(rows))
+    csv.writer(si).writerows([['Filename', 'Cat', 'Prof', 'EL', 'Cont', 'Vol', 'Path', 'Date', 'Res', 'Bitrate', 'Error', 'Hybrid', 'SecHDR', 'Width', 'Height', 'Size', 'BL_ID', 'Audio', 'AudioCh', 'Subs', 'MaxCLL', 'FPS', 'Aspect', 'IMDB_ID', 'TVDB_ID', 'TMDB_ID', 'Rotten_ID', 'Metacritic_ID', 'Trakt_ID', 'IMDB_Rating', 'TVDB_Rating', 'TMDB_Rating', 'Rotten_Rating', 'Metacritic_Rating', 'Trakt_Rating']] + list(rows))
     return make_response(si.getvalue(), 200, {"Content-Disposition": "attachment; filename=media_export.csv", "Content-type": "text/csv"})
 
 @app.route('/download_json')
@@ -2739,7 +2898,7 @@ def download_json() -> Response:
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size'}
     db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
     with get_db() as conn:
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
+        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
     
     # Convert rows to list of dictionaries
     data = []
@@ -2750,7 +2909,9 @@ def download_json() -> Response:
             'resolution': row[8], 'bitrate_mbps': row[9], 'scan_error': row[10], 'is_hybrid': row[11],
             'secondary_hdr': row[12], 'width': row[13], 'height': row[14], 'file_size': row[15],
             'bl_compatibility_id': row[16], 'audio_codecs': row[17], 'audio_channels': row[18], 'subtitles': row[19],
-            'max_cll': row[20], 'max_fall': row[21]
+            'max_cll': row[20], 'max_fall': row[21], 'fps': row[22], 'aspect_ratio': row[23],
+            'imdb_id': row[24], 'tvdb_id': row[25], 'tmdb_id': row[26], 'rotten_id': row[27], 'metacritic_id': row[28], 'trakt_id': row[29],
+            'imdb_rating': row[30], 'tvdb_rating': row[31], 'tmdb_rating': row[32], 'rotten_rating': row[33], 'metacritic_rating': row[34], 'trakt_rating': row[35]
         })
     
     json_str = json.dumps(data, indent=2, ensure_ascii=False)
@@ -3017,7 +3178,7 @@ def get_videos() -> Response:
 
     with get_db_readonly() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
+        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
         
         stats_total_raw = conn.execute("SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, secondary_hdr FROM videos").fetchall()
         stats_filtered_raw = conn.execute(f"SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, secondary_hdr FROM videos WHERE {main_where}", main_params).fetchall()
@@ -3237,13 +3398,23 @@ def backfill_metadata() -> Response:
         updated = 0
         with get_db() as conn:
             rows = conn.execute(
-                """SELECT full_path, filename, media_type, show_title, episode_title, season, episode, movie_title, year
+                """SELECT full_path, filename, media_type, show_title, episode_title, season, episode, movie_title, year,
+                          imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id,
+                          imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating
                    FROM videos
                    WHERE media_type IS NULL OR media_type = ''
                       OR show_title IS NULL OR show_title = ''
                       OR episode_title IS NULL OR episode_title = ''
                       OR movie_title IS NULL OR movie_title = ''
-                      OR season IS NULL OR episode IS NULL OR year IS NULL"""
+                      OR season IS NULL OR episode IS NULL OR year IS NULL
+                      OR imdb_id IS NULL OR imdb_id = ''
+                      OR tvdb_id IS NULL OR tvdb_id = ''
+                      OR tmdb_id IS NULL OR tmdb_id = ''
+                      OR rotten_id IS NULL OR rotten_id = ''
+                      OR metacritic_id IS NULL OR metacritic_id = ''
+                      OR trakt_id IS NULL OR trakt_id = ''
+                      OR imdb_rating IS NULL OR tvdb_rating IS NULL OR tmdb_rating IS NULL
+                      OR rotten_rating IS NULL OR metacritic_rating IS NULL OR trakt_rating IS NULL"""
             ).fetchall()
             total = len(rows)
             with progress_lock:
@@ -3265,7 +3436,19 @@ def backfill_metadata() -> Response:
                     'season': row['season'],
                     'episode': row['episode'],
                     'movie_title': row['movie_title'],
-                    'year': row['year']
+                    'year': row['year'],
+                    'imdb_id': row['imdb_id'],
+                    'tvdb_id': row['tvdb_id'],
+                    'tmdb_id': row['tmdb_id'],
+                    'rotten_id': row['rotten_id'],
+                    'metacritic_id': row['metacritic_id'],
+                    'trakt_id': row['trakt_id'],
+                    'imdb_rating': row['imdb_rating'],
+                    'tvdb_rating': row['tvdb_rating'],
+                    'tmdb_rating': row['tmdb_rating'],
+                    'rotten_rating': row['rotten_rating'],
+                    'metacritic_rating': row['metacritic_rating'],
+                    'trakt_rating': row['trakt_rating']
                 }
                 updates = build_backfill_metadata(row['full_path'], row['filename'], current)
                 if not updates:
@@ -3281,6 +3464,18 @@ def backfill_metadata() -> Response:
                 new_episode = updates.get('episode', current.get('episode'))
                 new_movie_title = updates.get('movie_title', current.get('movie_title'))
                 new_year = updates.get('year', current.get('year'))
+                new_imdb_id = updates.get('imdb_id', current.get('imdb_id'))
+                new_tvdb_id = updates.get('tvdb_id', current.get('tvdb_id'))
+                new_tmdb_id = updates.get('tmdb_id', current.get('tmdb_id'))
+                new_rotten_id = updates.get('rotten_id', current.get('rotten_id'))
+                new_metacritic_id = updates.get('metacritic_id', current.get('metacritic_id'))
+                new_trakt_id = updates.get('trakt_id', current.get('trakt_id'))
+                new_imdb_rating = updates.get('imdb_rating', current.get('imdb_rating'))
+                new_tvdb_rating = updates.get('tvdb_rating', current.get('tvdb_rating'))
+                new_tmdb_rating = updates.get('tmdb_rating', current.get('tmdb_rating'))
+                new_rotten_rating = updates.get('rotten_rating', current.get('rotten_rating'))
+                new_metacritic_rating = updates.get('metacritic_rating', current.get('metacritic_rating'))
+                new_trakt_rating = updates.get('trakt_rating', current.get('trakt_rating'))
                 validation_flag = compute_validation_flag({
                     "media_type": new_media_type,
                     "show_title": new_show_title,
@@ -3290,7 +3485,7 @@ def backfill_metadata() -> Response:
                     "episode": new_episode
                 })
                 conn.execute(
-                    "UPDATE videos SET media_type=?, show_title=?, episode_title=?, season=?, episode=?, movie_title=?, year=?, validation_flag=? WHERE full_path=?",
+                    "UPDATE videos SET media_type=?, show_title=?, episode_title=?, season=?, episode=?, movie_title=?, year=?, imdb_id=?, tvdb_id=?, tmdb_id=?, rotten_id=?, metacritic_id=?, trakt_id=?, imdb_rating=?, tvdb_rating=?, tmdb_rating=?, rotten_rating=?, metacritic_rating=?, trakt_rating=?, validation_flag=? WHERE full_path=?",
                     (
                         new_media_type,
                         new_show_title,
@@ -3299,6 +3494,18 @@ def backfill_metadata() -> Response:
                         new_episode,
                         new_movie_title,
                         new_year,
+                        new_imdb_id,
+                        new_tvdb_id,
+                        new_tmdb_id,
+                        new_rotten_id,
+                        new_metacritic_id,
+                        new_trakt_id,
+                        new_imdb_rating,
+                        new_tvdb_rating,
+                        new_tmdb_rating,
+                        new_rotten_rating,
+                        new_metacritic_rating,
+                        new_trakt_rating,
                         validation_flag,
                         row['full_path']
                     )

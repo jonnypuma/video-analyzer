@@ -349,6 +349,19 @@
         .hide-col-episode .col-episode { display: none; }
         .hide-col-movie-title .col-movie-title { display: none; }
         .hide-col-episode-title .col-episode-title { display: none; }
+        .hide-col-aspect .col-aspect { display: none; }
+        .hide-col-imdb-id .col-imdb-id { display: none; }
+        .hide-col-tvdb-id .col-tvdb-id { display: none; }
+        .hide-col-tmdb-id .col-tmdb-id { display: none; }
+        .hide-col-rotten-id .col-rotten-id { display: none; }
+        .hide-col-metacritic-id .col-metacritic-id { display: none; }
+        .hide-col-trakt-id .col-trakt-id { display: none; }
+        .hide-col-imdb-rating .col-imdb-rating { display: none; }
+        .hide-col-tvdb-rating .col-tvdb-rating { display: none; }
+        .hide-col-tmdb-rating .col-tmdb-rating { display: none; }
+        .hide-col-rotten-rating .col-rotten-rating { display: none; }
+        .hide-col-metacritic-rating .col-metacritic-rating { display: none; }
+        .hide-col-trakt-rating .col-trakt-rating { display: none; }
         
         .col-audio { width: 10%; }
         .col-audio-ch { width: 4%; }
@@ -369,6 +382,9 @@
         .col-episode { width: 4%; }
         .col-movie-title { width: 10%; }
         .col-episode-title { width: 10%; }
+        .col-aspect { width: 4%; }
+        .col-imdb-id, .col-tvdb-id, .col-tmdb-id, .col-rotten-id, .col-metacritic-id, .col-trakt-id { width: 6%; }
+        .col-imdb-rating, .col-tvdb-rating, .col-tmdb-rating, .col-rotten-rating, .col-metacritic-rating, .col-trakt-rating { width: 5%; }
         td.col-cll, td.col-fall { font-family: monospace; }
 
         /* Column Menu */
@@ -1386,6 +1402,20 @@
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-episode" onclick="toggleCol(this)"> Episode</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-movie-title" onclick="toggleCol(this)"> Movie Title</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-episode-title" onclick="toggleCol(this)"> Episode Title</div>
+                <div style="width:1px; height:15px; background:#444; margin:0 5px;"></div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-aspect" onclick="toggleCol(this)"> Aspect</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-imdb-id" onclick="toggleCol(this)"> IMDb ID</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tvdb-id" onclick="toggleCol(this)"> TVDB ID</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tmdb-id" onclick="toggleCol(this)"> TMDB ID</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-rotten-id" onclick="toggleCol(this)"> Rotten ID</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-metacritic-id" onclick="toggleCol(this)"> Metacritic ID</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-trakt-id" onclick="toggleCol(this)"> Trakt ID</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-imdb-rating" onclick="toggleCol(this)"> IMDb Rt</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tvdb-rating" onclick="toggleCol(this)"> TVDB Rt</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tmdb-rating" onclick="toggleCol(this)"> TMDB Rt</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-rotten-rating" onclick="toggleCol(this)"> Rotten Rt</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-metacritic-rating" onclick="toggleCol(this)"> Meta Rt</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-trakt-rating" onclick="toggleCol(this)"> Trakt Rt</div>
                 </div>
 
                 <div class="col-menu-right-panel">
@@ -1837,6 +1867,71 @@
                             <div class="th-header-row">
                                 <span>Episode Title</span>
                                 <span id="sort-episode_title" class="sort-icon"></span>
+                            </div>
+                        </th>
+                        <th class="col-aspect hide-col-aspect td-center" title="Aspect Ratio">
+                            <div class="th-header-row">
+                                <span>Aspect</span>
+                            </div>
+                        </th>
+                        <th class="col-imdb-id hide-col-imdb-id td-center" title="IMDb ID">
+                            <div class="th-header-row">
+                                <span>IMDb ID</span>
+                            </div>
+                        </th>
+                        <th class="col-tvdb-id hide-col-tvdb-id td-center" title="TVDB ID">
+                            <div class="th-header-row">
+                                <span>TVDB ID</span>
+                            </div>
+                        </th>
+                        <th class="col-tmdb-id hide-col-tmdb-id td-center" title="TMDB ID">
+                            <div class="th-header-row">
+                                <span>TMDB ID</span>
+                            </div>
+                        </th>
+                        <th class="col-rotten-id hide-col-rotten-id td-center" title="Rotten Tomatoes ID">
+                            <div class="th-header-row">
+                                <span>Rotten ID</span>
+                            </div>
+                        </th>
+                        <th class="col-metacritic-id hide-col-metacritic-id td-center" title="Metacritic ID">
+                            <div class="th-header-row">
+                                <span>Meta ID</span>
+                            </div>
+                        </th>
+                        <th class="col-trakt-id hide-col-trakt-id td-center" title="Trakt ID">
+                            <div class="th-header-row">
+                                <span>Trakt ID</span>
+                            </div>
+                        </th>
+                        <th class="col-imdb-rating hide-col-imdb-rating td-center" title="IMDb Rating">
+                            <div class="th-header-row">
+                                <span>IMDb Rt</span>
+                            </div>
+                        </th>
+                        <th class="col-tvdb-rating hide-col-tvdb-rating td-center" title="TVDB Rating">
+                            <div class="th-header-row">
+                                <span>TVDB Rt</span>
+                            </div>
+                        </th>
+                        <th class="col-tmdb-rating hide-col-tmdb-rating td-center" title="TMDB Rating">
+                            <div class="th-header-row">
+                                <span>TMDB Rt</span>
+                            </div>
+                        </th>
+                        <th class="col-rotten-rating hide-col-rotten-rating td-center" title="Rotten Tomatoes Rating">
+                            <div class="th-header-row">
+                                <span>Rotten Rt</span>
+                            </div>
+                        </th>
+                        <th class="col-metacritic-rating hide-col-metacritic-rating td-center" title="Metacritic Rating">
+                            <div class="th-header-row">
+                                <span>Meta Rt</span>
+                            </div>
+                        </th>
+                        <th class="col-trakt-rating hide-col-trakt-rating td-center" title="Trakt Rating">
+                            <div class="th-header-row">
+                                <span>Trakt Rt</span>
                             </div>
                         </th>
 
@@ -3590,7 +3685,20 @@
             'col-season': 0.5,    // Season
             'col-episode': 0.5,   // Episode
             'col-movie-title': 1.2, // Movie Title
-            'col-episode-title': 1.2 // Episode Title
+            'col-episode-title': 1.2, // Episode Title
+            'col-aspect': 0.6,
+            'col-imdb-id': 0.8,
+            'col-tvdb-id': 0.8,
+            'col-tmdb-id': 0.8,
+            'col-rotten-id': 0.8,
+            'col-metacritic-id': 0.8,
+            'col-trakt-id': 0.8,
+            'col-imdb-rating': 0.6,
+            'col-tvdb-rating': 0.6,
+            'col-tmdb-rating': 0.6,
+            'col-rotten-rating': 0.6,
+            'col-metacritic-rating': 0.6,
+            'col-trakt-rating': 0.6
         };
         
         // Get all visible columns (excluding checkbox and hamburger)
@@ -4282,7 +4390,7 @@
 
         const perPageVal = document.getElementById('per-page-select') ? document.getElementById('per-page-select').value : '100';
         const tbody = document.getElementById('video-table-body');
-        tbody.innerHTML = '<tr><td colspan="35" style="text-align:center; padding: 20px;">Loading...</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="50" style="text-align:center; padding: 20px;">Loading...</td></tr>';
 
         try {
             const params = new URLSearchParams({ page: currentPage, per_page: perPageVal, sort: sortCol, order: sortOrder, ...activeFilters });
@@ -4314,7 +4422,7 @@
             if(icon) icon.innerText = arrow;
 
             if (data.rows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="35" style="text-align:center; padding: 20px;">No results found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="50" style="text-align:center; padding: 20px;">No results found</td></tr>';
             } else {
                 currentRowData = [];
                 currentRowDataEncoded = [];
@@ -4326,7 +4434,10 @@
                         secondary_hdr: row[12], width: row[13], height: row[14], file_size: row[15],
                         bl_id: row[16], audio_codecs: row[17], audio_channels: row[18], subtitles: row[19], max_cll: row[20], max_fall: row[21],
                         video_source: row[22], source_format: row[23], video_codec: row[24], is_3d: row[25], edition: row[26], year: row[27],
-                        media_type: row[28], show_title: row[29], season: row[30], episode: row[31], movie_title: row[32], episode_title: row[33]
+                        media_type: row[28], show_title: row[29], season: row[30], episode: row[31], movie_title: row[32], episode_title: row[33],
+                        aspect_ratio: row[34],
+                        imdb_id: row[35], tvdb_id: row[36], tmdb_id: row[37], rotten_id: row[38], metacritic_id: row[39], trakt_id: row[40],
+                        imdb_rating: row[41], tvdb_rating: row[42], tmdb_rating: row[43], rotten_rating: row[44], metacritic_rating: row[45], trakt_rating: row[46]
                     };
                     const rowJson = encodeURIComponent(JSON.stringify(rowData));
                     currentRowData.push(rowData);
@@ -4358,6 +4469,19 @@
                     const subTxt = row[19] ? row[19].substring(0, 10) + (row[19].length>10?'...':'') : '-';
                     const cllTxt = row[20] ? row[20] : '-';
                     const fallTxt = row[21] ? row[21] : '-';
+                    const aspectTxt = row[34] || '-';
+                    const imdbIdTxt = row[35] || '-';
+                    const tvdbIdTxt = row[36] || '-';
+                    const tmdbIdTxt = row[37] || '-';
+                    const rottenIdTxt = row[38] || '-';
+                    const metaIdTxt = row[39] || '-';
+                    const traktIdTxt = row[40] || '-';
+                    const imdbRtTxt = row[41] ?? '-';
+                    const tvdbRtTxt = row[42] ?? '-';
+                    const tmdbRtTxt = row[43] ?? '-';
+                    const rottenRtTxt = row[44] ?? '-';
+                    const metaRtTxt = row[45] ?? '-';
+                    const traktRtTxt = row[46] ?? '-';
 
                     let mainBadge = '', secBadge = '-', hybridHtml = '<span style="opacity:0.3">-</span>';
                     let statusText = `<span class="badge badge-ok" onclick="setFilter('status', 'ok')">OK</span>`;
@@ -4438,6 +4562,19 @@
                             <td class="td-center col-episode hide-col-episode">${row[31] ?? '-'}</td>
                             <td class="col-movie-title hide-col-movie-title" title="${(row[32] || '').replace(/"/g, '&quot;')}">${(row[32] || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '-'}</td>
                             <td class="col-episode-title hide-col-episode-title" title="${(row[33] || '').replace(/"/g, '&quot;')}">${(row[33] || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '-'}</td>
+                            <td class="td-center col-aspect hide-col-aspect">${aspectTxt}</td>
+                            <td class="td-center col-imdb-id hide-col-imdb-id" title="${imdbIdTxt}">${imdbIdTxt}</td>
+                            <td class="td-center col-tvdb-id hide-col-tvdb-id" title="${tvdbIdTxt}">${tvdbIdTxt}</td>
+                            <td class="td-center col-tmdb-id hide-col-tmdb-id" title="${tmdbIdTxt}">${tmdbIdTxt}</td>
+                            <td class="td-center col-rotten-id hide-col-rotten-id" title="${rottenIdTxt}">${rottenIdTxt}</td>
+                            <td class="td-center col-metacritic-id hide-col-metacritic-id" title="${metaIdTxt}">${metaIdTxt}</td>
+                            <td class="td-center col-trakt-id hide-col-trakt-id" title="${traktIdTxt}">${traktIdTxt}</td>
+                            <td class="td-center col-imdb-rating hide-col-imdb-rating">${imdbRtTxt}</td>
+                            <td class="td-center col-tvdb-rating hide-col-tvdb-rating">${tvdbRtTxt}</td>
+                            <td class="td-center col-tmdb-rating hide-col-tmdb-rating">${tmdbRtTxt}</td>
+                            <td class="td-center col-rotten-rating hide-col-rotten-rating">${rottenRtTxt}</td>
+                            <td class="td-center col-metacritic-rating hide-col-metacritic-rating">${metaRtTxt}</td>
+                            <td class="td-center col-trakt-rating hide-col-trakt-rating">${traktRtTxt}</td>
                             <td class="col-del"><button class="trash-btn" onclick="event.stopPropagation(); promptDelete('${safePath}')">🗑</button></td>
                         </tr>`;
                 }).join('');
@@ -4468,7 +4605,7 @@
             console.error(e);
             const tbody = document.getElementById('video-table-body');
             if (tbody) {
-                tbody.innerHTML = `<tr><td colspan="35" style="text-align:center; padding: 20px; color:#e74c3c; font-weight:bold;">Error Loading Data: ${e.message}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="50" style="text-align:center; padding: 20px; color:#e74c3c; font-weight:bold;">Error Loading Data: ${e.message}</td></tr>`;
             }
         } finally {
             isLoading = false;
