@@ -51,6 +51,8 @@ PROGRESS_UPDATE_INTERVAL = 10  # Update progress every N files (reduces lock con
 SUBPROCESS_TIMEOUT = 30  # Subprocess timeout in seconds (30 seconds per command)
 
 # --- GLOBAL STATE ---
+APP_START_TIME = time.time()
+APP_VERSION = os.environ.get("APP_VERSION", "dev")
 PROGRESS = {
     "status": "idle", "current": 0, "total": 0, "file": "Waiting...", 
     "last_full_scan": "Never", "last_duration": "--",
@@ -263,7 +265,7 @@ def init_db() -> None:
                          last_scanned TEXT, resolution TEXT, bitrate_mbps REAL, scan_error TEXT,
                          is_hybrid INTEGER DEFAULT 0, secondary_hdr TEXT,
                          width INTEGER, height INTEGER, file_size INTEGER, bl_compatibility_id TEXT,
-                         audio_codecs TEXT, audio_langs TEXT, subtitles TEXT, max_cll TEXT, max_fall TEXT,
+                         audio_codecs TEXT, audio_langs TEXT, audio_channels TEXT, subtitles TEXT, max_cll TEXT, max_fall TEXT,
                          scan_attempts INTEGER DEFAULT 0,
                          video_source TEXT, source_format TEXT, video_codec TEXT, is_3d INTEGER DEFAULT 0, edition TEXT, year INTEGER,
                          media_type TEXT, show_title TEXT, season INTEGER, episode INTEGER, movie_title TEXT, episode_title TEXT,
@@ -272,7 +274,7 @@ def init_db() -> None:
         try:
             existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()}
             required_cols = {
-                'audio_codecs': 'TEXT', 'audio_langs': 'TEXT', 'subtitles': 'TEXT', 
+                'audio_codecs': 'TEXT', 'audio_langs': 'TEXT', 'audio_channels': 'TEXT', 'subtitles': 'TEXT', 
                 'max_cll': 'TEXT', 'max_fall': 'TEXT', 'scan_attempts': 'INTEGER DEFAULT 0',
                 'video_source': 'TEXT', 'source_format': 'TEXT', 'video_codec': 'TEXT', 
                 'is_3d': 'INTEGER DEFAULT 0', 'edition': 'TEXT', 'year': 'INTEGER',
@@ -289,9 +291,11 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_category ON videos (category)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_vol ON videos (source_vol)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_profile ON videos (profile)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_container ON videos (container)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_resolution ON videos (resolution)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_error ON videos (scan_error)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_is_hybrid ON videos (is_hybrid)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_last_scanned ON videos (last_scanned)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_video_source ON videos (video_source)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_source_format ON videos (source_format)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_video_codec ON videos (video_codec)")
@@ -666,6 +670,24 @@ def find_kodi_nfo_candidates(file_path: str, media_type_hint: str | None) -> lis
         except OSError:
             pass
     if media_type_hint == 'tv':
+        # Try to locate episode NFOs that don't share the same stem
+        try:
+            filename_lower = file_path_obj.name.lower()
+            _, season_guess, episode_guess = parse_tv_from_filename(filename_lower)
+            if season_guess is not None and episode_guess is not None:
+                for nfo in file_path_obj.parent.glob('*.nfo'):
+                    nfo_data = parse_kodi_nfo(str(nfo))
+                    if not nfo_data:
+                        continue
+                    if (
+                        nfo_data.get('media_type') == 'tv'
+                        and nfo_data.get('season') == season_guess
+                        and nfo_data.get('episode') == episode_guess
+                    ):
+                        candidates.append(str(nfo))
+                        break
+        except OSError:
+            pass
         # tvshow.nfo often lives in the series root (up to a few levels up)
         for parent in [file_path_obj.parent, file_path_obj.parent.parent, file_path_obj.parent.parent.parent]:
             tvshow_nfo = parent / 'tvshow.nfo'
@@ -792,7 +814,7 @@ def analyze_file_deep(path: str) -> dict:
         'bl_compatibility_id': None, 'hdr_format_secondary': None, 
         'resolution': None, 'width': 0, 'height': 0, 'bitrate': 0, 
         'is_hybrid': 0, 'error': None,
-        'audio_codecs': [], 'audio_langs': [], 'subtitles': [], 
+        'audio_codecs': [], 'audio_langs': [], 'audio_channels': [], 'subtitles': [], 
         'max_cll': None, 'max_fall': None,
         'video_source': None, 'source_format': None, 'video_codec': None, 
         'is_3d': 0, 'edition': None, 'year': None,
@@ -896,7 +918,8 @@ def analyze_file_deep(path: str) -> dict:
                 if not result['movie_title'] and nfo_data.get('title') and (nfo_data.get('media_type') == 'movie' or result['media_type'] != 'tv'):
                     result['movie_title'] = nfo_data['title']
 
-            if not result['show_title'] and result['media_type'] == 'tv':
+        if result['media_type'] == 'tv':
+            if not result['show_title']:
                 result['show_title'] = guess_show_title_from_path(path)
 
         if not result['movie_title'] and result['media_type'] != 'tv':
@@ -1144,6 +1167,11 @@ def analyze_file_deep(path: str) -> dict:
                             if codec: result['audio_codecs'].append(codec)
                             lang = t.get('Language')
                             if lang: result['audio_langs'].append(lang)
+                            channels = t.get('Channels') or t.get('Channel(s)') or t.get('Channel_s_')
+                            if channels is not None:
+                                channel_text = str(channels)
+                                match = re.search(r'\d+(?:\.\d+)?', channel_text)
+                                result['audio_channels'].append(match.group(0) if match else channel_text)
                         elif ttype == 'Text':
                             lang = t.get('Language')
                             if lang: result['subtitles'].append(lang)
@@ -1305,7 +1333,7 @@ def _create_error_result(error_msg: str) -> dict:
         'bl_compatibility_id': None, 'hdr_format_secondary': None, 
         'resolution': None, 'width': 0, 'height': 0, 'bitrate': 0, 
         'is_hybrid': 0, 'error': error_msg,
-        'audio_codecs': [], 'audio_langs': [], 'subtitles': [], 
+        'audio_codecs': [], 'audio_langs': [], 'audio_channels': [], 'subtitles': [], 
         'max_cll': None, 'max_fall': None,
         'video_source': None, 'source_format': None, 'video_codec': None,
         'is_3d': 0, 'edition': None, 'year': None,
@@ -1322,12 +1350,17 @@ def _finalize_result(res: dict) -> dict:
     Returns:
         Dictionary with lists converted to comma-separated strings
     """
-    def to_str(val):
-        if isinstance(val, list): return ", ".join(sorted(list(set(val))))
+    def to_str(val, preserve_order: bool = False):
+        if isinstance(val, list):
+            cleaned = [str(v) for v in val if v not in (None, '')]
+            if preserve_order:
+                return ", ".join(cleaned)
+            return ", ".join(sorted(list(set(cleaned))))
         return str(val) if val is not None else None
 
-    res['audio_codecs'] = to_str(res['audio_codecs'])
-    res['audio_langs'] = to_str(res['audio_langs'])
+    res['audio_codecs'] = to_str(res['audio_codecs'], preserve_order=True)
+    res['audio_langs'] = to_str(res['audio_langs'], preserve_order=True)
+    res['audio_channels'] = to_str(res['audio_channels'], preserve_order=True)
     res['subtitles'] = to_str(res['subtitles'])
     return res
 
@@ -1368,7 +1401,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
                 "secondary_hdr": None, "width": 0,
                 "height": 0, "file_size": 0,
                 "bl_compatibility_id": None,
-                "audio_codecs": [], "audio_langs": [], "subtitles": [], "max_cll": None, "max_fall": None,
+                "audio_codecs": [], "audio_langs": [], "audio_channels": [], "subtitles": [], "max_cll": None, "max_fall": None,
                 "scan_attempts": 0,
                 "video_source": None, "source_format": None, "video_codec": None,
                 "is_3d": 0, "edition": None, "year": None, "media_type": None,
@@ -1388,7 +1421,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
                 "secondary_hdr": None, "width": 0,
                 "height": 0, "file_size": 0,
                 "bl_compatibility_id": None,
-                "audio_codecs": [], "audio_langs": [], "subtitles": [], "max_cll": None, "max_fall": None,
+                "audio_codecs": [], "audio_langs": [], "audio_channels": [], "subtitles": [], "max_cll": None, "max_fall": None,
                 "scan_attempts": 0,
                 "video_source": None, "source_format": None, "video_codec": None,
                 "is_3d": 0, "edition": None, "year": None, "media_type": None,
@@ -1407,7 +1440,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
             "secondary_hdr": None, "width": 0,
             "height": 0, "file_size": 0,
             "bl_compatibility_id": None,
-            "audio_codecs": [], "audio_langs": [], "subtitles": [], "max_cll": None, "max_fall": None,
+            "audio_codecs": [], "audio_langs": [], "audio_channels": [], "subtitles": [], "max_cll": None, "max_fall": None,
             "scan_attempts": 0,
             "video_source": None, "source_format": None, "video_codec": None,
             "is_3d": 0, "edition": None, "year": None, "media_type": None,
@@ -1483,7 +1516,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
         "secondary_hdr": meta['hdr_format_secondary'], "width": meta['width'],
         "height": meta['height'], "file_size": file_size,
         "bl_compatibility_id": meta['bl_compatibility_id'],
-        "audio_codecs": meta['audio_codecs'], "audio_langs": meta['audio_langs'],
+        "audio_codecs": meta['audio_codecs'], "audio_langs": meta['audio_langs'], "audio_channels": meta['audio_channels'],
         "subtitles": meta['subtitles'], "max_cll": meta['max_cll'], "max_fall": meta['max_fall'],
         "scan_attempts": 0,  # Will be updated in run_scan based on previous attempts
         "video_source": meta['video_source'], "source_format": meta['source_format'], "video_codec": meta['video_codec'],
@@ -1536,7 +1569,7 @@ def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dic
         result['show_title'] = result.get('show_title') or guess_show_title_from_path(file_path)
 
     if not current.get('episode_title') and (current.get('media_type') or result.get('media_type')) == 'tv':
-        result['episode_title'] = result.get('episode_title') or guess_episode_title_from_filename(filename_base)
+        result['episode_title'] = result.get('episode_title')
 
     if not current.get('movie_title') and not result.get('movie_title') and (current.get('media_type') or result.get('media_type')) != 'tv':
         movie_title_guess = guess_movie_title_from_filename(filename_base)
@@ -1613,10 +1646,10 @@ def save_batch_to_db(data_list: list) -> None:
             conn.executemany("""INSERT OR REPLACE INTO videos 
                 (filename, category, profile, el_type, container, source_vol, full_path, last_scanned, 
                  resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, 
-                 file_size, bl_compatibility_id, audio_codecs, audio_langs, subtitles, max_cll, max_fall, scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, validation_flag) 
+                 file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, validation_flag) 
                 VALUES (:filename, :category, :profile, :el_type, :container, :source_vol, :full_path, :last_scanned, 
                  :resolution, :bitrate_mbps, :scan_error, :is_hybrid, :secondary_hdr, :width, :height, 
-                 :file_size, :bl_compatibility_id, :audio_codecs, :audio_langs, :subtitles, :max_cll, :max_fall, :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :validation_flag)""", sanitized_list)
+                 :file_size, :bl_compatibility_id, :audio_codecs, :audio_langs, :audio_channels, :subtitles, :max_cll, :max_fall, :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :validation_flag)""", sanitized_list)
             if DEBUG_MODE:
                 for item in sanitized_list:
                     log_debug(f"Saved to DB: {item['filename']} -> {item['category']} {item['profile']} (error: {item.get('scan_error', 'None')})", "DEBUG")
@@ -2069,6 +2102,7 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float) -> 
             
     log_debug(f"[SUCCESS] Finished: {dur}. Added: {PROGRESS['new_found']}. Errors: {PROGRESS['failed_count']}", "INFO")
 
+
 def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]] = None, 
              force_rescan: bool = False, debug: bool = False, scan_mode: str = "all",
              scan_folder: dict | None = None) -> None:
@@ -2191,6 +2225,7 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
 def index(): return render_template('index.html')
 
 @app.route('/health')
+@app.route('/api/health')
 def health_check() -> Response:
     """
     Health check endpoint for monitoring and load balancers.
@@ -2209,11 +2244,48 @@ def health_check() -> Response:
     except sqlite3.Error:
         db_status = "error"
     
-    return jsonify({
-        "status": "healthy" if db_status == "ok" else "degraded",
+    status = "healthy" if db_status == "ok" else "degraded"
+    payload = {
+        "status": status,
         "database": db_status,
-        "scan_status": PROGRESS.get("status", "unknown")
-    })
+        "scan_status": PROGRESS.get("status", "unknown"),
+        "uptime_seconds": int(time.time() - APP_START_TIME),
+        "version": APP_VERSION,
+    }
+    return jsonify(payload), (200 if status == "healthy" else 503)
+
+
+@app.errorhandler(400)
+def api_bad_request(error) -> Response:
+    if not request.path.startswith('/api/'):
+        return error
+    return jsonify({
+        "status": "error",
+        "error": "bad_request",
+        "message": "Bad request"
+    }), 400
+
+
+@app.errorhandler(404)
+def api_not_found(error) -> Response:
+    if not request.path.startswith('/api/'):
+        return error
+    return jsonify({
+        "status": "error",
+        "error": "not_found",
+        "message": "Endpoint not found"
+    }), 404
+
+
+@app.errorhandler(500)
+def api_internal_error(error) -> Response:
+    if not request.path.startswith('/api/'):
+        return error
+    return jsonify({
+        "status": "error",
+        "error": "internal_error",
+        "message": "Internal server error"
+    }), 500
 
 @app.route('/api/logs')
 def get_logs() -> Response:
@@ -2647,9 +2719,9 @@ def download_csv() -> Response:
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size'}
     db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
     with get_db() as conn:
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, subtitles, max_cll FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
+        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
     si = io.StringIO()
-    csv.writer(si).writerows([['Filename', 'Cat', 'Prof', 'EL', 'Cont', 'Vol', 'Path', 'Date', 'Res', 'Bitrate', 'Error', 'Hybrid', 'SecHDR', 'Width', 'Height', 'Size', 'BL_ID', 'Audio', 'Subs', 'MaxCLL']] + list(rows))
+    csv.writer(si).writerows([['Filename', 'Cat', 'Prof', 'EL', 'Cont', 'Vol', 'Path', 'Date', 'Res', 'Bitrate', 'Error', 'Hybrid', 'SecHDR', 'Width', 'Height', 'Size', 'BL_ID', 'Audio', 'AudioCh', 'Subs', 'MaxCLL']] + list(rows))
     return make_response(si.getvalue(), 200, {"Content-Disposition": "attachment; filename=media_export.csv", "Content-type": "text/csv"})
 
 @app.route('/download_json')
@@ -2667,7 +2739,7 @@ def download_json() -> Response:
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size'}
     db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
     with get_db() as conn:
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, subtitles, max_cll, max_fall FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
+        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
     
     # Convert rows to list of dictionaries
     data = []
@@ -2677,8 +2749,8 @@ def download_json() -> Response:
             'container': row[4], 'source_vol': row[5], 'full_path': row[6], 'last_scanned': row[7],
             'resolution': row[8], 'bitrate_mbps': row[9], 'scan_error': row[10], 'is_hybrid': row[11],
             'secondary_hdr': row[12], 'width': row[13], 'height': row[14], 'file_size': row[15],
-            'bl_compatibility_id': row[16], 'audio_codecs': row[17], 'subtitles': row[18],
-            'max_cll': row[19], 'max_fall': row[20]
+            'bl_compatibility_id': row[16], 'audio_codecs': row[17], 'audio_channels': row[18], 'subtitles': row[19],
+            'max_cll': row[20], 'max_fall': row[21]
         })
     
     json_str = json.dumps(data, indent=2, ensure_ascii=False)
@@ -2945,15 +3017,24 @@ def get_videos() -> Response:
 
     with get_db_readonly() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
+        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
         
         stats_total_raw = conn.execute("SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, secondary_hdr FROM videos").fetchall()
         stats_filtered_raw = conn.execute(f"SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, secondary_hdr FROM videos WHERE {main_where}", main_params).fetchall()
         stats = _build_stats_from_rows(stats_total_raw)
         stats_filtered = _build_stats_from_rows(stats_filtered_raw)
 
+        where_cache: dict[str | None, tuple[str, list[Any]]] = {}
+
+        def get_where(exclude_key: str | None):
+            if exclude_key in where_cache:
+                return where_cache[exclude_key]
+            w, p = build_filter_query(request.args, exclude_key=exclude_key)
+            where_cache[exclude_key] = (w, p)
+            return w, p
+
         def get_cnt(col, key):
-            w, p = build_filter_query(request.args, exclude_key=key)
+            w, p = get_where(key)
             return {r[0]: r[1] for r in conn.execute(f"SELECT {col}, COUNT(*) FROM videos WHERE {col} != '' AND {col} IS NOT NULL AND {w} GROUP BY {col}", p).fetchall()}
 
         def get_cnt_with_where(col, where_clause, params):
@@ -2971,12 +3052,12 @@ def get_videos() -> Response:
             return result
 
         def get_blank_cnt(col, key):
-            w, p = build_filter_query(request.args, exclude_key=key)
+            w, p = get_where(key)
             return conn.execute(f"SELECT COUNT(*) FROM videos WHERE ({col} IS NULL OR {col} = '') AND {w}", p).fetchone()[0]
         
         def get_audio_codecs(key):
             """Get unique audio codecs, splitting comma-separated values"""
-            w, p = build_filter_query(request.args, exclude_key=key)
+            w, p = get_where(key)
             rows = conn.execute(f"SELECT audio_codecs FROM videos WHERE audio_codecs != '' AND audio_codecs IS NOT NULL AND {w}", p).fetchall()
             codec_counts = {}
             for row in rows:

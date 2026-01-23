@@ -1,5 +1,5 @@
 # STAGE 1: Asset Downloader
-FROM debian:bullseye-slim as builder
+FROM debian:bullseye-slim AS builder
 RUN apt-get update && apt-get install -y curl tar ca-certificates
 
 # Robustly download dovi_tool (v2.1.2) - Change URL if architecture differs (e.g. arm64 for Mac M1/Pi)

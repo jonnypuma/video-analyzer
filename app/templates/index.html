@@ -96,7 +96,10 @@
         #scan-info-box:hover { opacity: 1; text-decoration: underline; }
 
         /* --- RIBBON --- */
-        .summary-ribbon { display: grid; grid-template-columns: repeat(13, 1fr); gap: 10px; margin-bottom: 20px; }
+        .summary-ribbon {
+            display: grid; grid-template-columns: repeat(13, 1fr); gap: 10px; margin-bottom: 20px;
+            position: sticky; top: 0; z-index: 60; background: #0f0f0f; padding-top: 6px;
+        }
         .stat-card {
             background: var(--bg-panel); border-radius: 12px; padding: 15px; border: 1px solid #222;
             text-align: center; transition: transform 0.2s; cursor: pointer; user-select: none;
@@ -175,18 +178,24 @@
         .vol-header span { font-size: 0.7em; font-weight: bold; color: #666; text-transform: uppercase; }
 
         /* --- TABLE --- */
-        .table-wrap { background: #111; border-radius: 12px; overflow: hidden; border: 1px solid #222; position: relative; }
-        .table-scroll { overflow-x: auto; overflow-y: hidden; }
+        .table-wrap { background: #111; border-radius: 12px; overflow: visible; border: 1px solid #222; position: relative; }
+        .table-scroll { overflow-x: auto; overflow-y: visible; }
         table { width: max-content; border-collapse: collapse; table-layout: fixed; min-width: 100%; max-width: none; }
         thead { border-bottom: none; margin: 0; padding: 0; }
+        thead th {
+            position: sticky;
+            top: 0;
+            z-index: 8;
+            background: #111;
+        }
         th.col-chk, td.col-chk {
             position: sticky; left: 0; z-index: 6; background: #111;
         }
         th.col-del, td.col-del {
             position: sticky; right: 0; z-index: 6; background: #111;
         }
-        th.col-chk { z-index: 7; }
-        th.col-del { z-index: 7; }
+        th.col-chk { z-index: 9; }
+        th.col-del { z-index: 9; }
         .header-scrollbar-panel {
             position: absolute; left: 0; right: 0; height: 10px; z-index: 6; pointer-events: none;
         }
@@ -228,6 +237,14 @@
             cursor: text;
         }
         td { padding: 12px 15px; border-bottom: 1px solid #1a1a1a; font-size: 0.88em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; box-sizing: border-box; }
+        tbody tr:nth-child(even) td { background: #141414; }
+        tbody tr:nth-child(odd) td.col-chk,
+        tbody tr:nth-child(odd) td.col-del { background: #111 !important; }
+        tbody tr:nth-child(even) td.col-chk,
+        tbody tr:nth-child(even) td.col-del { background: #141414 !important; }
+        tbody tr:hover td { background: #1a1f2a; }
+        tbody tr:hover td.col-chk,
+        tbody tr:hover td.col-del { background: #1a1f2a !important; }
         /* Override padding for specific columns to keep them narrow */
         td.col-chk { padding: 4px 2px !important; }
         td.col-del { padding: 4px 2px !important; }
@@ -274,7 +291,7 @@
         .col-size { width: 6%; }
         .col-width, .col-height { width: 4%; }
         .col-cont { width: 4%; }
-        .col-del { width: 40px !important; min-width: 40px !important; max-width: 40px !important; cursor: default !important; position: sticky !important; right: 0 !important; background: #1f1f1f !important; z-index: 10 !important; }
+        .col-del { width: 40px !important; min-width: 40px !important; max-width: 40px !important; cursor: default !important; position: sticky !important; right: 0 !important; background: #111 !important; z-index: 10 !important; }
         th.col-del, td.col-del { 
             width: 40px !important; 
             min-width: 40px !important; 
@@ -311,6 +328,8 @@
         .hide-col-cont .col-cont { display: none; }
         .hide-col-cont .col-cont { display: none; }
         .hide-col-audio .col-audio { display: none; }
+        .hide-col-audio-ch .col-audio-ch { display: none; }
+        .hide-col-audio-combined .col-audio-combined { display: none; }
         .hide-col-sub .col-sub { display: none; }
         .hide-col-cll .col-cll { display: none; }
         .hide-col-fall .col-fall { display: none; }
@@ -329,6 +348,8 @@
         .hide-col-episode-title .col-episode-title { display: none; }
         
         .col-audio { width: 10%; }
+        .col-audio-ch { width: 4%; }
+        .col-audio-combined { width: 12%; }
         .col-sub { width: 5%; }
         .col-cll { width: 6%; }
         .col-fall { width: 6%; }
@@ -351,10 +372,13 @@
         .col-toggle-menu {
             position: absolute; top: 0; left: 0; right: 40px; height: 85px; background: #1f1f1f; border-bottom: 1px solid #333; border-left: 1px solid #333;
             display: flex; align-items: center; justify-content: flex-start; gap: 0; z-index: 50; box-sizing: border-box;
-            transform: translateY(-100%); transition: transform 0.3s cubic-bezier(0.4, 0.0, 0.2, 1);
+            transform: translateY(-100%); transition: transform 0.3s cubic-bezier(0.4, 0.0, 0.2, 1), opacity 0.2s ease, visibility 0.2s ease;
             overflow: hidden;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
         }
-        .col-toggle-menu.active { transform: translateY(0); }
+        .col-toggle-menu.active { transform: translateY(0); opacity: 1; visibility: visible; pointer-events: auto; }
         
         .col-menu-left-panel {
             display: flex; align-items: center; gap: 10px; padding-left: 15px; padding-right: 10px; background: #1f1f1f; flex-shrink: 0;
@@ -383,7 +407,7 @@
             height: 100%;
             min-height: 85px;
             cursor: pointer; 
-            background: #1f1f1f; 
+            background: #111; 
             z-index: 100;
             border-left: 1px solid #333; 
             border-top-right-radius: 11px;
@@ -431,7 +455,7 @@
             position: relative; height: 0; background: #1f1f1f; border-bottom: 1px solid #333;
             display: flex; align-items: center; justify-content: flex-start; gap: 0; z-index: 99; box-sizing: border-box;
             overflow: hidden; transition: height 0.3s cubic-bezier(0.4, 0.0, 0.2, 1);
-            margin-bottom: 0;
+            margin-bottom: 6px;
         }
         .main-menu.active { height: 60px; margin-bottom: 20px; }
         
@@ -642,6 +666,17 @@
         .details-header { padding: 20px; background: #1a1a1a; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
         .details-body { padding: 20px; overflow-y: auto; text-align: left; }
         .details-json { background: #000; padding: 15px; border-radius: 8px; font-family: monospace; color: #2ecc71; white-space: pre-wrap; font-size: 0.85em; }
+
+        .health-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .health-item { background: #0f0f0f; border: 1px solid #222; border-radius: 10px; padding: 10px 12px; }
+        .health-label { font-size: 0.7em; color: #777; text-transform: uppercase; letter-spacing: 0.5px; }
+        .health-value { margin-top: 6px; font-weight: bold; color: #e0e0e0; }
+        .health-ok { color: #2ecc71; }
+        .health-warn { color: #f1c40f; }
+        .health-err { color: #e74c3c; }
+        .health-note { margin-top: 12px; font-size: 0.85em; color: #bbb; }
+        .btn-health-icon { width: 20px; height: 20px; }
+        .btn-health { padding: 4px 8px; display: flex; align-items: center; gap: 6px; }
         
         /* New: Toast */
         #toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 200; }
@@ -971,6 +1006,44 @@
         </div>
     </div>
 
+    <div id="health-modal" class="modal-bg">
+        <div class="details-content" style="width: 520px; max-height: 70vh;">
+            <div class="details-header">
+                <span>System Health</span>
+                <button class="btn-grey" onclick="closeHealthModal()">Close</button>
+            </div>
+            <div class="details-body">
+                <div class="health-grid">
+                    <div class="health-item">
+                        <div class="health-label">Status</div>
+                        <div id="health-status" class="health-value">Loading...</div>
+                    </div>
+                    <div class="health-item">
+                        <div class="health-label">Database</div>
+                        <div id="health-db" class="health-value">Loading...</div>
+                    </div>
+                    <div class="health-item">
+                        <div class="health-label">Scan Status</div>
+                        <div id="health-scan" class="health-value">Loading...</div>
+                    </div>
+                    <div class="health-item">
+                        <div class="health-label">Uptime</div>
+                        <div id="health-uptime" class="health-value">Loading...</div>
+                    </div>
+                    <div class="health-item">
+                        <div class="health-label">Version</div>
+                        <div id="health-version" class="health-value">Loading...</div>
+                    </div>
+                    <div class="health-item">
+                        <div class="health-label">Latency</div>
+                        <div id="health-latency" class="health-value">Loading...</div>
+                    </div>
+                </div>
+                <div id="health-error" class="health-note" style="display:none;"></div>
+            </div>
+        </div>
+    </div>
+
     <div id="row-context-menu" class="context-menu">
         <button onclick="contextRescan()">Rescan</button>
         <button onclick="openBulkEdit()">Bulk Edit/Rescan</button>
@@ -1046,6 +1119,10 @@
                     </select>
                     <button class="btn-grey" onclick="loadFilterPreset()" style="padding: 5px 10px; font-size: 0.85em;">Load</button>
                     <button class="btn-grey" onclick="deleteFilterPreset()" style="padding: 5px 10px; font-size: 0.85em;">Delete</button>
+                    <button class="btn-grey btn-health" onclick="openHealthModal()" title="Health Status">
+                        <img src="/static/health.png" alt="Health" class="btn-health-icon">
+                        Health
+                    </button>
                 </div>
             </div>
         </div>
@@ -1285,6 +1362,8 @@
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-stat" checked onclick="toggleCol(this)"> Status</div>
                 <div style="width:1px; height:15px; background:#444; margin:0 5px;"></div> 
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-audio" onclick="toggleCol(this)"> Audio</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-audio-ch" onclick="toggleCol(this)"> Audio Ch</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-audio-combined" onclick="toggleCol(this)"> Audio Combined</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-sub" onclick="toggleCol(this)"> Subs</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-el" onclick="toggleCol(this)"> EL Type</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-cont" onclick="toggleCol(this)"> Container</div>
@@ -1319,13 +1398,13 @@
                         <th class="col-chk">
                             <input type="checkbox" id="master-chk" onclick="toggleMaster(this)" style="display: block; margin: 0 auto; width: 18px; height: 18px; flex-shrink: 0;">
                         </th>
-                        <th class="col-file" onclick="sortBy('file')" style="cursor: pointer;">
+                        <th class="col-file" onclick="sortBy('file')" style="cursor: pointer;" title="Filename / Path">
                             <div class="th-header-row">
                                 <span>Filename</span>
                                 <span id="sort-file" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-hyb td-center" onclick="sortBy('hybrid', event)" style="cursor: pointer;">
+                        <th class="col-hyb td-center" onclick="sortBy('hybrid', event)" style="cursor: pointer;" title="Hybrid">
                             <div class="th-header-row">
                                 <span>Hybrid</span>
                                 <span id="sort-hybrid" class="sort-icon"></span>
@@ -1338,7 +1417,7 @@
                                 </select>
                             </div>
                         </th>
-                        <th class="col-main td-center" onclick="sortBy('main', event)" style="cursor: pointer;">
+                        <th class="col-main td-center" onclick="sortBy('main', event)" style="cursor: pointer;" title="Main HDR Format">
                             <div class="th-header-row">
                                 <span>Main HDR</span>
                                 <span id="sort-main" class="sort-icon"></span>
@@ -1383,7 +1462,7 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-prof td-center" onclick="sortBy('prof', event)" style="cursor: pointer;">
+                        <th class="col-prof td-center" onclick="sortBy('prof', event)" style="cursor: pointer;" title="Dolby Vision Profile">
                             <div class="th-header-row">
                                 <span>DV Prof</span>
                                 <span id="sort-prof" class="sort-icon"></span>
@@ -1403,7 +1482,7 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-el hide-col-el td-center" onclick="sortBy('el', event)" style="cursor: pointer;">
+                        <th class="col-el hide-col-el td-center" onclick="sortBy('el', event)" style="cursor: pointer;" title="Enhancement Layer Type">
                             <div class="th-header-row">
                                 <span>EL Type</span>
                                 <span id="sort-el" class="sort-icon"></span>
@@ -1431,7 +1510,7 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-sec td-center" onclick="sortBy('sec', event)" style="cursor: pointer;">
+                        <th class="col-sec td-center" onclick="sortBy('sec', event)" style="cursor: pointer;" title="Secondary HDR">
                             <div class="th-header-row">
                                 <span>Secondary</span>
                                 <span id="sort-sec" class="sort-icon"></span>
@@ -1451,7 +1530,7 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-res td-center" onclick="sortBy('res', event)" style="cursor: pointer;">
+                        <th class="col-res td-center" onclick="sortBy('res', event)" style="cursor: pointer;" title="Resolution">
                             <div class="th-header-row">
                                 <span>Res</span>
                                 <span id="sort-res" class="sort-icon"></span>
@@ -1471,19 +1550,19 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-width td-center" onclick="sortBy('width', event)" style="cursor: pointer;">
+                        <th class="col-width td-center" onclick="sortBy('width', event)" style="cursor: pointer;" title="Width">
                             <div class="th-header-row">
                                 <span>Width</span>
                                 <span id="sort-width" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-height td-center" onclick="sortBy('height', event)" style="cursor: pointer;">
+                        <th class="col-height td-center" onclick="sortBy('height', event)" style="cursor: pointer;" title="Height">
                             <div class="th-header-row">
                                 <span>Height</span>
                                 <span id="sort-height" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-size" onclick="sortBy('size', event)" style="cursor: pointer;">
+                        <th class="col-size" onclick="sortBy('size', event)" style="cursor: pointer;" title="File Size">
                             <div class="th-header-row">
                                 <span>Size</span>
                                 <span id="sort-size" class="sort-icon"></span>
@@ -1492,7 +1571,7 @@
                                 <input type="text" id="size-filter-header" placeholder="e.g. >30GB, <100MB, =50GB" onkeypress="if(event.key==='Enter') resetAndLoad()">
                             </div>
                         </th>
-                        <th class="col-bit" onclick="sortBy('bit', event)" style="cursor: pointer;">
+                        <th class="col-bit" onclick="sortBy('bit', event)" style="cursor: pointer;" title="Bitrate">
                             <div class="th-header-row">
                                 <span>Bitrate</span>
                                 <span id="sort-bit" class="sort-icon"></span>
@@ -1501,7 +1580,7 @@
                                 <input type="text" id="bit-filter-header" placeholder="e.g. >50Mbps, <20Mbps, =30Mbps" onkeypress="if(event.key==='Enter') resetAndLoad()">
                             </div>
                         </th>
-                        <th class="col-vol" onclick="sortBy('vol', event)" style="cursor: pointer;">
+                        <th class="col-vol" onclick="sortBy('vol', event)" style="cursor: pointer;" title="Source Volume">
                             <div class="th-header-row">
                                 <span>Volume</span>
                                 <span id="sort-vol" class="sort-icon"></span>
@@ -1521,7 +1600,7 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-cont td-center" onclick="sortBy('cont', event)" style="cursor: pointer;">
+                        <th class="col-cont td-center" onclick="sortBy('cont', event)" style="cursor: pointer;" title="Container">
                             <div class="th-header-row">
                                 <span>Container</span>
                                 <span id="sort-cont" class="sort-icon"></span>
@@ -1541,13 +1620,13 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-scan" onclick="sortBy('scan', event)" style="cursor: pointer;">
+                        <th class="col-scan" onclick="sortBy('scan', event)" style="cursor: pointer;" title="Last Scanned">
                             <div class="th-header-row">
                                 <span>Scanned</span>
                                 <span id="sort-scan" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-stat td-center" onclick="sortBy('stat', event)" style="cursor: pointer;">
+                        <th class="col-stat td-center" onclick="sortBy('stat', event)" style="cursor: pointer;" title="Scan Status">
                             <div class="th-header-row">
                                 <span>Status</span>
                                 <span id="sort-stat" class="sort-icon"></span>
@@ -1561,7 +1640,7 @@
                             </div>
                         </th>
                         
-                        <th class="col-audio hide-col-audio">
+                        <th class="col-audio hide-col-audio" title="Audio Codecs">
                             <div class="th-header-row">
                                 <span>Audio</span>
                             </div>
@@ -1580,24 +1659,34 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-sub hide-col-sub td-center">
+                        <th class="col-audio-ch hide-col-audio-ch td-center" title="Audio Channels">
+                            <div class="th-header-row">
+                                <span>Ch</span>
+                            </div>
+                        </th>
+                        <th class="col-audio-combined hide-col-audio-combined" title="Audio Codec + Channels">
+                            <div class="th-header-row">
+                                <span>Audio Combined</span>
+                            </div>
+                        </th>
+                        <th class="col-sub hide-col-sub td-center" title="Subtitles">
                             <div class="th-header-row">
                                 <span>Subs</span>
                             </div>
                         </th>
-                        <th class="col-cll hide-col-cll td-center" onclick="sortBy('cll', event)" style="cursor: pointer;">
+                        <th class="col-cll hide-col-cll td-center" onclick="sortBy('cll', event)" style="cursor: pointer;" title="MaxCLL">
                             <div class="th-header-row">
                                 <span>CLL</span>
                                 <span id="sort-cll" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-fall hide-col-fall td-center" onclick="sortBy('fall', event)" style="cursor: pointer;">
+                        <th class="col-fall hide-col-fall td-center" onclick="sortBy('fall', event)" style="cursor: pointer;" title="MaxFALL">
                             <div class="th-header-row">
                                 <span>FALL</span>
                                 <span id="sort-fall" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-video-source hide-col-video-source td-center" onclick="sortBy('video_source', event)" style="cursor: pointer;">
+                        <th class="col-video-source hide-col-video-source td-center" onclick="sortBy('video_source', event)" style="cursor: pointer;" title="Video Source">
                             <div class="th-header-row">
                                 <span>Source</span>
                                 <span id="sort-video_source" class="sort-icon"></span>
@@ -1617,7 +1706,7 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-source-format hide-col-source-format td-center" onclick="sortBy('source_format', event)" style="cursor: pointer;">
+                        <th class="col-source-format hide-col-source-format td-center" onclick="sortBy('source_format', event)" style="cursor: pointer;" title="Source Format">
                             <div class="th-header-row">
                                 <span>Src Format</span>
                                 <span id="sort-source_format" class="sort-icon"></span>
@@ -1637,7 +1726,7 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-video-codec hide-col-video-codec td-center" onclick="sortBy('video_codec', event)" style="cursor: pointer;">
+                        <th class="col-video-codec hide-col-video-codec td-center" onclick="sortBy('video_codec', event)" style="cursor: pointer;" title="Video Codec">
                             <div class="th-header-row">
                                 <span>Codec</span>
                                 <span id="sort-video_codec" class="sort-icon"></span>
@@ -1657,7 +1746,7 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-is-3d hide-col-is-3d td-center" onclick="sortBy('is_3d', event)" style="cursor: pointer;">
+                        <th class="col-is-3d hide-col-is-3d td-center" onclick="sortBy('is_3d', event)" style="cursor: pointer;" title="3D">
                             <div class="th-header-row">
                                 <span>3D</span>
                                 <span id="sort-is_3d" class="sort-icon"></span>
@@ -1670,7 +1759,7 @@
                                 </select>
                             </div>
                         </th>
-                        <th class="col-edition hide-col-edition" onclick="sortBy('edition', event)" style="cursor: pointer;">
+                        <th class="col-edition hide-col-edition" onclick="sortBy('edition', event)" style="cursor: pointer;" title="Edition">
                             <div class="th-header-row">
                                 <span>Edition</span>
                                 <span id="sort-edition" class="sort-icon"></span>
@@ -1690,13 +1779,13 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-year hide-col-year td-center" onclick="sortBy('year', event)" style="cursor: pointer;">
+                        <th class="col-year hide-col-year td-center" onclick="sortBy('year', event)" style="cursor: pointer;" title="Year">
                             <div class="th-header-row">
                                 <span>Year</span>
                                 <span id="sort-year" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-media-type hide-col-media-type td-center" onclick="sortBy('media_type', event)" style="cursor: pointer;">
+                        <th class="col-media-type hide-col-media-type td-center" onclick="sortBy('media_type', event)" style="cursor: pointer;" title="Media Type">
                             <div class="th-header-row">
                                 <span>Type</span>
                                 <span id="sort-media_type" class="sort-icon"></span>
@@ -1716,31 +1805,31 @@
                                 </div>
                             </div>
                         </th>
-                        <th class="col-show-title hide-col-show-title" onclick="sortBy('show_title', event)" style="cursor: pointer;">
+                        <th class="col-show-title hide-col-show-title" onclick="sortBy('show_title', event)" style="cursor: pointer;" title="Show Title">
                             <div class="th-header-row">
                                 <span>Show</span>
                                 <span id="sort-show_title" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-season hide-col-season td-center" onclick="sortBy('season', event)" style="cursor: pointer;">
+                        <th class="col-season hide-col-season td-center" onclick="sortBy('season', event)" style="cursor: pointer;" title="Season">
                             <div class="th-header-row">
                                 <span>Season</span>
                                 <span id="sort-season" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-episode hide-col-episode td-center" onclick="sortBy('episode', event)" style="cursor: pointer;">
+                        <th class="col-episode hide-col-episode td-center" onclick="sortBy('episode', event)" style="cursor: pointer;" title="Episode">
                             <div class="th-header-row">
                                 <span>Episode</span>
                                 <span id="sort-episode" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-movie-title hide-col-movie-title" onclick="sortBy('movie_title', event)" style="cursor: pointer;">
+                        <th class="col-movie-title hide-col-movie-title" onclick="sortBy('movie_title', event)" style="cursor: pointer;" title="Movie Title">
                             <div class="th-header-row">
                                 <span>Movie Title</span>
                                 <span id="sort-movie_title" class="sort-icon"></span>
                             </div>
                         </th>
-                        <th class="col-episode-title hide-col-episode-title" onclick="sortBy('episode_title', event)" style="cursor: pointer;">
+                        <th class="col-episode-title hide-col-episode-title" onclick="sortBy('episode_title', event)" style="cursor: pointer;" title="Episode Title">
                             <div class="th-header-row">
                                 <span>Episode Title</span>
                                 <span id="sort-episode_title" class="sort-icon"></span>
@@ -1885,6 +1974,21 @@
         const m = Math.floor((sec % 3600) / 60);
         const s = sec % 60;
         return [h, m, s].map(v => v < 10 ? "0" + v : v).join(":");
+    }
+
+    function formatUptime(seconds) {
+        const sec = parseInt(seconds, 10);
+        if (isNaN(sec) || sec < 0) return 'Unknown';
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = sec % 60;
+        return [h, m, s].map(v => v < 10 ? `0${v}` : v).join(":");
+    }
+
+    function capitalizeFirst(value) {
+        const text = (value ?? '').toString();
+        if (!text) return '';
+        return text.charAt(0).toUpperCase() + text.slice(1);
     }
     
     function formatBytes(bytes, decimals = 2) {
@@ -2477,11 +2581,11 @@
             });
         }
         
-        // Update button text
-        updateMultiselectFilter(filterId);
+        // Update button text without reloading data (avoid page reset during refresh)
+        updateMultiselectFilter(filterId, true);
     }
     
-    function updateMultiselectFilter(filterId) {
+    function updateMultiselectFilter(filterId, skipReload = false) {
         const state = multiselectState[filterId];
         if (!state) return;
         
@@ -2505,8 +2609,10 @@
             state.buttonText.textContent = `${filterName} (${selected.length})`;
         }
         
-        // Apply filter but don't close dropdown
-        resetAndLoad();
+        // Apply filter but don't close dropdown unless skipReload is set
+        if (!skipReload) {
+            resetAndLoad();
+        }
     }
     
     // Close all multiselects when clicking outside
@@ -3003,6 +3109,15 @@
             order.forEach(col => {
                 if (cellMap[col]) row.appendChild(cellMap[col]);
             });
+            // Append any new columns not present in saved order (keeps them visible)
+            cells.forEach(cell => {
+                const classes = Array.from(cell.classList);
+                const colClass = classes.find(c => c.startsWith('col-') && c !== 'col-chk' && c !== 'col-del');
+                if (colClass && !order.includes(colClass) && cellMap[colClass]) {
+                    row.appendChild(cellMap[colClass]);
+                    delete cellMap[colClass];
+                }
+            });
             if (cellMap['col-del']) row.appendChild(cellMap['col-del']);
         };
 
@@ -3073,12 +3188,53 @@
         headerScrollbarInner.style.width = `${innerWidth}px`;
     }
 
+    function updateStickyHeader() {
+        const tableWrap = document.querySelector('.table-wrap');
+        const tableScroll = document.querySelector('.table-scroll');
+        const table = document.querySelector('.table-scroll table');
+        const thead = table ? table.querySelector('thead') : null;
+        if (!tableWrap || !table || !thead) return;
+
+        const headerHeight = thead.offsetHeight;
+        const ribbon = document.querySelector('.summary-ribbon');
+        const ribbonRect = ribbon ? ribbon.getBoundingClientRect() : null;
+        const ribbonOffset = ribbonRect && ribbonRect.bottom > 0 ? Math.round(ribbonRect.height) : 0;
+        const wrapRect = tableWrap.getBoundingClientRect();
+        const tableRect = table.getBoundingClientRect();
+        const shouldStick = wrapRect.top <= ribbonOffset && wrapRect.bottom > headerHeight + ribbonOffset;
+
+        if (shouldStick) {
+            tableWrap.classList.add('sticky-active');
+            thead.style.position = 'fixed';
+            thead.style.top = `${ribbonOffset}px`;
+            thead.style.left = `${tableRect.left}px`;
+            thead.style.width = `${tableRect.width}px`;
+            thead.style.zIndex = '40';
+            thead.style.background = '#111';
+            if (tableScroll) {
+                thead.style.transform = `translateX(-${tableScroll.scrollLeft}px)`;
+            }
+            table.style.paddingTop = `${headerHeight}px`;
+        } else {
+            tableWrap.classList.remove('sticky-active');
+            thead.style.position = '';
+            thead.style.top = '';
+            thead.style.left = '';
+            thead.style.width = '';
+            thead.style.zIndex = '';
+            thead.style.background = '';
+            thead.style.transform = '';
+            table.style.paddingTop = '';
+        }
+    }
+
     function initHeaderScrollbar() {
         const tableWrap = document.querySelector('.table-wrap');
         const tableScroll = document.querySelector('.table-scroll');
         const headerScrollbar = document.getElementById('header-scrollbar');
         const table = document.querySelector('table');
         if (!tableWrap || !tableScroll || !headerScrollbar) return;
+        updateStickyHeader();
         let syncing = false;
         headerScrollbar.addEventListener('scroll', () => {
             if (syncing) return;
@@ -3088,6 +3244,7 @@
             const ratio = maxHeader > 0 ? headerScrollbar.scrollLeft / maxHeader : 0;
             tableScroll.scrollLeft = Math.round(maxTable * ratio);
             syncing = false;
+            updateStickyHeader();
         });
         tableScroll.addEventListener('scroll', () => {
             if (syncing) return;
@@ -3097,8 +3254,13 @@
             const ratio = maxTable > 0 ? tableScroll.scrollLeft / maxTable : 0;
             headerScrollbar.scrollLeft = Math.round(maxHeader * ratio);
             syncing = false;
+            updateStickyHeader();
         });
-        window.addEventListener('resize', () => syncHeaderScrollbar());
+        window.addEventListener('resize', () => {
+            syncHeaderScrollbar();
+            updateStickyHeader();
+        });
+        window.addEventListener('scroll', () => updateStickyHeader(), { passive: true });
         syncHeaderScrollbar();
     }
     
@@ -3346,6 +3508,8 @@
             'col-stat': 0.7,     // Status
             'col-hyb': 0.6,       // Hybrid
             'col-audio': 1.0,     // Audio
+            'col-audio-ch': 0.5,  // Audio Channels
+            'col-audio-combined': 1.2,  // Audio Combined
             'col-sub': 0.7,       // Subtitles
             'col-cll': 0.7,       // MaxCLL
             'col-fall': 0.7,      // MaxFALL
@@ -4052,7 +4216,7 @@
 
         const perPageVal = document.getElementById('per-page-select') ? document.getElementById('per-page-select').value : '100';
         const tbody = document.getElementById('video-table-body');
-        tbody.innerHTML = '<tr><td colspan="33" style="text-align:center; padding: 20px;">Loading...</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="35" style="text-align:center; padding: 20px;">Loading...</td></tr>';
 
         try {
             const params = new URLSearchParams({ page: currentPage, per_page: perPageVal, sort: sortCol, order: sortOrder, ...activeFilters });
@@ -4084,7 +4248,7 @@
             if(icon) icon.innerText = arrow;
 
             if (data.rows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="33" style="text-align:center; padding: 20px;">No results found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="35" style="text-align:center; padding: 20px;">No results found</td></tr>';
             } else {
                 currentRowData = [];
                 currentRowDataEncoded = [];
@@ -4094,9 +4258,9 @@
                         container: row[4], source_vol: row[5], full_path: row[6], last_scanned: row[7],
                         resolution: row[8], bitrate: row[9], scan_error: row[10], is_hybrid: row[11],
                         secondary_hdr: row[12], width: row[13], height: row[14], file_size: row[15],
-                        bl_id: row[16], audio_codecs: row[17], subtitles: row[18], max_cll: row[19], max_fall: row[20],
-                        video_source: row[21], source_format: row[22], video_codec: row[23], is_3d: row[24], edition: row[25], year: row[26],
-                        media_type: row[27], show_title: row[28], season: row[29], episode: row[30], movie_title: row[31], episode_title: row[32]
+                        bl_id: row[16], audio_codecs: row[17], audio_channels: row[18], subtitles: row[19], max_cll: row[20], max_fall: row[21],
+                        video_source: row[22], source_format: row[23], video_codec: row[24], is_3d: row[25], edition: row[26], year: row[27],
+                        media_type: row[28], show_title: row[29], season: row[30], episode: row[31], movie_title: row[32], episode_title: row[33]
                     };
                     const rowJson = encodeURIComponent(JSON.stringify(rowData));
                     currentRowData.push(rowData);
@@ -4112,9 +4276,22 @@
                     const vidSize = row[15] || 0;
                     const dateDisplay = row[7] ? row[7].split(' ')[0] : '--';
                     const audioTxt = row[17] || '-';
-                    const subTxt = row[18] ? row[18].substring(0, 10) + (row[18].length>10?'...':'') : '-';
-                    const cllTxt = row[19] ? row[19] : '-';
-                    const fallTxt = row[20] ? row[20] : '-';
+                    const audioChTxt = row[18] || '-';
+                    const audioCodecs = audioTxt && audioTxt !== '-' ? audioTxt.split(',').map(v => v.trim()).filter(Boolean) : [];
+                    const audioChs = audioChTxt && audioChTxt !== '-' ? audioChTxt.split(',').map(v => v.trim()).filter(Boolean) : [];
+                    const derivedChs = audioCodecs.map(codec => {
+                        const match = codec.match(/(\d+(?:\.\d+)?)(?:\s*(?:ch|channels?))?\b/i);
+                        return match ? match[1] : '';
+                    });
+                    const audioCombinedTxt = audioCodecs.length
+                        ? audioCodecs.map((codec, idx) => {
+                            const ch = audioChs[idx] || derivedChs[idx];
+                            return ch ? `${codec} (${ch}ch)` : codec;
+                        }).join(', ')
+                        : '-';
+                    const subTxt = row[19] ? row[19].substring(0, 10) + (row[19].length>10?'...':'') : '-';
+                    const cllTxt = row[20] ? row[20] : '-';
+                    const fallTxt = row[21] ? row[21] : '-';
 
                     let mainBadge = '', secBadge = '-', hybridHtml = '<span style="opacity:0.3">-</span>';
                     let statusText = `<span class="badge badge-ok" onclick="setFilter('status', 'ok')">OK</span>`;
@@ -4178,21 +4355,23 @@
                             <td class="col-scan" style="opacity:0.4; font-size:0.8em">${dateDisplay}</td>
                             <td class="td-center col-stat">${statusText}</td>
                             <td class="col-audio hide-col-audio" title="${(audioTxt || '').replace(/"/g, '&quot;')}">${(audioTxt || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>
-                            <td class="col-sub hide-col-sub" title="${(row[18] || '').replace(/"/g, '&quot;')}">${(subTxt || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>
+                            <td class="td-center col-audio-ch hide-col-audio-ch">${(audioChTxt || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>
+                            <td class="col-audio-combined hide-col-audio-combined" title="${(audioCombinedTxt || '').replace(/"/g, '&quot;')}">${(audioCombinedTxt || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>
+                            <td class="col-sub hide-col-sub" title="${(row[19] || '').replace(/"/g, '&quot;')}">${(subTxt || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>
                             <td class="col-cll hide-col-cll" title="MaxCLL / FALL">${cllTxt}</td>
                             <td class="col-fall hide-col-fall" title="MaxFALL">${fallTxt}</td>
-                            <td class="td-center col-video-source hide-col-video-source">${row[21] || '-'}</td>
-                            <td class="td-center col-source-format hide-col-source-format">${row[22] || '-'}</td>
-                            <td class="td-center col-video-codec hide-col-video-codec">${row[23] || '-'}</td>
-                            <td class="td-center col-is-3d hide-col-is-3d">${row[24] === 1 ? 'YES' : '-'}</td>
-                            <td class="col-edition hide-col-edition">${row[25] || '-'}</td>
-                            <td class="td-center col-year hide-col-year">${row[26] || '-'}</td>
-                            <td class="td-center col-media-type hide-col-media-type">${row[27] ? row[27].toString().toUpperCase() : '-'}</td>
-                            <td class="col-show-title hide-col-show-title" title="${(row[28] || '').replace(/"/g, '&quot;')}">${(row[28] || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '-'}</td>
-                            <td class="td-center col-season hide-col-season">${row[29] ?? '-'}</td>
-                            <td class="td-center col-episode hide-col-episode">${row[30] ?? '-'}</td>
-                            <td class="col-movie-title hide-col-movie-title" title="${(row[31] || '').replace(/"/g, '&quot;')}">${(row[31] || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '-'}</td>
-                            <td class="col-episode-title hide-col-episode-title" title="${(row[32] || '').replace(/"/g, '&quot;')}">${(row[32] || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '-'}</td>
+                            <td class="td-center col-video-source hide-col-video-source">${row[22] || '-'}</td>
+                            <td class="td-center col-source-format hide-col-source-format">${row[23] || '-'}</td>
+                            <td class="td-center col-video-codec hide-col-video-codec">${row[24] || '-'}</td>
+                            <td class="td-center col-is-3d hide-col-is-3d">${row[25] === 1 ? 'YES' : '-'}</td>
+                            <td class="col-edition hide-col-edition">${row[26] || '-'}</td>
+                            <td class="td-center col-year hide-col-year">${row[27] || '-'}</td>
+                            <td class="td-center col-media-type hide-col-media-type">${row[28] ? row[28].toString().toUpperCase() : '-'}</td>
+                            <td class="col-show-title hide-col-show-title" title="${(row[29] || '').replace(/"/g, '&quot;')}">${(row[29] || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '-'}</td>
+                            <td class="td-center col-season hide-col-season">${row[30] ?? '-'}</td>
+                            <td class="td-center col-episode hide-col-episode">${row[31] ?? '-'}</td>
+                            <td class="col-movie-title hide-col-movie-title" title="${(row[32] || '').replace(/"/g, '&quot;')}">${(row[32] || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '-'}</td>
+                            <td class="col-episode-title hide-col-episode-title" title="${(row[33] || '').replace(/"/g, '&quot;')}">${(row[33] || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') || '-'}</td>
                             <td class="col-del"><button class="trash-btn" onclick="event.stopPropagation(); promptDelete('${safePath}')">🗑</button></td>
                         </tr>`;
                 }).join('');
@@ -4223,7 +4402,7 @@
             console.error(e);
             const tbody = document.getElementById('video-table-body');
             if (tbody) {
-                tbody.innerHTML = `<tr><td colspan="33" style="text-align:center; padding: 20px; color:#e74c3c; font-weight:bold;">Error Loading Data: ${e.message}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="35" style="text-align:center; padding: 20px; color:#e74c3c; font-weight:bold;">Error Loading Data: ${e.message}</td></tr>`;
             }
         } finally {
             isLoading = false;
@@ -5132,6 +5311,66 @@
                 bulkBtn.innerText = `Bulk Edit/Rescan Filtered (${filteredCount})`;
             }
             bulkBtn.style.display = '';
+        }
+    }
+
+    function closeHealthModal() {
+        const modal = document.getElementById('health-modal');
+        if (modal) modal.style.display = 'none';
+    }
+
+    async function openHealthModal() {
+        const modal = document.getElementById('health-modal');
+        if (modal) modal.style.display = 'block';
+        const statusEl = document.getElementById('health-status');
+        const dbEl = document.getElementById('health-db');
+        const scanEl = document.getElementById('health-scan');
+        const uptimeEl = document.getElementById('health-uptime');
+        const versionEl = document.getElementById('health-version');
+        const latencyEl = document.getElementById('health-latency');
+        const errorEl = document.getElementById('health-error');
+
+        if (statusEl) statusEl.textContent = 'Loading...';
+        if (dbEl) dbEl.textContent = 'Loading...';
+        if (scanEl) scanEl.textContent = 'Loading...';
+        if (uptimeEl) uptimeEl.textContent = 'Loading...';
+        if (versionEl) versionEl.textContent = 'Loading...';
+        if (latencyEl) latencyEl.textContent = 'Loading...';
+        if (errorEl) errorEl.style.display = 'none';
+
+        const start = performance.now();
+        try {
+            const res = await fetch('/api/health');
+            const latency = Math.round(performance.now() - start);
+            const data = await res.json();
+
+            if (statusEl) {
+                statusEl.textContent = capitalizeFirst(data.status || 'unknown');
+                statusEl.classList.remove('health-ok', 'health-warn', 'health-err');
+                if (data.status === 'healthy') statusEl.classList.add('health-ok');
+                else if (data.status === 'degraded') statusEl.classList.add('health-warn');
+                else statusEl.classList.add('health-err');
+            }
+            if (dbEl) {
+                dbEl.textContent = capitalizeFirst(data.database || 'unknown');
+                dbEl.classList.remove('health-ok', 'health-warn', 'health-err');
+                if (data.database === 'ok') dbEl.classList.add('health-ok');
+                else dbEl.classList.add('health-err');
+            }
+            if (scanEl) scanEl.textContent = capitalizeFirst(data.scan_status || 'unknown');
+            if (uptimeEl) uptimeEl.textContent = formatUptime(data.uptime_seconds);
+            if (versionEl) versionEl.textContent = data.version || 'unknown';
+            if (latencyEl) latencyEl.textContent = `${latency} ms`;
+        } catch (e) {
+            if (errorEl) {
+                errorEl.style.display = 'block';
+                errorEl.textContent = `Failed to load health status: ${e.message}`;
+            }
+            if (statusEl) {
+                statusEl.textContent = 'error';
+                statusEl.classList.remove('health-ok', 'health-warn');
+                statusEl.classList.add('health-err');
+            }
         }
     }
 
