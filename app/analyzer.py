@@ -61,6 +61,8 @@ PROGRESS = {
 }
 ABORT_SCAN = False
 LOG_CACHE = []
+DIAG_LOG_TS = 0.0
+API_LOG_TS = 0.0
 progress_lock = threading.Lock()
 db_access_lock = threading.Lock()
 LOG_FILE = ""
@@ -2177,6 +2179,16 @@ def analyze_files(files_to_scan: list, processed_map: dict, settings: dict,
                             remaining = PROGRESS["total"] - PROGRESS["current"]
                             eta_seconds = int(remaining / rate) if rate > 0 else 0
                             PROGRESS["eta"] = f"{eta_seconds}s" if eta_seconds > 0 else "calculating..."
+                    global DIAG_LOG_TS
+                    now = time.time()
+                    if now - DIAG_LOG_TS >= 5:
+                        log_debug(
+                            f"[SCAN_DIAG] current={PROGRESS.get('current', 0)}/{PROGRESS.get('total', 0)} "
+                            f"new={PROGRESS.get('new_found', 0)} failed={PROGRESS.get('failed_count', 0)} "
+                            f"batch_buffer={len(batch_buffer)}",
+                            "INFO"
+                        )
+                        DIAG_LOG_TS = now
                     progress_updates = {"current": 0, "failed_count": 0, "new_found": 0}
             except Exception as e:
                 log_debug(f"Thread error processing file: {e}", "ERROR")
@@ -3179,6 +3191,14 @@ def get_videos() -> Response:
     with get_db_readonly() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
         rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
+        global API_LOG_TS
+        now = time.time()
+        if PROGRESS.get("status") == "scanning" and now - API_LOG_TS >= 5:
+            log_debug(
+                f"[API_VIDEOS] total={total} rows={len(rows)} page={page} per_page={per_page}",
+                "INFO"
+            )
+            API_LOG_TS = now
         
         stats_total_raw = conn.execute("SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, secondary_hdr FROM videos").fetchall()
         stats_filtered_raw = conn.execute(f"SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, secondary_hdr FROM videos WHERE {main_where}", main_params).fetchall()

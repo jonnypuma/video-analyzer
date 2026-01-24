@@ -24,12 +24,16 @@
             --border: #333;
         }
 
+        html, body {
+            height: 100%;
+        }
+
         body {
             background: var(--bg-dark);
             color: white;
             font-family: 'Segoe UI', Roboto, sans-serif;
             margin: 0;
-            overflow-x: hidden;
+            overflow: auto;
             scroll-behavior: smooth;
         }
 
@@ -37,6 +41,8 @@
             max-width: 95vw;
             margin: auto;
             padding: 30px;
+            height: auto;
+            overflow: visible;
         }
         
         @media (min-width: 1920px) {
@@ -181,16 +187,33 @@
         .vol-header span { font-size: 0.7em; font-weight: bold; color: #666; text-transform: uppercase; }
 
         /* --- TABLE --- */
-        .table-wrap { background: #111; border-radius: 12px; overflow: visible; border: 1px solid #222; position: relative; }
-        .table-scroll { overflow-x: auto; overflow-y: visible; }
-        table { width: max-content; border-collapse: collapse; table-layout: fixed; min-width: 100%; max-width: none; }
-        thead { border-bottom: none; margin: 0; padding: 0; }
-        thead th {
-            position: sticky;
-            top: 0;
-            z-index: 8;
-            background: #111;
+        .table-wrap { background: #111; border-radius: 12px; overflow-x: auto; overflow-y: visible; border: 1px solid #222; border-top: 0; position: relative; padding-top: 0;
+            border-top-left-radius: 0; border-top-right-radius: 0; margin-top: 0;
         }
+        .table-wrap::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: #111;
+            z-index: 5;
+            pointer-events: none;
+        }
+        .table-wrap.header-fixed thead th.col-chk,
+        .table-wrap.header-fixed thead th.col-del {
+            visibility: hidden;
+            pointer-events: none;
+        }
+        .table-scroll { overflow: visible; max-height: none; height: auto; }
+        .table-wrap::-webkit-scrollbar { height: 10px; }
+        .table-wrap::-webkit-scrollbar-thumb { background: #333; border-radius: 6px; }
+        .table-wrap::-webkit-scrollbar-track { background: #111; }
+        table { width: max-content; border-collapse: collapse; table-layout: fixed; min-width: 100%; max-width: none; }
+        thead { border-bottom: none; margin: 0; padding: 0; position: static; z-index: 8; background: #111; overflow: visible; }
+        thead tr { overflow: visible; }
+        thead th { background: #111; }
         th.col-chk, td.col-chk {
             position: sticky; left: 0; z-index: 6; background: #111;
         }
@@ -202,6 +225,46 @@
         .header-scrollbar-panel {
             position: absolute; left: 0; right: 0; height: 10px; z-index: 6; pointer-events: none;
         }
+        #sticky-chk-slot,
+        #sticky-burger-slot {
+            position: absolute;
+            top: 0;
+            box-sizing: border-box;
+            z-index: 110;
+            background: #111;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: auto;
+        }
+        #sticky-chk-slot {
+            left: 0;
+            width: 40px;
+            border-right: 1px solid #333;
+        }
+        #sticky-burger-slot {
+            right: 0;
+            width: 40px;
+            border-left: 1px solid #333;
+        }
+        #sticky-chk-slot:empty,
+        #sticky-burger-slot:empty { display: none; }
+        #sticky-chk-slot #master-chk {
+            margin: 0;
+            width: 18px;
+            height: 18px;
+            display: block;
+        }
+        #sticky-burger-slot #burger-btn {
+            margin: 0;
+            padding: 0;
+            min-height: 0;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .header-scrollbar { width: 100%; box-sizing: border-box; }
         .header-scrollbar {
             height: 10px; overflow-x: auto; overflow-y: hidden;
             background: #0f0f0f; border: 1px solid #222; border-radius: 6px;
@@ -209,7 +272,7 @@
         }
         .header-scrollbar-inner { height: 1px; }
         tbody { margin-top: 0; padding-top: 0; }
-        th { background: #1f1f1f; padding: 8px 5px 0px 5px; text-align: left; color: #3498db; font-size: 0.88em; text-transform: uppercase; cursor: default; user-select: none; position: relative; vertical-align: top; margin: 0; border-bottom: none; box-sizing: border-box; }
+        th { background: #1f1f1f; padding: 8px 5px 0px 5px; text-align: left; color: #3498db; font-size: 0.88em; text-transform: uppercase; cursor: default; user-select: none; vertical-align: top; margin: 0; border-bottom: none; box-sizing: border-box; }
         th[onclick] { cursor: pointer; }
         th.col-chk, th.col-del { cursor: default !important; }
         th:hover { color: white; background: #2a2a2a; }
@@ -311,7 +374,8 @@
         th.col-del {
             padding: 0 !important;
             vertical-align: top !important;
-            position: relative;
+            position: sticky !important;
+            right: 0 !important;
             z-index: 101;
         }
 
@@ -709,8 +773,20 @@
         /* CAROUSEL */
         .controls-wrapper {
             display: flex; align-items: center; background: #1a1a1a; padding: 10px; 
-            border-radius: 12px; border: 1px solid #333; gap: 10px; margin-bottom: -1px;
+            border-radius: 12px; border: 1px solid #333; border-bottom: 0; gap: 10px; margin-bottom: 0;
             position: sticky; top: var(--sticky-controls-top, 0px); z-index: 65;
+            border-bottom-left-radius: 0;
+            border-bottom-right-radius: 0;
+        }
+        .controls-wrapper::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: -1px;
+            height: 4px;
+            background: #111;
+            pointer-events: none;
         }
         .filter-carousel {
             display: flex; gap: 10px; overflow-x: auto; white-space: nowrap; scroll-behavior: smooth;
@@ -1425,6 +1501,8 @@
             <div id="header-scrollbar-panel" class="header-scrollbar-panel">
                 <div id="header-scrollbar" class="header-scrollbar"><div id="header-scrollbar-inner" class="header-scrollbar-inner"></div></div>
             </div>
+            <div id="sticky-chk-slot"></div>
+            <div id="sticky-burger-slot"></div>
             <div class="table-scroll" id="table-scroll">
             <table>
                 <thead>
@@ -2102,7 +2180,10 @@
     // --- SCROLL TO CONSOLE ---
     function scrollToConsole() {
         const consoleEl = document.querySelector('.console-wrap');
-        if(consoleEl) consoleEl.scrollIntoView({behavior: "smooth"});
+        if (consoleEl) {
+            const top = consoleEl.getBoundingClientRect().top + window.scrollY;
+            window.scrollTo({ top, behavior: "smooth" });
+        }
     }
 
     // --- FILTER CAROUSEL SCROLLING ---
@@ -3106,6 +3187,7 @@
     
     // Update menu position on window resize
     window.addEventListener('resize', () => {
+        updateStickyOffsets();
         const menu = document.getElementById('colMenu');
         if (menu && menu.classList.contains('active')) {
             updateColMenuPosition();
@@ -3270,104 +3352,145 @@
         const headerScrollbarPanel = document.getElementById('header-scrollbar-panel');
         const headerScrollbarInner = document.getElementById('header-scrollbar-inner');
         const thead = document.querySelector('thead');
-        if (!tableWrap || !tableScroll || !table || !headerScrollbar || !headerScrollbarPanel || !headerScrollbarInner || !thead) return;
+        if (!tableWrap || !table || !headerScrollbar || !headerScrollbarPanel || !headerScrollbarInner || !thead) return;
         const chkCell = table.querySelector('th.col-chk');
         const delCell = table.querySelector('th.col-del');
         const chkWidth = chkCell ? chkCell.offsetWidth : 40;
         const delWidth = delCell ? delCell.offsetWidth : 40;
-        const available = Math.max(0, tableScroll.clientWidth - chkWidth - delWidth);
+        const available = Math.max(0, tableWrap.clientWidth - chkWidth - delWidth);
         const wrapRect = tableWrap.getBoundingClientRect();
         const theadRect = thead.getBoundingClientRect();
-        const top = Math.max(0, Math.round(theadRect.bottom - wrapRect.top));
+        const top = headerIsFixed
+            ? Math.round(stickyHeaderTop + (theadRect.height || 0))
+            : Math.round(theadRect.bottom);
+        headerScrollbarPanel.style.position = 'fixed';
+        headerScrollbarPanel.style.left = `${Math.round(wrapRect.left)}px`;
         headerScrollbarPanel.style.top = `${top}px`;
+        headerScrollbarPanel.style.width = `${Math.round(wrapRect.width)}px`;
+        headerScrollbarPanel.style.transform = 'translateX(0)';
         headerScrollbar.style.marginLeft = `${chkWidth}px`;
         headerScrollbar.style.marginRight = `${delWidth}px`;
         headerScrollbar.style.width = `${available}px`;
-        const innerWidth = Math.max(0, table.scrollWidth - chkWidth - delWidth);
-        headerScrollbarInner.style.width = `${innerWidth}px`;
+        headerScrollbarInner.style.width = `${Math.max(0, table.scrollWidth - chkWidth - delWidth)}px`;
     }
 
+    function updateTableScrollHeight() {
+        return;
+    }
+
+    let stickyHeaderTop = 0;
+    let headerIsFixed = false;
+    let headerNaturalHeight = 0;
+
     function updateStickyHeader() {
-        const tableWrap = document.querySelector('.table-wrap');
-        const tableScroll = document.querySelector('.table-scroll');
-        const table = document.querySelector('.table-scroll table');
-        const thead = table ? table.querySelector('thead') : null;
-        const headerScrollbarPanel = document.getElementById('header-scrollbar-panel');
-        const colMenu = document.getElementById('colMenu');
-        if (!tableWrap || !table || !thead) return;
+        updateStickyOffsets();
+        updateTableScrollHeight();
+        syncFixedHeader();
+        syncHeaderScrollbar();
+        syncStickyHamburger();
+    }
 
-        const headerHeight = thead.offsetHeight;
+    function updateStickyOffsets() {
         const ribbon = document.querySelector('.summary-ribbon');
-        const ribbonRect = ribbon ? ribbon.getBoundingClientRect() : null;
-        const ribbonOffset = ribbonRect && ribbonRect.bottom > 0 ? Math.round(ribbonRect.height) : 0;
-        const actionBlock = document.querySelector('.control-stack');
-        const actionHeight = actionBlock ? actionBlock.offsetHeight : 0;
-        const controlsPanel = document.querySelector('.controls-wrapper');
-        const controlsHeight = controlsPanel ? controlsPanel.offsetHeight : 0;
-        const headerTop = Math.max(0, ribbonOffset + actionHeight + controlsHeight - 1);
+        const controlStack = document.querySelector('.control-stack');
+        const controlsWrapper = document.querySelector('.controls-wrapper');
+        const ribbonH = ribbon ? ribbon.offsetHeight : 0;
+        const controlH = controlStack ? controlStack.offsetHeight : 0;
+        const controlsH = controlsWrapper ? controlsWrapper.offsetHeight : 0;
+        document.documentElement.style.setProperty('--sticky-action-top', `${ribbonH}px`);
+        document.documentElement.style.setProperty('--sticky-controls-top', `${ribbonH + controlH}px`);
+        stickyHeaderTop = ribbonH + controlH + controlsH;
+    }
 
-        document.documentElement.style.setProperty('--sticky-action-top', `${ribbonOffset}px`);
-        document.documentElement.style.setProperty('--sticky-controls-top', `${ribbonOffset + actionHeight}px`);
+    function syncFixedHeader() {
+        const tableWrap = document.querySelector('.table-wrap');
+        const table = document.querySelector('table');
+        const thead = document.querySelector('thead');
+        const chkCell = document.querySelector('th.col-chk');
+        const delCell = document.querySelector('th.col-del');
+        const chkSlot = document.getElementById('sticky-chk-slot');
+        const stickySlot = document.getElementById('sticky-burger-slot');
+        const colMenu = document.getElementById('colMenu');
+        if (!tableWrap || !thead || !table) return;
         const wrapRect = tableWrap.getBoundingClientRect();
-        const scrollRect = tableScroll ? tableScroll.getBoundingClientRect() : table.getBoundingClientRect();
-        const tableRect = table.getBoundingClientRect();
-        const shouldStick = wrapRect.top <= headerTop && wrapRect.bottom > headerHeight + headerTop;
+        const theadRect = thead.getBoundingClientRect();
+        const currentHeaderHeight = Math.round(theadRect.height || 0);
+        if (!headerIsFixed && currentHeaderHeight > 0) {
+            headerNaturalHeight = currentHeaderHeight;
+        }
+        const headerHeight = headerNaturalHeight || currentHeaderHeight;
+        const shouldFix = wrapRect.top < stickyHeaderTop && wrapRect.bottom > stickyHeaderTop + headerHeight;
+        const headerRow = thead.querySelector('tr');
 
-        if (shouldStick) {
-            tableWrap.classList.add('sticky-active');
+        if (shouldFix) {
+            headerIsFixed = true;
+            tableWrap.classList.add('header-fixed');
+            tableWrap.style.paddingTop = `${headerHeight}px`;
             thead.style.position = 'fixed';
-            thead.style.top = `${headerTop}px`;
-            const scrollLeft = tableScroll ? tableScroll.scrollLeft : 0;
-            thead.style.left = `${scrollRect.left}px`;
-            thead.style.width = `${scrollRect.width}px`;
-            thead.style.zIndex = '45';
-            thead.style.background = '#111';
-            thead.style.transform = `translateX(-${scrollLeft}px)`;
-            thead.style.overflow = 'hidden';
-            table.style.paddingTop = `${headerHeight}px`;
-            const delHeader = thead.querySelector('th.col-del');
-            if (delHeader) {
-                delHeader.style.position = 'absolute';
-                delHeader.style.top = '0';
-                delHeader.style.right = '0';
-                delHeader.style.left = '';
-                delHeader.style.zIndex = '50';
-                delHeader.style.background = '#111';
+            thead.style.top = `${stickyHeaderTop}px`;
+            thead.style.left = `${Math.round(wrapRect.left - tableWrap.scrollLeft)}px`;
+            thead.style.width = `${Math.round(table.scrollWidth)}px`;
+            thead.style.height = `${headerHeight}px`;
+            thead.style.minHeight = `${headerHeight}px`;
+            thead.style.maxHeight = `${headerHeight}px`;
+            thead.style.transform = '';
+            thead.style.zIndex = '80';
+            thead.style.overflow = 'visible';
+            if (headerRow) {
+                headerRow.style.height = `${headerHeight}px`;
+                headerRow.style.minHeight = `${headerHeight}px`;
+                headerRow.style.maxHeight = `${headerHeight}px`;
             }
+            const theadRect = thead.getBoundingClientRect();
+            const clipLeft = Math.max(0, Math.round(wrapRect.left - theadRect.left));
+            const clipRight = Math.max(0, Math.round(theadRect.right - wrapRect.right));
+            thead.style.clipPath = `inset(0px ${clipRight}px 0px ${clipLeft}px)`;
+            thead.style.webkitClipPath = `inset(0px ${clipRight}px 0px ${clipLeft}px)`;
             if (colMenu) {
+                const delWidth = delCell ? (delCell.offsetWidth || 40) : 40;
                 colMenu.style.position = 'fixed';
-                colMenu.style.top = `${headerTop}px`;
-                colMenu.style.left = `${scrollRect.left}px`;
-                colMenu.style.width = `${Math.max(0, scrollRect.width - 40)}px`;
+                colMenu.style.top = `${stickyHeaderTop}px`;
+                colMenu.style.left = `${Math.round(wrapRect.left)}px`;
+                colMenu.style.width = `${Math.max(0, Math.round(wrapRect.width - delWidth))}px`;
                 colMenu.style.right = '';
-                colMenu.style.zIndex = '55';
+                colMenu.style.zIndex = '90';
             }
-            if (headerScrollbarPanel) {
-                headerScrollbarPanel.style.position = 'fixed';
-                headerScrollbarPanel.style.top = `${headerTop + headerHeight}px`;
-                headerScrollbarPanel.style.left = `${scrollRect.left}px`;
-                headerScrollbarPanel.style.width = `${scrollRect.width}px`;
-                headerScrollbarPanel.style.zIndex = '39';
+            if (chkSlot && chkCell) {
+                const chkWidth = chkCell.offsetWidth || 40;
+                chkSlot.style.position = 'fixed';
+                chkSlot.style.top = `${stickyHeaderTop}px`;
+                chkSlot.style.left = `${Math.round(wrapRect.left)}px`;
+                chkSlot.style.height = `${headerHeight}px`;
+                chkSlot.style.width = `${chkWidth}px`;
+            }
+            if (stickySlot) {
+                const delWidth = delCell ? (delCell.offsetWidth || 40) : 40;
+                stickySlot.style.position = 'fixed';
+                stickySlot.style.top = `${stickyHeaderTop}px`;
+                stickySlot.style.left = `${Math.round(wrapRect.right - delWidth)}px`;
+                stickySlot.style.height = `${headerHeight}px`;
+                stickySlot.style.width = `${delWidth}px`;
             }
         } else {
-            tableWrap.classList.remove('sticky-active');
+            headerIsFixed = false;
+            tableWrap.classList.remove('header-fixed');
+            tableWrap.style.paddingTop = '0';
             thead.style.position = '';
             thead.style.top = '';
             thead.style.left = '';
             thead.style.width = '';
-            thead.style.zIndex = '';
-            thead.style.background = '';
+            thead.style.height = '';
+            thead.style.minHeight = '';
+            thead.style.maxHeight = '';
             thead.style.transform = '';
+            thead.style.zIndex = '';
             thead.style.overflow = '';
-            table.style.paddingTop = '';
-            const delHeader = thead.querySelector('th.col-del');
-            if (delHeader) {
-                delHeader.style.position = '';
-                delHeader.style.top = '';
-                delHeader.style.right = '';
-                delHeader.style.left = '';
-                delHeader.style.zIndex = '';
-                delHeader.style.background = '';
+            thead.style.clipPath = '';
+            thead.style.webkitClipPath = '';
+            if (headerRow) {
+                headerRow.style.height = '';
+                headerRow.style.minHeight = '';
+                headerRow.style.maxHeight = '';
             }
             if (colMenu) {
                 colMenu.style.position = '';
@@ -3377,15 +3500,37 @@
                 colMenu.style.right = '';
                 colMenu.style.zIndex = '';
             }
-            if (headerScrollbarPanel) {
-                headerScrollbarPanel.style.position = '';
-                headerScrollbarPanel.style.top = '';
-                headerScrollbarPanel.style.left = '';
-                headerScrollbarPanel.style.width = '';
-                headerScrollbarPanel.style.zIndex = '';
-                headerScrollbarPanel.style.display = '';
+            if (chkSlot) {
+                chkSlot.style.position = '';
+                chkSlot.style.top = '';
+                chkSlot.style.left = '';
+                chkSlot.style.height = '';
+                chkSlot.style.width = '';
             }
-            setTimeout(() => syncHeaderScrollbar(), 0);
+            if (stickySlot) {
+                stickySlot.style.position = '';
+                stickySlot.style.top = '';
+                stickySlot.style.left = '';
+                stickySlot.style.height = '';
+                stickySlot.style.width = '';
+            }
+        }
+    }
+
+    function syncStickyHamburger() {
+        const burgerBtn = document.getElementById('burger-btn');
+        const burgerHome = document.querySelector('th.col-del');
+        const stickySlot = document.getElementById('sticky-burger-slot');
+        const masterChk = document.getElementById('master-chk');
+        const chkHome = document.querySelector('th.col-chk');
+        const chkSlot = document.getElementById('sticky-chk-slot');
+        if (!burgerBtn || !burgerHome || !stickySlot || !masterChk || !chkHome || !chkSlot) return;
+        if (headerIsFixed) {
+            if (burgerBtn.parentElement !== stickySlot) stickySlot.appendChild(burgerBtn);
+            if (masterChk.parentElement !== chkSlot) chkSlot.appendChild(masterChk);
+        } else {
+            if (burgerBtn.parentElement !== burgerHome) burgerHome.appendChild(burgerBtn);
+            if (masterChk.parentElement !== chkHome) chkHome.appendChild(masterChk);
         }
     }
 
@@ -3394,35 +3539,39 @@
         const tableScroll = document.querySelector('.table-scroll');
         const headerScrollbar = document.getElementById('header-scrollbar');
         const table = document.querySelector('table');
-        if (!tableWrap || !tableScroll || !headerScrollbar) return;
+        if (!tableWrap || !headerScrollbar) return;
         updateStickyHeader();
         let syncing = false;
         headerScrollbar.addEventListener('scroll', () => {
             if (syncing) return;
             syncing = true;
-            const maxTable = table ? Math.max(0, (table.scrollWidth - (tableScroll.clientWidth))) : 0;
+            const maxTable = table ? Math.max(0, (table.scrollWidth - (tableWrap.clientWidth))) : 0;
             const maxHeader = Math.max(0, headerScrollbar.scrollWidth - headerScrollbar.clientWidth);
             const ratio = maxHeader > 0 ? headerScrollbar.scrollLeft / maxHeader : 0;
-            tableScroll.scrollLeft = Math.round(maxTable * ratio);
+            tableWrap.scrollLeft = Math.round(maxTable * ratio);
             syncing = false;
             updateStickyHeader();
         });
-        tableScroll.addEventListener('scroll', () => {
+        tableWrap.addEventListener('scroll', () => {
             if (syncing) return;
             syncing = true;
-            const maxTable = table ? Math.max(0, (table.scrollWidth - (tableScroll.clientWidth))) : 0;
+            const maxTable = table ? Math.max(0, (table.scrollWidth - (tableWrap.clientWidth))) : 0;
             const maxHeader = Math.max(0, headerScrollbar.scrollWidth - headerScrollbar.clientWidth);
-            const ratio = maxTable > 0 ? tableScroll.scrollLeft / maxTable : 0;
+            const ratio = maxTable > 0 ? tableWrap.scrollLeft / maxTable : 0;
             headerScrollbar.scrollLeft = Math.round(maxHeader * ratio);
             syncing = false;
             updateStickyHeader();
         });
         window.addEventListener('resize', () => {
-            syncHeaderScrollbar();
             updateStickyHeader();
         });
-        window.addEventListener('scroll', () => updateStickyHeader(), { passive: true });
-        syncHeaderScrollbar();
+        window.addEventListener('scroll', () => {
+            updateStickyHeader();
+        }, { passive: true });
+        tableWrap.addEventListener('scroll', () => {
+            updateStickyHeader();
+        }, { passive: true });
+        updateStickyHeader();
     }
     
     function getColumnWidths() {
