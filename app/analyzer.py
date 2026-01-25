@@ -57,9 +57,11 @@ PROGRESS = {
     "status": "idle", "current": 0, "total": 0, "file": "Waiting...", 
     "last_full_scan": "Never", "last_duration": "--",
     "scan_completed": False, "new_found": 0, "failed_count": 0, "last_duration": "0s",
-    "eta": "", "start_time": 0
+    "eta": "", "start_time": 0, "paused": False, "warning_count": 0
 }
 ABORT_SCAN = False
+PAUSE_EVENT = threading.Event()
+PAUSE_EVENT.set()
 LOG_CACHE = []
 DIAG_LOG_TS = 0.0
 API_LOG_TS = 0.0
@@ -178,6 +180,25 @@ def log_failure(vol: str, path: str, name: str, err: str) -> None:
         log_debug(f"[FAILURE] {vol}: {name} - {err}", "ERROR")
     except (OSError, IOError) as e:
         log_debug(f"Failed to write failure log: {e}", "WARNING")
+
+def log_scan_warning(path: str, name: str, message: str) -> None:
+    """Log a scan warning to the failure CSV so it shows in the failure log file."""
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if FAIL_FILE:
+            with open(FAIL_FILE, 'a', newline='', encoding='utf-8') as f:
+                csv.writer(f, delimiter='|').writerow([ts, 'WARNING', path, name, message])
+        with progress_lock:
+            PROGRESS["warning_count"] = PROGRESS.get("warning_count", 0) + 1
+    except (OSError, IOError) as e:
+        log_debug(f"Failed to write warning log: {e}", "WARNING")
+
+def wait_if_paused() -> None:
+    """Block worker threads while scan is paused; abort still exits immediately."""
+    while not PAUSE_EVENT.is_set():
+        if ABORT_SCAN:
+            raise RuntimeError("Scan Aborted")
+        time.sleep(0.2)
 
 def get_mount_status() -> dict:
     """
@@ -436,6 +457,9 @@ def parse_filename_metadata(filename: str) -> dict:
         if re.search(pattern, filename_lower):
             video_source = source
             break
+    if video_source == 'Bluray':
+        if re.search(r'\b(2160p|4k|uhd|ultra[-\s]?hd)\b', filename_lower):
+            video_source = 'UHD Bluray'
     
     # Extract source format (ISO, BR-DISK, Remux, etc.)
     source_format = None
@@ -695,6 +719,28 @@ def parse_kodi_nfo(nfo_path: str) -> dict:
 
     return data
 
+def coerce_tv_nfo_to_movie(result: dict, filename_base: str, media_type_guess: str | None, file_path: str | None = None) -> None:
+    """Coerce TV-style NFO to movie when show title is a generic Movies folder."""
+    if result.get('media_type') != 'tv':
+        return
+    if media_type_guess == 'tv':
+        return
+    show_title = (result.get('show_title') or '').strip().lower()
+    if show_title not in ('movies', 'movie'):
+        return
+    movie_title = result.get('movie_title') or result.get('episode_title') or guess_movie_title_from_filename(filename_base)
+    if not movie_title:
+        return
+    log_debug(f"[NFO] Coercing TV-style NFO to movie for '{filename_base}' (show_title='{show_title}')", "WARNING")
+    if file_path:
+        log_scan_warning(file_path, filename_base, f"NFO shows TV with show_title '{show_title}', coerced to movie")
+    result['media_type'] = 'movie'
+    result['movie_title'] = movie_title
+    result['show_title'] = None
+    result['season'] = None
+    result['episode'] = None
+    result['episode_title'] = None
+
 def guess_movie_title_from_filename(filename: str) -> str | None:
     name = pathlib.Path(filename).stem
     name = re.sub(r'[._]+', ' ', name)
@@ -703,7 +749,7 @@ def guess_movie_title_from_filename(filename: str) -> str | None:
         return None
     # Remove year and common media tags
     name = re.sub(r'\b(19\d{2}|20[0-2]\d)\b', ' ', name)
-    name = re.sub(r'\b(2160p|1080p|720p|480p|4k|uhd|hdr|hdr10\+?|dolbyvision|dv|remux|bluray|blu-ray|bdrip|web[-\s]?dl|webrip|x265|x264|hevc|h\.?265|h\.?264|aac|dts|truehd|atmos|ddp|dd\+|eac3|ac3|10bit|8bit|nf|amzn|itunes)\b', ' ', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b(4320p|2160p|1080p|720p|480p|8k|4k|uhd|hdr|hdr10\+?|dolbyvision|dv|remux|bluray|blu-ray|bdrip|web[-\s]?dl|webrip|x265|x264|hevc|h\.?265|h\.?264|aac|dts|truehd|atmos|ddp|dd\+|eac3|ac3|10bit|8bit|nf|amzn|itunes)\b', ' ', name, flags=re.IGNORECASE)
     # Drop bracketed metadata
     name = re.sub(r'\[[^\]]+\]|\([^\)]+\)|\{[^\}]+\}', ' ', name)
     name = re.sub(r'\s+', ' ', name).strip()
@@ -721,7 +767,7 @@ def guess_episode_title_from_filename(filename: str) -> str | None:
     name = re.sub(r'[._]+', ' ', name)
     name = re.sub(r'\[[^\]]+\]|\([^\)]+\)|\{[^\}]+\}', ' ', name)
     name = re.sub(r'\b(19\d{2}|20[0-2]\d)\b', ' ', name)
-    name = re.sub(r'\b(2160p|1080p|720p|480p|4k|uhd|hdr|hdr10\+?|dolbyvision|dv|remux|bluray|blu-ray|bdrip|web[-\s]?dl|webrip|x265|x264|hevc|h\.?265|h\.?264|aac|dts|truehd|atmos|ddp|dd\+|eac3|ac3|10bit|8bit|nf|amzn|itunes)\b', ' ', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b(4320p|2160p|1080p|720p|480p|8k|4k|uhd|hdr|hdr10\+?|dolbyvision|dv|remux|bluray|blu-ray|bdrip|web[-\s]?dl|webrip|x265|x264|hevc|h\.?265|h\.?264|aac|dts|truehd|atmos|ddp|dd\+|eac3|ac3|10bit|8bit|nf|amzn|itunes)\b', ' ', name, flags=re.IGNORECASE)
     name = re.sub(r'\s+', ' ', name).strip()
     return name or None
 
@@ -955,7 +1001,8 @@ def analyze_file_deep(path: str) -> dict:
         width = int(video_stream.get('width', 0))
         height = int(video_stream.get('height', 0))
         result['width'] = width; result['height'] = height
-        if width >= 3800 or height >= 2100: result['resolution'] = "4K"
+        if width >= 7680 or height >= 4320: result['resolution'] = "8K"
+        elif width >= 3800 or height >= 2100: result['resolution'] = "4K"
         elif width >= 1900 or height >= 1000: result['resolution'] = "1080p"
         elif width >= 1200 or height >= 700: result['resolution'] = "720p"
         else: result['resolution'] = "SD"
@@ -1049,6 +1096,8 @@ def analyze_file_deep(path: str) -> dict:
                     result['trakt_rating'] = nfo_data['trakt_rating']
                 if not result['movie_title'] and nfo_data.get('title') and (nfo_data.get('media_type') == 'movie' or result['media_type'] != 'tv'):
                     result['movie_title'] = nfo_data['title']
+
+        coerce_tv_nfo_to_movie(result, filename_base, media_type_guess, path)
 
         if result['media_type'] == 'tv':
             if not result['show_title']:
@@ -1609,6 +1658,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
                 log_debug(f"[ABORT] Abort detected before analyzing {filename}, skipping", "INFO")
                 meta = _create_error_result("Scan aborted by user")
                 break
+            wait_if_paused()
             
             # Call analyze_file_deep directly (subprocess timeouts are handled within)
             meta = analyze_file_deep(full_path_str)
@@ -1719,6 +1769,24 @@ def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dic
         ):
             if current.get(key) is None and nfo_data.get(key) is not None:
                 result[key] = nfo_data[key]
+
+    if not current.get('media_type'):
+        scratch = {
+            'media_type': result.get('media_type'),
+            'show_title': result.get('show_title'),
+            'season': result.get('season'),
+            'episode': result.get('episode'),
+            'movie_title': result.get('movie_title'),
+            'episode_title': result.get('episode_title')
+        }
+        coerce_tv_nfo_to_movie(scratch, filename_base, media_type_guess, file_path)
+        if scratch.get('media_type') == 'movie' and result.get('media_type') != 'movie':
+            result['media_type'] = 'movie'
+            result['movie_title'] = scratch.get('movie_title') or result.get('movie_title')
+            result['show_title'] = None
+            result['season'] = None
+            result['episode'] = None
+            result['episode_title'] = None
 
     if not current.get('show_title') and (current.get('media_type') or result.get('media_type')) == 'tv':
         result['show_title'] = result.get('show_title') or guess_show_title_from_path(file_path)
@@ -1970,6 +2038,7 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
     log_debug("[CRAWL] Starting directory scan...", "INFO")
         
     for path in scan_paths:
+        wait_if_paused()
         if ABORT_SCAN:
             log_debug("[ABORT] Abort detected in collect_files_to_scan, stopping directory scan", "INFO")
             break
@@ -1985,6 +2054,7 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
         try:
             dir_count = 0
             for root, dirs, files in os.walk(path):
+                wait_if_paused()
                 if ABORT_SCAN:
                     log_debug(f"[ABORT] Abort detected while scanning {root}, stopping directory walk", "INFO")
                     break
@@ -2013,6 +2083,7 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
                 
                 for f in files:
+                    wait_if_paused()
                     ext = os.path.splitext(f)[1].lower()
                     if ext not in VIDEO_EXTENSIONS:
                         continue
@@ -2108,6 +2179,7 @@ def analyze_files(files_to_scan: list, processed_map: dict, settings: dict,
         futures = [executor.submit(scan_file_worker, m) for m in files_to_scan]
         
         for f in as_completed(futures):
+            wait_if_paused()
             if ABORT_SCAN:
                 log_debug("[ABORT] Abort detected in analyze_files loop, stopping file processing", "INFO")
                 # Cancel remaining futures
@@ -2259,11 +2331,12 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float) -> 
     avg_file_size_mb = round(metrics_sum["file_size"] / metrics_count["file_size"] / (1024 * 1024), 2) if metrics_count["file_size"] > 0 else 0
             
     with progress_lock:
-        PROGRESS.update({"last_full_scan": now, "last_duration": dur, "scan_completed": True, "status": "idle"})
+        PROGRESS.update({"last_full_scan": now, "last_duration": dur, "scan_completed": True, "status": "idle", "paused": False})
         PROGRESS["last_report"] = {
             "scanned": PROGRESS["total"],
             "new": PROGRESS["new_found"],
             "failed": PROGRESS["failed_count"],
+            "warnings": PROGRESS.get("warning_count", 0),
             "duration": dur,
             "avg_bitrate": avg_bitrate,
             "avg_width": avg_width,
@@ -2301,9 +2374,12 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
             log_debug(f"[WARNING] Attempted to start scan while already scanning! Current progress: {PROGRESS.get('current', 0)}/{PROGRESS.get('total', 0)}", "WARNING")
             return
         # Atomically set status to scanning before releasing lock
-        PROGRESS.update({"status": "scanning", "current": 0, "total": 0, "file": "Initializing...", "scan_completed": False, "new_found": 0, "failed_count": 0, "last_duration": "0s", "start_time": start_time})
+        PROGRESS.update({"status": "scanning", "current": 0, "total": 0, "file": "Initializing...", "scan_completed": False, "new_found": 0, "failed_count": 0, "warning_count": 0, "last_duration": "0s", "start_time": start_time})
     
     ABORT_SCAN = False
+    PAUSE_EVENT.set()
+    with progress_lock:
+        PROGRESS["paused"] = False
     DEBUG_MODE = debug
     
     # Clear RPU cache on force rescan to ensure fresh data
@@ -2384,7 +2460,7 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
                         if DEBUG_MODE:
                             log_debug(f"Failed to kill process {p.pid}: {e}", "DEBUG")
             log_debug("[ABORT] User aborted.")
-            with progress_lock: PROGRESS.update({"status": "idle", "file": "Aborted"})
+            with progress_lock: PROGRESS.update({"status": "idle", "file": "Aborted", "paused": False})
 
     except Exception as e:
         log_debug(f"[ERROR] CRITICAL: {e}")
@@ -2480,6 +2556,47 @@ def download_log() -> Union[Response, Tuple[str, int]]:
     if LOG_FILE and os.path.exists(LOG_FILE):
         return send_file(LOG_FILE, as_attachment=True, download_name=os.path.basename(LOG_FILE))
     return "No log found", 404
+
+@app.route('/download_failures')
+def download_failures() -> Union[Response, Tuple[str, int]]:
+    """Download the current scan failures CSV file."""
+    if FAIL_FILE and os.path.exists(FAIL_FILE):
+        return send_file(FAIL_FILE, as_attachment=True, download_name=os.path.basename(FAIL_FILE))
+    return "No failures log found", 404
+
+@app.route('/api/failures')
+def get_failures() -> Response:
+    """Get recent failures/warnings from the scan failures CSV file."""
+    limit = 200
+    try:
+        limit = int(request.args.get('limit', limit))
+    except (TypeError, ValueError):
+        limit = 200
+    entries: list[dict] = []
+    if FAIL_FILE and os.path.exists(FAIL_FILE):
+        try:
+            with open(FAIL_FILE, 'r', encoding='utf-8', newline='') as f:
+                reader = csv.reader(f, delimiter='|')
+                for row in reader:
+                    if len(row) < 5:
+                        continue
+                    ts, vol, path, name, msg = row[:5]
+                    entry_type = 'warning' if vol == 'WARNING' else 'failure'
+                    entries.append({
+                        "type": entry_type,
+                        "timestamp": ts,
+                        "volume": vol,
+                        "path": path,
+                        "name": name,
+                        "message": msg
+                    })
+        except OSError:
+            pass
+    if limit > 0 and len(entries) > limit:
+        entries = entries[-limit:]
+    failures = [e for e in entries if e["type"] == "failure"]
+    warnings = [e for e in entries if e["type"] == "warning"]
+    return jsonify({"failures": failures, "warnings": warnings})
 
 @app.route('/api/pre_scan_check')
 def pre_scan_check() -> Response:
@@ -3818,6 +3935,7 @@ def abort() -> Response:
     
     log_debug("[ABORT] Abort requested by user", "INFO")
     ABORT_SCAN = True
+    PAUSE_EVENT.set()
     
     # Immediately kill all active subprocesses
     killed_count = 0
@@ -3843,9 +3961,26 @@ def abort() -> Response:
     # Update PROGRESS immediately so UI reflects abort status
     with progress_lock:
         PROGRESS["file"] = "Aborting..."
+        PROGRESS["paused"] = False
         # Don't change status to "idle" yet - let run_scan do that when it finishes
     
     return jsonify({"status": "aborting", "killed_processes": killed_count})
+
+@app.route('/pause', methods=['POST'])
+def toggle_pause():
+    """Toggle pause/resume for the active scan."""
+    with progress_lock:
+        if PROGRESS.get("status") != "scanning":
+            return jsonify({"status": "idle", "paused": False})
+    if PAUSE_EVENT.is_set():
+        PAUSE_EVENT.clear()
+        with progress_lock:
+            PROGRESS["paused"] = True
+        return jsonify({"status": "paused", "paused": True})
+    PAUSE_EVENT.set()
+    with progress_lock:
+        PROGRESS["paused"] = False
+    return jsonify({"status": "scanning", "paused": False})
 
 @app.route('/progress')
 def get_progress():

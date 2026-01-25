@@ -89,6 +89,7 @@ The toggle is in the **lower‑left** of the chart panel.
 - Order and widths are persisted
 - Sticky left/right columns keep checkbox and delete visible
 - Header scrollbar for wide column sets
+- Column header menu stays pinned when the header is stickied
 
 ### Details Modal (Manual Edits)
 Editable fields saved on modal close:
@@ -102,6 +103,7 @@ Editable fields saved on modal close:
 - Ctrl+Click (Windows) or Cmd+Click (macOS) to multi‑select rows.
 - Apply edits across selected rows or rescan selected files.
 - Per‑field **Clear** toggles allow blanking specific fields.
+- Bulk rescan shows a busy overlay while rescanning.
 
 ### Scan Folders
 - **Folders** button in the main menu opens a folder picker.
@@ -114,6 +116,7 @@ Editable fields saved on modal close:
 - Split scan button: **All**, **TV**, **Movie**.
 - Hover TV/Movie to pick a specific typed folder from a submenu.
 - The main button shows the selected mode and folder target.
+- Click the progress bar during a scan to pause/resume scanning and analyzing.
 
 ---
 
