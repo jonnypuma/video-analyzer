@@ -135,7 +135,7 @@
         button:hover { filter: brightness(1.15); transform: scale(1.02); }
         button:active { transform: scale(0.98); }
 
-        #main-action-wrapper, #btn-export, #btn-toggle-charts, #btn-save { width: 140px; height: 40px; box-sizing: border-box; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+        #main-action-wrapper, #btn-export, #btn-toggle-charts, #btn-save, #export-group { width: 140px; height: 40px; box-sizing: border-box; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
         #main-action-wrapper { position: relative; }
         #scan-group { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; transition: opacity 0.3s ease, visibility 0.3s; box-sizing: border-box; z-index: 20; }
         #btn-scan { background: #3498db; }
@@ -741,6 +741,9 @@
         .btn-group-scan { display: inline-flex; align-items: center; width: 100%; height: 100%; }
         .btn-scan-main { border-top-right-radius: 0; border-bottom-right-radius: 0; flex: 1; height: 100%; background: #3498db; display: flex; flex-direction: column; justify-content: center; line-height: 1.1; }
         .btn-scan-toggle { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 10px; height: 100%; background: #3498db; }
+        .btn-export-main { border-top-right-radius: 0; border-bottom-right-radius: 0; flex: 1; height: 100%; background: #27ae60; display: flex; align-items: center; justify-content: center; line-height: 1.1; }
+        .btn-export-toggle { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 10px; height: 100%; background: #27ae60; }
+        #export-group button { height: 100%; }
         .scan-dropdown { position: absolute; top: 100%; left: 0; margin-top: 6px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 6px 0; min-width: 160px; z-index: 200; display: none; }
         .scan-dropdown.active { display: block; }
         .scan-dropdown button { width: 100%; background: transparent; border: none; color: #ddd; text-align: left; padding: 6px 12px; cursor: pointer; font-size: 0.9em; }
@@ -883,6 +886,7 @@
             padding: 8px 12px; cursor: pointer; font-size: 0.85em; color: #ccc;
         }
         .search-suggestion:hover { background: #2a2a2a; }
+        .search-suggestion.active { background: #2a2a2a; color: #fff; }
         .filter-item { width: 130px; flex-shrink: 0; }
         .controls-right { 
             display: flex; gap: 10px; align-items: center; margin-left: 10px; 
@@ -972,7 +976,7 @@
                 <p style="color:#888; font-size:0.9em; margin-top:0;">
                     Applies changes to <span id="bulk-edit-count">0</span> selected rows. Leave fields blank to keep existing values.
                 </p>
-                <div class="bulk-status" id="bulk-status-text">Please wait, rescanning...</div>
+                <div class="bulk-status" id="bulk-status-text">Updating, please wait...</div>
                 <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
                     <span style="color:#888; font-size:0.85em; min-width:80px;">Type</span>
                     <select id="bulk-media-type" style="width:160px;" autocomplete="off">
@@ -1403,7 +1407,17 @@
                     <button id="btn-delete-action" onclick="promptDelete()">DELETE SELECTED</button>
                 </div>
                 <button id="btn-abort" onclick="abortScan()">Abort Scan</button>
-                <button class="btn-green" id="btn-export" onclick="exportData()">Export CSV</button>
+                <div id="export-group" class="btn-group-scan" style="position: relative;">
+                    <button class="btn-export-main" id="btn-export" onclick="exportData()">Export CSV | All filtered</button>
+                    <button class="btn-export-toggle" onclick="toggleExportMenu(event)">▾</button>
+                    <div id="export-mode-menu" class="scan-dropdown">
+                        <button onclick="selectExportScope('all')">All</button>
+                        <button onclick="selectExportScope('movies')">All Movies</button>
+                        <button onclick="selectExportScope('tv')">All TV</button>
+                        <button onclick="selectExportScope('filtered')">All filtered</button>
+                        <button onclick="selectExportScope('page')">Current page</button>
+                    </div>
+                </div>
                 <button class="btn-grey" id="btn-toggle-charts" onclick="toggleCharts()">Charts ⏵</button>
             </div>
             <div class="status-stack">
@@ -2205,6 +2219,7 @@
     let settingsLoading = false;
     let activeFilters = { search: '', category: '', volume: '', profile: '', el: '', container: '', is_hybrid: '', source_hybrid: '', secondary_hdr: '', status: '', resolution: '', size_op: '', size_val: '', bit_op: '', bit_val: '', audio: '', media_type: '' };
     let isLoading = false;
+    let pendingReload = false;
     let isClearingFilters = false; // Flag to prevent loadData() during clearFilters
     let lastScanStatus = "idle"; 
     let refreshIntervalTimer = null; // Timer for periodic table refresh during file analysis
@@ -2989,6 +3004,10 @@
     // --- FILTER LOGIC ---
     function applyRibbonFilter(type, value) {
         console.log(`[DEBUG] applyRibbonFilter(${type}, ${value}) - FIRST CLICK`);
+
+        const currentMediaType = (() => {
+            try { return getMultiselectValue('media-type-filter'); } catch (e) { return ''; }
+        })();
         
         // UNIFIED APPROACH: Set pending values FIRST (synchronously) for ALL filter types
         if (type === 'format') {
@@ -3018,6 +3037,13 @@
         // NOW clear ALL filters (pending values are already set above)
         console.log(`[DEBUG] Clearing all filters first...`);
         clearFilters(false);
+
+        if (currentMediaType) {
+            setMultiselectValue('media-type-filter', currentMediaType, true);
+            const normalizedType = normalizeMediaTypeFilter(currentMediaType);
+            updateMediaTypeButtons(normalizedType);
+            applyMediaTypeColumnVisibility(normalizedType);
+        }
         
         // Re-set pending values AFTER clearFilters to ensure they persist through setTimeout
         if (type === 'format') {
@@ -4603,7 +4629,14 @@
 
     // --- DATA LOADING & INTERACTION ---
     function debounceSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(resetAndLoad, 400); }
-    function resetAndLoad() { currentPage = 1; loadData(); }
+    function resetAndLoad() {
+        currentPage = 1;
+        if (isLoading) {
+            pendingReload = true;
+            return;
+        }
+        loadData();
+    }
     function changePage(d) { jumpPage(currentPage + d); }
     function jumpPage(v) { currentPage = Math.max(1, Math.min(totalPages, parseInt(v) || 1)); loadData(); }
 
@@ -4776,6 +4809,24 @@
         return values[token] || [];
     }
 
+    let searchSuggestionIndex = -1;
+
+    function getSearchSuggestionItems() {
+        return Array.from(document.querySelectorAll('#search-suggestions .search-suggestion'));
+    }
+
+    function setActiveSearchSuggestion(index) {
+        const items = getSearchSuggestionItems();
+        if (items.length === 0) return;
+        items.forEach((el, i) => {
+            el.classList.toggle('active', i === index);
+        });
+        const active = items[index];
+        if (active) {
+            active.scrollIntoView({ block: 'nearest' });
+        }
+    }
+
     function updateSearchSuggestions() {
         const input = document.getElementById('search-bar');
         const suggestionsEl = document.getElementById('search-suggestions');
@@ -4804,11 +4855,13 @@
         if (suggestions.length === 0) {
             suggestionsEl.style.display = 'none';
             suggestionsEl.innerHTML = '';
+            searchSuggestionIndex = -1;
             return;
         }
 
         suggestionsEl.innerHTML = suggestions.slice(0, 20).map(s => `<div class="search-suggestion" data-value="${s}">${s}</div>`).join('');
         suggestionsEl.style.display = 'block';
+        searchSuggestionIndex = -1;
     }
 
     function applySearchSuggestion(value) {
@@ -4822,6 +4875,7 @@
             suggestionsEl.style.display = 'none';
             suggestionsEl.innerHTML = '';
         }
+        searchSuggestionIndex = -1;
         debounceSearch();
     }
     
@@ -5270,6 +5324,10 @@
             }
         } finally {
             isLoading = false;
+            if (pendingReload) {
+                pendingReload = false;
+                resetAndLoad();
+            }
         }
     }
 
@@ -5311,6 +5369,13 @@
     });
 
     document.addEventListener('click', (e) => {
+        const menu = document.getElementById('export-mode-menu');
+        if (menu && !e.target.closest('#export-group')) {
+            menu.classList.remove('active');
+        }
+    });
+
+    document.addEventListener('click', (e) => {
         if (!e.target.closest('#row-context-menu')) {
             closeContextMenu();
         }
@@ -5319,6 +5384,44 @@
     document.addEventListener('input', (e) => {
         if (e.target && e.target.id === 'search-bar') {
             updateSearchSuggestions();
+        }
+    });
+
+    document.addEventListener('keydown', (e) => {
+        const target = e.target;
+        if (!target || target.id !== 'search-bar') return;
+        const suggestionsEl = document.getElementById('search-suggestions');
+        const items = getSearchSuggestionItems();
+        const isOpen = suggestionsEl && suggestionsEl.style.display === 'block' && items.length > 0;
+        if (!isOpen) return;
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            searchSuggestionIndex = (searchSuggestionIndex + 1) % items.length;
+            setActiveSearchSuggestion(searchSuggestionIndex);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            searchSuggestionIndex = (searchSuggestionIndex - 1 + items.length) % items.length;
+            setActiveSearchSuggestion(searchSuggestionIndex);
+        } else if (e.key === 'Enter') {
+            if (searchSuggestionIndex >= 0 && items[searchSuggestionIndex]) {
+                e.preventDefault();
+                const value = items[searchSuggestionIndex].getAttribute('data-value');
+                if (value) applySearchSuggestion(value);
+            }
+        } else if (e.key === 'Tab') {
+            const pickIndex = searchSuggestionIndex >= 0 ? searchSuggestionIndex : 0;
+            const item = items[pickIndex];
+            if (item) {
+                e.preventDefault();
+                const value = item.getAttribute('data-value');
+                if (value) applySearchSuggestion(value);
+            }
+        } else if (e.key === 'Escape') {
+            if (suggestionsEl) {
+                suggestionsEl.style.display = 'none';
+                suggestionsEl.innerHTML = '';
+            }
+            searchSuggestionIndex = -1;
         }
     });
 
@@ -5525,6 +5628,17 @@
         if (modal) modal.style.display = 'none';
     }
 
+    function setBulkEditStatus(processed, total) {
+        const statusEl = document.getElementById('bulk-status-text');
+        if (!statusEl) return;
+        const base = 'Updating, please wait...';
+        if (typeof total === 'number' && total > 0) {
+            statusEl.textContent = `${base} ${processed} of ${total}`;
+        } else {
+            statusEl.textContent = base;
+        }
+    }
+
     async function applyBulkEdit() {
         if (selectedPaths.size === 0 && masterState !== 2) {
             showToast('Select rows to bulk edit');
@@ -5596,28 +5710,41 @@
             return;
         }
         let failed = 0;
-        for (const fullPath of paths) {
-            try {
-                if (hasType) {
-                    const resType = await fetch('/api/update_media_type', {
+        const modal = document.getElementById('bulk-edit-modal');
+        if (modal) modal.classList.add('busy');
+        setBulkEditStatus(0, paths.length);
+        try {
+            const batchSize = 200;
+            let processed = 0;
+            for (let i = 0; i < paths.length; i += batchSize) {
+                const batch = paths.slice(i, i + batchSize);
+                try {
+                    const bulkPayload = {
+                        paths: batch,
+                        updates: payload
+                    };
+                    if (hasType) {
+                        bulkPayload.media_type = clearMediaType ? '' : mediaType;
+                    }
+                    const res = await fetch('/api/bulk_update_metadata', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ full_path: fullPath, media_type: clearMediaType ? '' : mediaType })
+                        body: JSON.stringify(bulkPayload)
                     });
-                    if (!resType.ok) throw new Error(`Type update failed: ${resType.status}`);
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok || data.status !== 'ok') {
+                        throw new Error(data.message || `Bulk update failed: ${res.status}`);
+                    }
+                } catch (e) {
+                    console.error('Bulk edit batch failed', e);
+                    failed += batch.length;
+                } finally {
+                    processed += batch.length;
+                    setBulkEditStatus(processed, paths.length);
                 }
-                if (hasMetadata) {
-                    const resMeta = await fetch('/api/update_metadata', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ full_path: fullPath, ...payload })
-                    });
-                    if (!resMeta.ok) throw new Error(`Metadata update failed: ${resMeta.status}`);
-                }
-            } catch (e) {
-                console.error('Bulk edit failed for', fullPath, e);
-                failed += 1;
             }
+        } finally {
+            if (modal) modal.classList.remove('busy');
         }
 
         closeBulkEdit();
@@ -6668,43 +6795,80 @@
         }
     }
 
+    let exportScope = 'filtered';
+
+    function getExportScopeLabel(scope) {
+        if (scope === 'all') return 'All';
+        if (scope === 'movies') return 'All Movies';
+        if (scope === 'tv') return 'All TV';
+        if (scope === 'page') return 'Current page';
+        return 'All filtered';
+    }
+
     function updateExportButtonText() {
         const format = document.querySelector('input[name="export-format"]:checked')?.value || 'csv';
         const btn = document.getElementById('btn-export');
         if (btn) {
-            btn.textContent = format === 'json' ? 'Export JSON' : 'Export CSV';
+            const fmtLabel = format === 'json' ? 'JSON' : 'CSV';
+            btn.textContent = `Export ${fmtLabel} | ${getExportScopeLabel(exportScope)}`;
         }
+    }
+
+    function toggleExportMenu(event) {
+        if (event) event.stopPropagation();
+        const menu = document.getElementById('export-mode-menu');
+        if (!menu) return;
+        menu.classList.toggle('active');
+    }
+
+    function selectExportScope(scope) {
+        exportScope = scope || 'filtered';
+        updateExportButtonText();
+        const menu = document.getElementById('export-mode-menu');
+        if (menu) menu.classList.remove('active');
     }
     
     function exportData() {
         const format = document.querySelector('input[name="export-format"]:checked')?.value || 'csv';
         showToast(format === 'json' ? 'Export started (JSON)' : 'Export started (CSV)');
         if (format === 'json') {
-            exportJSON();
+            exportJSON(exportScope);
         } else {
-            exportCSV();
+            exportCSV(exportScope);
         }
     }
 
-    function exportCSV() { 
-        // Collect current filter values (same as loadData does)
+    function buildExportFilters(scope) {
+        const base = {
+            sort: sortCol,
+            order: sortOrder
+        };
+        if (scope === 'all') {
+            return base;
+        }
+        if (scope === 'movies') {
+            return { ...base, media_type: 'movie' };
+        }
+        if (scope === 'tv') {
+            return { ...base, media_type: 'tv' };
+        }
         const currentFilters = { ...activeFilters };
         currentFilters.search = document.getElementById('search-bar') ? document.getElementById('search-bar').value : '';
-        try { 
+        try {
             currentFilters.category = getFormatFilterValue();
-        } catch(e) { 
-            currentFilters.category = ''; 
+        } catch (e) {
+            currentFilters.category = '';
         }
-        try { currentFilters.volume = getMultiselectValue('vol-filter'); } catch(e) { currentFilters.volume = ''; }
-        try { currentFilters.profile = getMultiselectValue('profile-filter'); } catch(e) { currentFilters.profile = ''; }
-        try { currentFilters.el = getMultiselectValue('el-filter'); } catch(e) { currentFilters.el = ''; }
-        try { currentFilters.container = getMultiselectValue('container-filter'); } catch(e) { currentFilters.container = ''; }
-        try { currentFilters.media_type = getMultiselectValue('media-type-filter'); } catch(e) { currentFilters.media_type = ''; }
+        try { currentFilters.volume = getMultiselectValue('vol-filter'); } catch (e) { currentFilters.volume = ''; }
+        try { currentFilters.profile = getMultiselectValue('profile-filter'); } catch (e) { currentFilters.profile = ''; }
+        try { currentFilters.el = getMultiselectValue('el-filter'); } catch (e) { currentFilters.el = ''; }
+        try { currentFilters.container = getMultiselectValue('container-filter'); } catch (e) { currentFilters.container = ''; }
+        try { currentFilters.media_type = getMultiselectValue('media-type-filter'); } catch (e) { currentFilters.media_type = ''; }
         currentFilters.is_hybrid = document.getElementById('hybrid-filter-header') ? document.getElementById('hybrid-filter-header').value : '';
         currentFilters.source_hybrid = document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '';
-        try { currentFilters.secondary_hdr = getMultiselectValue('secondary-filter'); } catch(e) { currentFilters.secondary_hdr = ''; }
+        try { currentFilters.secondary_hdr = getMultiselectValue('secondary-filter'); } catch (e) { currentFilters.secondary_hdr = ''; }
         currentFilters.status = document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '';
-        try { currentFilters.resolution = getMultiselectValue('res-filter'); } catch(e) { currentFilters.resolution = ''; }
+        try { currentFilters.resolution = getMultiselectValue('res-filter'); } catch (e) { currentFilters.resolution = ''; }
         const sizeFilter = document.getElementById('size-filter-header') ? document.getElementById('size-filter-header').value : '';
         const sizeParsed = parseFilterValue(sizeFilter);
         currentFilters.size_op = sizeParsed.op;
@@ -6713,11 +6877,19 @@
         const bitParsed = parseFilterValue(bitFilter);
         currentFilters.bit_op = bitParsed.op;
         currentFilters.bit_val = bitParsed.value;
-        try { currentFilters.audio = getMultiselectValue('audio-filter'); } catch(e) { currentFilters.audio = ''; }
+        try { currentFilters.audio = getMultiselectValue('audio-filter'); } catch (e) { currentFilters.audio = ''; }
         currentFilters.sort = sortCol;
         currentFilters.order = sortOrder;
-        
-        // Build query string manually to ensure empty values are included if needed
+        if (scope === 'page') {
+            const perPageVal = document.getElementById('per-page-select') ? document.getElementById('per-page-select').value : '100';
+            currentFilters.page = currentPage;
+            currentFilters.per_page = perPageVal;
+        }
+        return currentFilters;
+    }
+
+    function exportCSV(scope = 'filtered') { 
+        const currentFilters = buildExportFilters(scope);
         const params = new URLSearchParams();
         for (const [key, value] of Object.entries(currentFilters)) {
             if (value !== null && value !== undefined) {
@@ -6727,38 +6899,8 @@
         window.location = '/download_csv?' + params.toString(); 
     }
 
-    function exportJSON() {
-        // Collect current filter values (same as exportCSV does)
-        const currentFilters = { ...activeFilters };
-        currentFilters.search = document.getElementById('search-bar') ? document.getElementById('search-bar').value : '';
-        try { 
-            currentFilters.category = getFormatFilterValue();
-        } catch(e) { 
-            currentFilters.category = ''; 
-        }
-        try { currentFilters.volume = getMultiselectValue('vol-filter'); } catch(e) { currentFilters.volume = ''; }
-        try { currentFilters.profile = getMultiselectValue('profile-filter'); } catch(e) { currentFilters.profile = ''; }
-        try { currentFilters.el = getMultiselectValue('el-filter'); } catch(e) { currentFilters.el = ''; }
-        try { currentFilters.container = getMultiselectValue('container-filter'); } catch(e) { currentFilters.container = ''; }
-        try { currentFilters.media_type = getMultiselectValue('media-type-filter'); } catch(e) { currentFilters.media_type = ''; }
-        currentFilters.is_hybrid = document.getElementById('hybrid-filter-header') ? document.getElementById('hybrid-filter-header').value : '';
-        currentFilters.source_hybrid = document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '';
-        try { currentFilters.secondary_hdr = getMultiselectValue('secondary-filter'); } catch(e) { currentFilters.secondary_hdr = ''; }
-        currentFilters.status = document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '';
-        try { currentFilters.resolution = getMultiselectValue('res-filter'); } catch(e) { currentFilters.resolution = ''; }
-        const sizeFilter = document.getElementById('size-filter-header') ? document.getElementById('size-filter-header').value : '';
-        const sizeParsed = parseFilterValue(sizeFilter);
-        currentFilters.size_op = sizeParsed.op;
-        currentFilters.size_val = sizeParsed.value;
-        const bitFilter = document.getElementById('bit-filter-header') ? document.getElementById('bit-filter-header').value : '';
-        const bitParsed = parseFilterValue(bitFilter);
-        currentFilters.bit_op = bitParsed.op;
-        currentFilters.bit_val = bitParsed.value;
-        try { currentFilters.audio = getMultiselectValue('audio-filter'); } catch(e) { currentFilters.audio = ''; }
-        currentFilters.sort = sortCol;
-        currentFilters.order = sortOrder;
-        
-        // Build query string manually to ensure empty values are included if needed
+    function exportJSON(scope = 'filtered') {
+        const currentFilters = buildExportFilters(scope);
         const params = new URLSearchParams();
         for (const [key, value] of Object.entries(currentFilters)) {
             if (value !== null && value !== undefined) {

@@ -14,7 +14,7 @@ Video analyzer and library for HDR content with deep metadata extraction, flexib
 - **Bulk Edit/Rescan:** Multi‑select rows and apply edits or rescan selected files.
 - **Column Control:** Show/hide, resize, drag‑reorder columns, and header‑only scrollbar (persisted).
 - **Scheduling:** Manual, daily, and interval scanning.
-- **Exports:** CSV/JSON of current filtered state.
+- **Exports:** CSV/JSON of All, Movies, TV, Filtered, or Current page.
 - **Notifications:** Toasts for scan actions, backfill, settings saves, and more.
 - **Scan Controls:** Split scan button with All/TV/Movie and per-folder targeting.
 
@@ -110,13 +110,24 @@ Editable fields saved on modal close:
 - Choose a volume, browse directories, and add folders to the scan list.
 - **Type** selector per folder (Auto/TV/Movie) for targeted scans.
 - **Mute** keeps a folder in the list but skips it during scans.
+- Any folder containing an empty `.scanignore` file is skipped (including all subfolders).
 - If no scan folders are configured, scans default to all mounted volumes.
+
+Example:
+```
+/media/Movies/.scanignore
+```
+Any folder with `.scanignore` is skipped.
 
 ### Scan Button
 - Split scan button: **All**, **TV**, **Movie**.
 - Hover TV/Movie to pick a specific typed folder from a submenu.
 - The main button shows the selected mode and folder target.
 - Click the progress bar during a scan to pause/resume scanning and analyzing.
+
+### Export Button
+- Split export button with scopes: **All**, **All Movies**, **All TV**, **All filtered**, **Current page**.
+- Output format is set in the main menu (CSV/JSON).
 
 ---
 

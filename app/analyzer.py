@@ -2085,6 +2085,9 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
                 dir_count += 1
                 if dir_count <= 10 or dir_count % 100 == 0:
                     log_debug(f"[CRAWL] [{current_vol}] Traversing directory {dir_count}: {root}", "INFO")
+                if os.path.isfile(os.path.join(root, '.scanignore')):
+                    dirs[:] = []
+                    continue
                 if not scan_extras:
                     def should_skip_extras(parent_dir: str) -> bool:
                         try:
@@ -2695,7 +2698,8 @@ def parse_advanced_search(search_query: str) -> Tuple[str, Dict[str, Any]]:
     
     # Pattern to match field:operator?value (e.g., year:2020, size:>10GB, codec:HEVC)
     # Matches: field_name, optional operator (>, <, >=, <=, !=), value (supports quoted strings)
-    pattern = r'\b(\w+):(>=|<=|!=|>|<|)("[^"]+"|\'[^\']+\'|[^\s]+)'
+    # Allows optional whitespace around the operator/value.
+    pattern = r'\b(\w+):\s*(>=|<=|!=|>|<)?\s*("[^"]+"|\'[^\']+\'|[^\s]+)'
     matches = re.finditer(pattern, search_query)
     
     # Field name mapping from search syntax to filter parameter names
@@ -2730,7 +2734,7 @@ def parse_advanced_search(search_query: str) -> Tuple[str, Dict[str, Any]]:
     match_positions = []
     for match in matches:
         field_name = match.group(1).lower()
-        operator = match.group(2)
+        operator = match.group(2) or ''
         value = match.group(3)
         if value and ((value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'"))):
             value = value[1:-1]
@@ -2844,8 +2848,8 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
         val = args.get(key, '').strip()
         if val:
             if key == 'search':
-                conditions.append(f"({col} LIKE ? OR full_path LIKE ?)")
-                params.extend([f"%{val}%", f"%{val}%"])
+                conditions.append(f"(LOWER({col}) LIKE ? OR LOWER(full_path) LIKE ?)")
+                params.extend([f"%{val.lower()}%", f"%{val.lower()}%"])
             elif key == 'status': 
                 if val == 'failed': conditions.append("scan_error IS NOT NULL AND scan_error != ''")
                 elif val == 'ok': conditions.append("(scan_error IS NULL OR scan_error = '')")
@@ -2855,13 +2859,30 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
                     values = [v for v in values if v != blank_token]
                     blank_clause = f"({col} IS NULL OR {col} = '')"
                     if values:
-                        like_clauses = [f"{col} LIKE ?" for _ in values]
-                        params.extend([f"%{v}%" for v in values])
+                        like_clauses = [f"LOWER({col}) LIKE ?" for _ in values]
+                        params.extend([f"%{v.lower()}%" for v in values])
                         conditions.append(f"({ ' OR '.join(like_clauses + [blank_clause]) })")
                     else:
                         conditions.append(blank_clause)
                 else:
-                    conditions.append(f"{col} LIKE ?"); params.append(f"%{val}%")
+                    conditions.append(f"LOWER({col}) LIKE ?"); params.append(f"%{val.lower()}%")
+            elif key == 'video_codec':
+                values = [v.strip() for v in val.split(',') if v.strip()]
+                if blank_token in values:
+                    values = [v for v in values if v != blank_token]
+                    blank_clause = f"({col} IS NULL OR {col} = '')"
+                    if values:
+                        placeholders = ','.join('?' * len(values))
+                        conditions.append(f"(LOWER({col}) IN ({placeholders}) OR {blank_clause})")
+                        params.extend([v.lower() for v in values])
+                    else:
+                        conditions.append(blank_clause)
+                elif len(values) > 1:
+                    placeholders = ','.join('?' * len(values))
+                    conditions.append(f"LOWER({col}) IN ({placeholders})")
+                    params.extend([v.lower() for v in values])
+                else:
+                    conditions.append(f"LOWER({col}) = ?"); params.append(val.lower())
             elif ',' in val or val == blank_token:
                 # Handle multiple values (comma-separated) for any filter type, including blanks
                 values = [v.strip() for v in val.split(',') if v.strip()]
@@ -2870,16 +2891,16 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
                     blank_clause = f"({col} IS NULL OR {col} = '')"
                     if values:
                         placeholders = ','.join('?' * len(values))
-                        conditions.append(f"({col} IN ({placeholders}) OR {blank_clause})")
-                        params.extend(values)
+                        conditions.append(f"(LOWER({col}) IN ({placeholders}) OR {blank_clause})")
+                        params.extend([v.lower() for v in values])
                     else:
                         conditions.append(blank_clause)
                 elif values:
                     placeholders = ','.join('?' * len(values))
-                    conditions.append(f"{col} IN ({placeholders})")
-                    params.extend(values)
+                    conditions.append(f"LOWER({col}) IN ({placeholders})")
+                    params.extend([v.lower() for v in values])
             else:
-                conditions.append(f"{col} = ?"); params.append(val)
+                conditions.append(f"LOWER({col}) = ?"); params.append(val.lower())
     if exclude_key != 'secondary_hdr':
         sec = args.get('secondary_hdr', '').strip()
         if sec:
@@ -2889,16 +2910,16 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
                 blank_clause = "(secondary_hdr IS NULL OR secondary_hdr = '')"
                 if values:
                     placeholders = ','.join('?' * len(values))
-                    conditions.append(f"(secondary_hdr IN ({placeholders}) OR {blank_clause})")
-                    params.extend(values)
+                    conditions.append(f"(LOWER(secondary_hdr) IN ({placeholders}) OR {blank_clause})")
+                    params.extend([v.lower() for v in values])
                 else:
                     conditions.append(blank_clause)
             elif ',' in sec:
                 placeholders = ','.join('?' * len(values))
-                conditions.append(f"secondary_hdr IN ({placeholders})")
-                params.extend(values)
+                conditions.append(f"LOWER(secondary_hdr) IN ({placeholders})")
+                params.extend([v.lower() for v in values])
             else:
-                conditions.append("secondary_hdr = ?"); params.append(sec)
+                conditions.append("LOWER(secondary_hdr) = ?"); params.append(sec.lower())
     if exclude_key != 'is_hybrid':
         hyb = args.get('is_hybrid', '').strip()
         if hyb == "1": conditions.append("is_hybrid = 1")
@@ -3060,8 +3081,25 @@ def download_csv() -> Response:
     where_clause, params = build_filter_query(request.args)
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'source_hybrid': 'is_source_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size'}
     db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
+    page = request.args.get('page')
+    per_page = request.args.get('per_page')
+    limit_clause = ""
+    limit_params: list[Any] = []
+    try:
+        if page is not None and per_page is not None:
+            page_val = max(1, int(page))
+            per_page_val = max(1, int(per_page))
+            offset = (page_val - 1) * per_page_val
+            limit_clause = " LIMIT ? OFFSET ?"
+            limit_params = [per_page_val, offset]
+    except (ValueError, TypeError):
+        limit_clause = ""
+        limit_params = []
     with get_db() as conn:
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
+        rows = conn.execute(
+            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
+            params + limit_params
+        ).fetchall()
     si = io.StringIO()
     csv.writer(si).writerows([['Filename', 'Cat', 'Prof', 'EL', 'Cont', 'Vol', 'Path', 'Date', 'Res', 'Bitrate', 'Error', 'Dual HDR', 'Hybrid', 'SecHDR', 'Width', 'Height', 'Size', 'BL_ID', 'Audio', 'AudioCh', 'Subs', 'MaxCLL', 'FPS', 'Aspect', 'IMDB_ID', 'TVDB_ID', 'TMDB_ID', 'Rotten_ID', 'Metacritic_ID', 'Trakt_ID', 'IMDB_Rating', 'TVDB_Rating', 'TMDB_Rating', 'Rotten_Rating', 'Metacritic_Rating', 'Trakt_Rating']] + list(rows))
     return make_response(si.getvalue(), 200, {"Content-Disposition": "attachment; filename=media_export.csv", "Content-type": "text/csv"})
@@ -3080,8 +3118,25 @@ def download_json() -> Response:
     where_clause, params = build_filter_query(request.args)
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'source_hybrid': 'is_source_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size'}
     db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
+    page = request.args.get('page')
+    per_page = request.args.get('per_page')
+    limit_clause = ""
+    limit_params: list[Any] = []
+    try:
+        if page is not None and per_page is not None:
+            page_val = max(1, int(page))
+            per_page_val = max(1, int(per_page))
+            offset = (page_val - 1) * per_page_val
+            limit_clause = " LIMIT ? OFFSET ?"
+            limit_params = [per_page_val, offset]
+    except (ValueError, TypeError):
+        limit_clause = ""
+        limit_params = []
     with get_db() as conn:
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}", params).fetchall()
+        rows = conn.execute(
+            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
+            params + limit_params
+        ).fetchall()
     
     # Convert rows to list of dictionaries
     data = []
@@ -3632,6 +3687,78 @@ def update_metadata() -> Response:
         return jsonify({"status": "ok"})
     except Exception as e:
         log_debug(f"Update metadata failed for {payload.get('full_path')}: {e}", "ERROR")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/bulk_update_metadata', methods=['POST'])
+def bulk_update_metadata() -> Response:
+    """
+    Update metadata fields (and optional media_type) for multiple files.
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        paths = payload.get('paths') or []
+        updates_payload = payload.get('updates') or {}
+        media_type = (payload.get('media_type') or '').strip().lower()
+        if not isinstance(paths, list) or not paths:
+            return jsonify({"status": "error", "message": "Missing paths"}), 400
+
+        text_fields = {
+            'show_title': 'show_title',
+            'episode_title': 'episode_title',
+            'movie_title': 'movie_title',
+            'video_source': 'video_source',
+            'source_format': 'source_format',
+            'category': 'category',
+            'secondary_hdr': 'secondary_hdr'
+        }
+        int_fields = {
+            'season': 'season',
+            'episode': 'episode',
+            'year': 'year'
+        }
+
+        updates = []
+        params = []
+        for key in text_fields:
+            if key in updates_payload:
+                val = (updates_payload.get(key) or '').strip() or None
+                updates.append(f"{text_fields[key]}=?")
+                params.append(val)
+
+        for key in int_fields:
+            if key in updates_payload:
+                raw_val = updates_payload.get(key)
+                try:
+                    val = int(raw_val) if raw_val is not None and raw_val != '' else None
+                except (ValueError, TypeError):
+                    val = None
+                updates.append(f"{int_fields[key]}=?")
+                params.append(val)
+
+        if media_type:
+            if media_type not in ('movie', 'tv'):
+                media_type = None
+            updates.append("media_type=?")
+            params.append(media_type)
+        elif 'media_type' in payload:
+            updates.append("media_type=?")
+            params.append(None)
+
+        if not updates:
+            return jsonify({"status": "ok", "updated": 0})
+
+        updated = 0
+        with get_db() as conn:
+            for full_path in paths:
+                conn.execute(
+                    f"UPDATE videos SET {', '.join(updates)} WHERE full_path=?",
+                    params + [full_path]
+                )
+                update_validation_flag_for_path(conn, full_path)
+                updated += 1
+        return jsonify({"status": "ok", "updated": updated})
+    except Exception as e:
+        log_debug(f"Bulk update metadata failed: {e}", "ERROR")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/backfill_metadata', methods=['POST'])
