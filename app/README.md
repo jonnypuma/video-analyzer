@@ -124,6 +124,7 @@ Any folder with `.scanignore` is skipped.
 - Hover TV/Movie to pick a specific typed folder from a submenu.
 - The main button shows the selected mode and folder target.
 - Click the progress bar during a scan to pause/resume scanning and analyzing.
+- History button appears when idle and shows recent scan history with a per-entry report view.
 
 ### Export Button
 - Split export button with scopes: **All**, **All Movies**, **All TV**, **All filtered**, **Current page**.

@@ -197,6 +197,26 @@ def log_scan_warning(path: str, name: str, message: str) -> None:
     except (OSError, IOError) as e:
         log_debug(f"Failed to write warning log: {e}", "WARNING")
 
+def record_scan_history(entry: Dict[str, Any]) -> None:
+    """
+    Persist a scan history entry (keep last 50).
+    """
+    try:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        payload = dict(entry)
+        payload["timestamp"] = payload.get("timestamp") or now
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO scan_history (entry, created_at) VALUES (?, ?)",
+                (json.dumps(payload), payload["timestamp"])
+            )
+            conn.execute(
+                "DELETE FROM scan_history WHERE id NOT IN (SELECT id FROM scan_history ORDER BY id DESC LIMIT 50)"
+            )
+    except Exception as e:
+        if DEBUG_MODE:
+            log_debug(f"Failed to record scan history: {e}", "WARNING")
+
 def wait_if_paused() -> None:
     """Block worker threads while scan is paused; abort still exits immediately."""
     while not PAUSE_EVENT.is_set():
@@ -299,6 +319,7 @@ def init_db() -> None:
     
     with get_db_readonly() as conn:
         conn.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
+        conn.execute('CREATE TABLE IF NOT EXISTS scan_history (id INTEGER PRIMARY KEY AUTOINCREMENT, entry TEXT, created_at TEXT)')
         conn.execute('''CREATE TABLE IF NOT EXISTS videos 
                         (filename TEXT, category TEXT, profile TEXT, el_type TEXT, 
                          container TEXT, source_vol TEXT, full_path TEXT PRIMARY KEY,
@@ -312,7 +333,7 @@ def init_db() -> None:
                          scan_attempts INTEGER DEFAULT 0,
                          video_source TEXT, source_format TEXT, video_codec TEXT, is_3d INTEGER DEFAULT 0, edition TEXT, year INTEGER,
                          media_type TEXT, show_title TEXT, season INTEGER, episode INTEGER, movie_title TEXT, episode_title TEXT,
-                         validation_flag TEXT)''')
+                         nfo_missing INTEGER DEFAULT 0, validation_flag TEXT)''')
         
         try:
             existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()}
@@ -325,7 +346,7 @@ def init_db() -> None:
                 'video_source': 'TEXT', 'source_format': 'TEXT', 'video_codec': 'TEXT', 
                 'is_3d': 'INTEGER DEFAULT 0', 'edition': 'TEXT', 'year': 'INTEGER',
                 'media_type': 'TEXT', 'show_title': 'TEXT', 'season': 'INTEGER', 'episode': 'INTEGER',
-                'movie_title': 'TEXT', 'episode_title': 'TEXT', 'validation_flag': 'TEXT'
+                'movie_title': 'TEXT', 'episode_title': 'TEXT', 'nfo_missing': 'INTEGER DEFAULT 0', 'validation_flag': 'TEXT'
             }
             for col, type_def in required_cols.items():
                 if col not in existing_cols: 
@@ -965,7 +986,8 @@ def analyze_file_deep(path: str) -> dict:
         'imdb_rating': None, 'tvdb_rating': None, 'tmdb_rating': None, 'rotten_rating': None, 'metacritic_rating': None, 'trakt_rating': None,
         'video_source': None, 'source_format': None, 'video_codec': None, 
         'is_3d': 0, 'edition': None, 'year': None,
-        'media_type': None, 'show_title': None, 'season': None, 'episode': None, 'movie_title': None, 'episode_title': None
+        'media_type': None, 'show_title': None, 'season': None, 'episode': None, 'movie_title': None, 'episode_title': None,
+        'nfo_missing': 1
     }
     
     # Early validation - check if file exists and is accessible
@@ -1075,6 +1097,7 @@ def analyze_file_deep(path: str) -> dict:
             result['episode'] = episode_guess
 
         nfo_candidates = find_kodi_nfo_candidates(path, result['media_type'])
+        result['nfo_missing'] = 0 if nfo_candidates else 1
         if nfo_candidates:
             for nfo_path in nfo_candidates:
                 nfo_data = parse_kodi_nfo(nfo_path)
@@ -1545,7 +1568,8 @@ def _create_error_result(error_msg: str) -> dict:
         'imdb_rating': None, 'tvdb_rating': None, 'tmdb_rating': None, 'rotten_rating': None, 'metacritic_rating': None, 'trakt_rating': None,
         'video_source': None, 'source_format': None, 'video_codec': None,
         'is_3d': 0, 'edition': None, 'year': None,
-        'media_type': None, 'show_title': None, 'season': None, 'episode': None, 'movie_title': None, 'episode_title': None
+        'media_type': None, 'show_title': None, 'season': None, 'episode': None, 'movie_title': None, 'episode_title': None,
+        'nfo_missing': 1
     }
 
 def _finalize_result(res: dict) -> dict:
@@ -1896,13 +1920,13 @@ def save_batch_to_db(data_list: list) -> None:
                  file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio,
                  imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id,
                  imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating,
-                 scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, validation_flag) 
+                 scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, validation_flag) 
                 VALUES (:filename, :category, :profile, :el_type, :container, :source_vol, :full_path, :last_scanned, 
                  :resolution, :bitrate_mbps, :scan_error, :is_hybrid, :is_source_hybrid, :secondary_hdr, :width, :height, 
                  :file_size, :bl_compatibility_id, :audio_codecs, :audio_langs, :audio_channels, :subtitles, :max_cll, :max_fall, :fps, :aspect_ratio,
                  :imdb_id, :tvdb_id, :tmdb_id, :rotten_id, :metacritic_id, :trakt_id,
                  :imdb_rating, :tvdb_rating, :tmdb_rating, :rotten_rating, :metacritic_rating, :trakt_rating,
-                 :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :validation_flag)""", sanitized_list)
+                 :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :nfo_missing, :validation_flag)""", sanitized_list)
             if DEBUG_MODE:
                 for item in sanitized_list:
                     log_debug(f"Saved to DB: {item['filename']} -> {item['category']} {item['profile']} (error: {item.get('scan_error', 'None')})", "DEBUG")
@@ -2337,7 +2361,9 @@ def cleanup_deleted_files(target_vols: list | None, scan_paths: list, all_found_
         with get_db() as conn:
             conn.executemany("DELETE FROM videos WHERE full_path=?", [(f,) for f in to_del])
 
-def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float) -> None:
+def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
+                  scan_mode: str, target_vols: Optional[List[str]],
+                  scan_folder: dict | None) -> None:
     """
     Finalize scan by updating database settings and PROGRESS state.
     
@@ -2370,6 +2396,18 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float) -> 
             "avg_height": avg_height,
             "avg_file_size_mb": avg_file_size_mb
         }
+        history_entry = {
+            "status": "complete",
+            "duration": dur,
+            "scanned": PROGRESS["total"],
+            "new": PROGRESS["new_found"],
+            "failed": PROGRESS["failed_count"],
+            "warnings": PROGRESS.get("warning_count", 0),
+            "scan_mode": scan_mode,
+            "target_vols": target_vols or [],
+            "scan_folder": scan_folder.get("path") if isinstance(scan_folder, dict) else None
+        }
+    record_scan_history(history_entry)
             
     log_debug(f"[SUCCESS] Finished: {dur}. Added: {PROGRESS['new_found']}. Errors: {PROGRESS['failed_count']}", "INFO")
 
@@ -2475,7 +2513,7 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
         
         if not ABORT_SCAN:
             cleanup_deleted_files(target_vols, scan_paths, all_found_files)
-            finalize_scan(metrics["metrics_sum"], metrics["metrics_count"], start_time)
+            finalize_scan(metrics["metrics_sum"], metrics["metrics_count"], start_time, scan_mode, target_vols, scan_folder)
         else:
             log_debug("[ABORT] Killing active subprocesses...")
             with proc_lock:
@@ -2498,6 +2536,17 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
                     "duration": dur,
                     "aborted": True
                 }
+            record_scan_history({
+                "status": "aborted",
+                "duration": dur,
+                "scanned": PROGRESS.get("current", 0),
+                "new": PROGRESS.get("new_found", 0),
+                "failed": PROGRESS.get("failed_count", 0),
+                "warnings": PROGRESS.get("warning_count", 0),
+                "scan_mode": scan_mode,
+                "target_vols": target_vols or [],
+                "scan_folder": scan_folder.get("path") if isinstance(scan_folder, dict) else None
+            })
 
     except Exception as e:
         log_debug(f"[ERROR] CRITICAL: {e}")
@@ -2581,6 +2630,27 @@ def get_logs() -> Response:
     """
     with progress_lock: 
         return jsonify(list(LOG_CACHE))
+
+@app.route('/api/scan_history')
+def get_scan_history() -> Response:
+    """
+    Return recent scan history entries.
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT entry FROM scan_history ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+        entries: List[dict] = []
+        for row in rows:
+            try:
+                entries.append(json.loads(row[0]))
+            except (TypeError, ValueError):
+                continue
+        return jsonify({"status": "ok", "entries": entries})
+    except Exception as e:
+        log_debug(f"Failed to load scan history: {e}", "ERROR")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/download_log')
 def download_log() -> Union[Response, Tuple[str, int]]:
@@ -2728,6 +2798,8 @@ def parse_advanced_search(search_query: str) -> Tuple[str, Dict[str, Any]]:
         'source_hybrid': 'source_hybrid',
         'hybrid_src': 'source_hybrid',
         '3d': 'is_3d',
+        'nfo': 'nfo_missing',
+        'nfo_missing': 'nfo_missing',
     }
     
     # Collect all matches with their positions
@@ -2842,7 +2914,7 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
         args['search'] = remaining_search
     
     blank_token = '__blank__'
-    mappings = [('search', 'filename'), ('category', 'category'), ('volume', 'source_vol'), ('profile', 'profile'), ('el', 'el_type'), ('container', 'container'), ('resolution', 'resolution'), ('status', 'scan_error'), ('audio', 'audio_codecs'), ('video_codec', 'video_codec'), ('video_source', 'video_source'), ('source_format', 'source_format'), ('edition', 'edition'), ('media_type', 'media_type')]
+    mappings = [('search', 'filename'), ('category', 'category'), ('volume', 'source_vol'), ('profile', 'profile'), ('el', 'el_type'), ('container', 'container'), ('resolution', 'resolution'), ('status', 'scan_error'), ('audio', 'audio_codecs'), ('video_codec', 'video_codec'), ('video_source', 'video_source'), ('source_format', 'source_format'), ('edition', 'edition'), ('media_type', 'media_type'), ('nfo_missing', 'nfo_missing')]
     for key, col in mappings:
         if key == exclude_key: continue
         val = args.get(key, '').strip()
@@ -2883,6 +2955,12 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
                     params.extend([v.lower() for v in values])
                 else:
                     conditions.append(f"LOWER({col}) = ?"); params.append(val.lower())
+            elif key == 'nfo_missing':
+                val_lower = val.lower()
+                if val_lower in ('missing', 'none', '1', 'true', 'yes'):
+                    conditions.append(f"{col} = 1")
+                elif val_lower in ('found', '0', 'false', 'no'):
+                    conditions.append(f"{col} = 0")
             elif ',' in val or val == blank_token:
                 # Handle multiple values (comma-separated) for any filter type, including blanks
                 values = [v.strip() for v in val.split(',') if v.strip()]
@@ -3097,11 +3175,11 @@ def download_csv() -> Response:
         limit_params = []
     with get_db() as conn:
         rows = conn.execute(
-            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
+            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating, nfo_missing FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
             params + limit_params
         ).fetchall()
     si = io.StringIO()
-    csv.writer(si).writerows([['Filename', 'Cat', 'Prof', 'EL', 'Cont', 'Vol', 'Path', 'Date', 'Res', 'Bitrate', 'Error', 'Dual HDR', 'Hybrid', 'SecHDR', 'Width', 'Height', 'Size', 'BL_ID', 'Audio', 'AudioCh', 'Subs', 'MaxCLL', 'FPS', 'Aspect', 'IMDB_ID', 'TVDB_ID', 'TMDB_ID', 'Rotten_ID', 'Metacritic_ID', 'Trakt_ID', 'IMDB_Rating', 'TVDB_Rating', 'TMDB_Rating', 'Rotten_Rating', 'Metacritic_Rating', 'Trakt_Rating']] + list(rows))
+    csv.writer(si).writerows([['Filename', 'Cat', 'Prof', 'EL', 'Cont', 'Vol', 'Path', 'Date', 'Res', 'Bitrate', 'Error', 'Dual HDR', 'Hybrid', 'SecHDR', 'Width', 'Height', 'Size', 'BL_ID', 'Audio', 'AudioCh', 'Subs', 'MaxCLL', 'FPS', 'Aspect', 'IMDB_ID', 'TVDB_ID', 'TMDB_ID', 'Rotten_ID', 'Metacritic_ID', 'Trakt_ID', 'IMDB_Rating', 'TVDB_Rating', 'TMDB_Rating', 'Rotten_Rating', 'Metacritic_Rating', 'Trakt_Rating', 'NFO_Missing']] + list(rows))
     return make_response(si.getvalue(), 200, {"Content-Disposition": "attachment; filename=media_export.csv", "Content-type": "text/csv"})
 
 @app.route('/download_json')
@@ -3134,7 +3212,7 @@ def download_json() -> Response:
         limit_params = []
     with get_db() as conn:
         rows = conn.execute(
-            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
+            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating, nfo_missing FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
             params + limit_params
         ).fetchall()
     
@@ -3149,7 +3227,8 @@ def download_json() -> Response:
             'bl_compatibility_id': row[17], 'audio_codecs': row[18], 'audio_channels': row[19], 'subtitles': row[20],
             'max_cll': row[21], 'max_fall': row[22], 'fps': row[23], 'aspect_ratio': row[24],
             'imdb_id': row[25], 'tvdb_id': row[26], 'tmdb_id': row[27], 'rotten_id': row[28], 'metacritic_id': row[29], 'trakt_id': row[30],
-            'imdb_rating': row[31], 'tvdb_rating': row[32], 'tmdb_rating': row[33], 'rotten_rating': row[34], 'metacritic_rating': row[35], 'trakt_rating': row[36]
+            'imdb_rating': row[31], 'tvdb_rating': row[32], 'tmdb_rating': row[33], 'rotten_rating': row[34], 'metacritic_rating': row[35], 'trakt_rating': row[36],
+            'nfo_missing': row[37]
         })
     
     json_str = json.dumps(data, indent=2, ensure_ascii=False)
@@ -3417,7 +3496,7 @@ def get_videos() -> Response:
 
     with get_db_readonly() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
+        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
         global API_LOG_TS
         now = time.time()
         if PROGRESS.get("status") == "scanning" and now - API_LOG_TS >= 5:

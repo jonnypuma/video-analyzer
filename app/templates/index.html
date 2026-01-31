@@ -100,8 +100,11 @@
         .settings-toggle.active path:nth-child(6) { transform: translateX(9px) translateY(1px) rotate(45deg); }
 
         /* --- HEADER --- */
+        #scan-info-wrap { display: flex; align-items: center; gap: 10px; }
         #scan-info-box { display: flex; align-items: center; font-size: 0.85em; opacity: 0.8; font-weight: bold; text-transform: uppercase; color: #3498db; cursor: pointer; transition: opacity 0.2s; }
         #scan-info-box:hover { opacity: 1; text-decoration: underline; }
+        #scan-history-btn { height: 32px; padding: 0 10px; font-size: 0.75em; }
+        body.scanning #scan-history-btn { display: none; }
 
         /* --- RIBBON --- */
         .summary-ribbon {
@@ -122,7 +125,7 @@
         /* --- CONTROL STACK & BUTTON --- */
         .control-stack {
             display: grid; grid-template-columns: auto 1fr; gap: 15px; margin-bottom: 20px; height: 62px;
-            position: sticky; top: var(--sticky-action-top, 0px); z-index: 70; background: #0f0f0f;
+            position: sticky; top: var(--sticky-action-top, 0px); z-index: 120; background: #0f0f0f;
         }
         .action-panel, .automation-bar, #progress-container {
             height: 100%; display: flex; align-items: center; box-sizing: border-box;
@@ -388,6 +391,7 @@
         .col-hyb, .col-hybrid-src, .col-res, .col-bit, .col-vol { width: 5%; } 
         .col-main, .col-prof, .col-sec { width: 7%; } 
         .col-scan, .col-stat { width: 5%; } 
+        .col-nfo { width: 4%; }
         .col-size { width: 6%; }
         .col-width, .col-height { width: 4%; }
         .col-cont { width: 4%; }
@@ -421,6 +425,7 @@
         .hide-col-sec .col-sec { display: none; }
         .hide-col-res .col-res { display: none; }
         .hide-col-stat .col-stat { display: none; }
+        .hide-col-nfo .col-nfo { display: none; }
         .hide-col-size .col-size { display: none; }
         .hide-col-width .col-width { display: none; }
         .hide-col-height .col-height { display: none; }
@@ -744,7 +749,7 @@
         .btn-export-main { border-top-right-radius: 0; border-bottom-right-radius: 0; flex: 1; height: 100%; background: #27ae60; display: flex; align-items: center; justify-content: center; line-height: 1.1; }
         .btn-export-toggle { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 10px; height: 100%; background: #27ae60; }
         #export-group button { height: 100%; }
-        .scan-dropdown { position: absolute; top: 100%; left: 0; margin-top: 6px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 6px 0; min-width: 160px; z-index: 200; display: none; }
+        .scan-dropdown { position: absolute; top: 100%; left: 0; margin-top: 6px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 6px 0; min-width: 160px; z-index: 300; display: none; }
         .scan-dropdown.active { display: block; }
         .scan-dropdown button { width: 100%; background: transparent; border: none; color: #ddd; text-align: left; padding: 6px 12px; cursor: pointer; font-size: 0.9em; }
         .scan-dropdown button:hover { background: #2a2a2a; color: #fff; }
@@ -839,6 +844,22 @@
         #toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 200; }
         .toast { background: #1a1a1a; border-left: 5px solid #2ecc71; color: white; padding: 15px 25px; border-radius: 4px; margin-top: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.5); opacity: 0; transform: translateY(20px); transition: all 0.3s ease; display: none; }
         .toast.show { opacity: 1; transform: translateY(0); display: block; }
+
+        #table-loading-overlay {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.7);
+            border: 1px solid #333;
+            border-radius: 10px;
+            padding: 15px 27px;
+            color: #ddd;
+            font-weight: bold;
+            font-size: 1.2em;
+            z-index: 500;
+            display: none;
+        }
 
         /* New: Force Rescan */
         .rescan-opt { margin-top: 15px; padding-top: 15px; border-top: 1px solid #333; text-align: left; font-size: 0.9em; color: #e67e22; display: flex; align-items: center; gap: 10px; }
@@ -1076,6 +1097,7 @@
     <div id="toast-container">
         <div id="toast-notif" class="toast">Scan Complete!</div>
     </div>
+    <div id="table-loading-overlay">Loading... <span class="spinner"></span></div>
 
     <div id="volume-modal" class="modal-bg">
         <div class="report-content" style="width: 500px;">
@@ -1160,6 +1182,16 @@
                 <button class="btn-green" style="flex:1;" onclick="window.location='/download_log'">Download Log</button>
                 <button class="btn-orange" style="flex:1;" onclick="window.location='/download_failures'">Download Failures</button>
                 <button class="btn-blue" style="flex:1;" onclick="document.getElementById('report-modal').style.display='none'">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="scan-history-modal" class="modal-bg">
+        <div class="report-content" style="width: 720px;">
+            <h2 style="margin-top:0; letter-spacing: 2px;">SCAN HISTORY</h2>
+            <div id="scan-history-list" class="report-detail-list" style="display:block; max-height: 320px;"></div>
+            <div style="display:flex; gap:10px; margin-top:20px;">
+                <button class="btn-blue" style="flex:1;" onclick="closeScanHistory()">Close</button>
             </div>
         </div>
     </div>
@@ -1265,7 +1297,10 @@
                     <button class="media-type-btn media-type-btn-tv inactive" data-type="tv" onclick="setMediaTypeButton('tv')">TV</button>
                 </div>
             </div>
-            <div id="scan-info-box" title="Jump to logs" onclick="scrollToConsole()">IDLE</div>
+            <div id="scan-info-wrap">
+                <div id="scan-info-box" title="Jump to logs" onclick="scrollToConsole()">IDLE</div>
+                <button id="scan-history-btn" class="btn-grey" onclick="openScanHistory()">History</button>
+            </div>
         </div>
 
         <div class="main-menu" id="mainMenu">
@@ -1575,6 +1610,7 @@
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-vol" checked onclick="toggleCol(this)"> Volume</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-scan" checked onclick="toggleCol(this)"> Scanned</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-stat" checked onclick="toggleCol(this)"> Status</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-nfo" checked onclick="toggleCol(this)"> NFO</div>
                 <div style="width:1px; height:15px; background:#444; margin:0 5px;"></div> 
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-audio" onclick="toggleCol(this)"> Audio</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-audio-ch" onclick="toggleCol(this)"> Audio Ch</div>
@@ -1880,6 +1916,18 @@
                                     <option value="">All</option>
                                     <option value="ok">OK</option>
                                     <option value="failed">Failed</option>
+                                </select>
+                            </div>
+                        </th>
+                        <th class="col-nfo td-center" title="Missing NFO">
+                            <div class="th-header-row">
+                                <span>NFO</span>
+                            </div>
+                            <div class="th-filter-row">
+                                <select id="nfo-filter-header" class="filter-item" onchange="resetAndLoad()" onmousedown="event.stopPropagation()" onclick="event.stopPropagation()" style="width:100%;">
+                                    <option value="">All</option>
+                                    <option value="1">Missing</option>
+                                    <option value="0">Found</option>
                                 </select>
                             </div>
                         </th>
@@ -2217,7 +2265,7 @@
     let barChartMode = 'volumes';
     let settingsLoaded = false;
     let settingsLoading = false;
-    let activeFilters = { search: '', category: '', volume: '', profile: '', el: '', container: '', is_hybrid: '', source_hybrid: '', secondary_hdr: '', status: '', resolution: '', size_op: '', size_val: '', bit_op: '', bit_val: '', audio: '', media_type: '' };
+    let activeFilters = { search: '', category: '', volume: '', profile: '', el: '', container: '', is_hybrid: '', source_hybrid: '', secondary_hdr: '', status: '', resolution: '', size_op: '', size_val: '', bit_op: '', bit_val: '', audio: '', media_type: '', nfo_missing: '' };
     let isLoading = false;
     let pendingReload = false;
     let isClearingFilters = false; // Flag to prevent loadData() during clearFilters
@@ -2472,6 +2520,21 @@
     // --- MULTISELECT FORMAT FILTER ---
     let formatMultiselectOpen = false;
     
+    function positionFormatDropdown(dropdown, button) {
+        if (!dropdown || !button) return;
+        const rect = button.getBoundingClientRect();
+        dropdown.style.position = 'fixed';
+        dropdown.style.left = `${Math.round(rect.left)}px`;
+        dropdown.style.minWidth = `${Math.round(rect.width)}px`;
+        const dropHeight = dropdown.offsetHeight || 0;
+        let top = rect.bottom + 4;
+        if (top + dropHeight > window.innerHeight - 8) {
+            top = Math.max(8, rect.top - dropHeight - 4);
+        }
+        dropdown.style.top = `${Math.round(top)}px`;
+        dropdown.style.zIndex = '1200';
+    }
+
     function toggleFormatMultiselect(event) {
         event.stopPropagation();
         const dropdown = document.getElementById('format-filter-dropdown');
@@ -2479,6 +2542,16 @@
         formatMultiselectOpen = !formatMultiselectOpen;
         dropdown.classList.toggle('active', formatMultiselectOpen);
         button.classList.toggle('active', formatMultiselectOpen);
+        if (formatMultiselectOpen) {
+            positionFormatDropdown(dropdown, button);
+        } else {
+            dropdown.style.position = '';
+            dropdown.style.left = '';
+            dropdown.style.top = '';
+            dropdown.style.minWidth = '';
+            dropdown.style.zIndex = '';
+        }
+        updateHeaderClipForDropdowns();
     }
     
     function toggleAllFormats(checkbox) {
@@ -2520,6 +2593,15 @@
         formatMultiselectOpen = false;
         document.getElementById('format-filter-dropdown').classList.remove('active');
         document.getElementById('format-filter-button').classList.remove('active');
+        const dropdown = document.getElementById('format-filter-dropdown');
+        if (dropdown) {
+            dropdown.style.position = '';
+            dropdown.style.left = '';
+            dropdown.style.top = '';
+            dropdown.style.minWidth = '';
+            dropdown.style.zIndex = '';
+        }
+        updateHeaderClipForDropdowns();
     }
     
     function getFormatFilterValue() {
@@ -2743,7 +2825,7 @@
     function updateHeaderClipForDropdowns() {
         const thead = document.querySelector('thead');
         if (!thead) return;
-        const anyOpen = Object.values(multiselectState).some(s => s.open);
+        const anyOpen = Object.values(multiselectState).some(s => s.open) || formatMultiselectOpen;
         thead.classList.toggle('no-clip', anyOpen);
     }
     
@@ -3038,12 +3120,10 @@
         console.log(`[DEBUG] Clearing all filters first...`);
         clearFilters(false);
 
-        if (currentMediaType) {
-            setMultiselectValue('media-type-filter', currentMediaType, true);
-            const normalizedType = normalizeMediaTypeFilter(currentMediaType);
-            updateMediaTypeButtons(normalizedType);
-            applyMediaTypeColumnVisibility(normalizedType);
-        }
+        setMultiselectValue('media-type-filter', currentMediaType || '', true);
+        const normalizedType = normalizeMediaTypeFilter(currentMediaType);
+        updateMediaTypeButtons(normalizedType);
+        applyMediaTypeColumnVisibility(normalizedType);
         
         // Re-set pending values AFTER clearFilters to ensure they persist through setTimeout
         if (type === 'format') {
@@ -3165,7 +3245,7 @@
         setMultiselectValue('media-type-filter', '', true);
         
         // Clear single-select filters
-        const headerFilters = ['hybrid-filter-header', 'source-hybrid-filter-header', 'status-filter-header', 'size-filter-header', 'bit-filter-header'];
+        const headerFilters = ['hybrid-filter-header', 'source-hybrid-filter-header', 'status-filter-header', 'nfo-filter-header', 'size-filter-header', 'bit-filter-header'];
         headerFilters.forEach(id => {
             const el = document.getElementById(id);
             if (el) {
@@ -3570,13 +3650,8 @@
         } else { 
             table.classList.add('hide-' + target); 
         }
-        // ALWAYS force recalculation when columns are toggled to ensure all visible columns fit
-        console.log('[COLUMN_WIDTHS] Column toggled:', target, 'checked:', chk.checked);
-        hasSavedWidths = false; // Clear saved widths flag so calculation runs
-        manualResizeBlocked = false; // Clear manual block when columns are toggled
-        setTimeout(() => {
-            calculateColumnWidths(true, true); // Force recalculation, allow override of manual block
-        }, 100);
+        // Do not recalculate widths when columns are toggled
+        console.log('[COLUMN_WIDTHS] Column toggled (no resize):', target, 'checked:', chk.checked);
     }
     
     function applyVisibleCols(colList, skipRecalc = false) {
@@ -3591,9 +3666,7 @@
             else { chk.checked = false; table.classList.add('hide-' + target); }
         });
         if (!skipRecalc) {
-            // Force recalculation when columns are toggled (ignore saved widths)
-            hasSavedWidths = false;
-            setTimeout(() => calculateColumnWidths(true), 50);
+            // Never recalculate widths on visibility changes
         }
     }
 
@@ -3756,6 +3829,11 @@
         syncStickyHamburger();
         syncColMenuPosition();
         syncOpenMultiselectPositions();
+        if (formatMultiselectOpen) {
+            const dropdown = document.getElementById('format-filter-dropdown');
+            const button = document.getElementById('format-filter-button');
+            positionFormatDropdown(dropdown, button);
+        }
     }
 
     function updateStickyOffsets() {
@@ -4221,6 +4299,7 @@
             'col-cont': 0.6,      // Container
             'col-scan': 0.8,      // Scanned
             'col-stat': 0.7,     // Status
+            'col-nfo': 0.6,      // NFO
             'col-hyb': 0.6,       // Dual HDR
             'col-hybrid-src': 0.6, // Source Hybrid
             'col-audio': 1.0,     // Audio
@@ -4804,7 +4883,8 @@
             'media_type': ['movie', 'tv'],
             'status': ['ok', 'failed'],
             'hybrid': ['1', '0'],
-            '3d': ['1', '0']
+            '3d': ['1', '0'],
+            'nfo': ['missing', 'found']
         };
         return values[token] || [];
     }
@@ -4834,7 +4914,7 @@
         const value = input.value || '';
         const parts = value.split(/\s+/);
         const last = parts[parts.length - 1] || '';
-        const tokens = ['year', 'source', 'format', 'codec', 'res', 'resolution', 'category', 'cat', 'volume', 'vol', 'container', 'edition', 'type', 'media_type', 'status', 'hybrid', '3d'];
+        const tokens = ['year', 'source', 'format', 'codec', 'res', 'resolution', 'category', 'cat', 'volume', 'vol', 'container', 'edition', 'type', 'media_type', 'status', 'hybrid', '3d', 'nfo'];
 
         let suggestions = [];
         if (last.includes(':')) {
@@ -4980,6 +5060,8 @@
         }
         if (isLoading) return;
         isLoading = true;
+        const loadingOverlay = document.getElementById('table-loading-overlay');
+        if (loadingOverlay) loadingOverlay.style.display = 'block';
         
         activeFilters.search = document.getElementById('search-bar') ? document.getElementById('search-bar').value : '';
         try { 
@@ -5008,6 +5090,7 @@
         activeFilters.source_hybrid = document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '';
         try { activeFilters.secondary_hdr = getMultiselectValueAndClearPending('secondary-filter'); } catch(e) { activeFilters.secondary_hdr = ''; }
         activeFilters.status = document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '';
+        activeFilters.nfo_missing = document.getElementById('nfo-filter-header') ? document.getElementById('nfo-filter-header').value : '';
         try { activeFilters.resolution = getMultiselectValueAndClearPending('res-filter'); } catch(e) { activeFilters.resolution = ''; }
         try { activeFilters.video_source = getMultiselectValueAndClearPending('video-source-filter'); } catch(e) { activeFilters.video_source = ''; }
         try { activeFilters.source_format = getMultiselectValueAndClearPending('source-format-filter'); } catch(e) { activeFilters.source_format = ''; }
@@ -5036,8 +5119,7 @@
         const tbody = document.getElementById('video-table-body');
         const preserveWidths = sortInitialized || manualResizeBlocked || hasSavedWidths;
         const priorWidths = preserveWidths ? getColumnWidths() : null;
-        tbody.innerHTML = '<tr><td colspan="50" style="text-align:center; padding: 20px;">Loading...</td></tr>';
-
+        tbody.innerHTML = '<tr><td colspan="51" style="text-align:center; padding: 20px;">Loading...</td></tr>';
         try {
             const params = new URLSearchParams({ page: currentPage, per_page: perPageVal, sort: sortCol, order: sortOrder, ...activeFilters });
             const res = await fetch(`/api/videos?${params}`);
@@ -5069,12 +5151,12 @@
             if(icon) icon.innerText = arrow;
 
             if (data.rows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="50" style="text-align:center; padding: 20px;">No results found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="51" style="text-align:center; padding: 20px;">No results found</td></tr>';
             } else {
                 currentRowData = [];
                 currentRowDataEncoded = [];
                 tbody.innerHTML = data.rows.map((row, rowIndex) => {
-                    const hasSourceHybrid = row.length >= 50;
+                    const hasSourceHybrid = row.length >= 51;
                     const idx = {
                         filename: 0, category: 1, profile: 2, el_type: 3,
                         container: 4, source_vol: 5, full_path: 6, last_scanned: 7,
@@ -5103,20 +5185,21 @@
                         episode: hasSourceHybrid ? 33 : 31,
                         movie_title: hasSourceHybrid ? 34 : 32,
                         episode_title: hasSourceHybrid ? 35 : 33,
-                        fps: hasSourceHybrid ? 36 : 34,
-                        aspect_ratio: hasSourceHybrid ? 37 : 35,
-                        imdb_id: hasSourceHybrid ? 38 : 36,
-                        tvdb_id: hasSourceHybrid ? 39 : 37,
-                        tmdb_id: hasSourceHybrid ? 40 : 38,
-                        rotten_id: hasSourceHybrid ? 41 : 39,
-                        metacritic_id: hasSourceHybrid ? 42 : 40,
-                        trakt_id: hasSourceHybrid ? 43 : 41,
-                        imdb_rating: hasSourceHybrid ? 44 : 42,
-                        tvdb_rating: hasSourceHybrid ? 45 : 43,
-                        tmdb_rating: hasSourceHybrid ? 46 : 44,
-                        rotten_rating: hasSourceHybrid ? 47 : 45,
-                        metacritic_rating: hasSourceHybrid ? 48 : 46,
-                        trakt_rating: hasSourceHybrid ? 49 : 47
+                        nfo_missing: hasSourceHybrid ? 36 : 34,
+                        fps: hasSourceHybrid ? 37 : 35,
+                        aspect_ratio: hasSourceHybrid ? 38 : 36,
+                        imdb_id: hasSourceHybrid ? 39 : 37,
+                        tvdb_id: hasSourceHybrid ? 40 : 38,
+                        tmdb_id: hasSourceHybrid ? 41 : 39,
+                        rotten_id: hasSourceHybrid ? 42 : 40,
+                        metacritic_id: hasSourceHybrid ? 43 : 41,
+                        trakt_id: hasSourceHybrid ? 44 : 42,
+                        imdb_rating: hasSourceHybrid ? 45 : 43,
+                        tvdb_rating: hasSourceHybrid ? 46 : 44,
+                        tmdb_rating: hasSourceHybrid ? 47 : 45,
+                        rotten_rating: hasSourceHybrid ? 48 : 46,
+                        metacritic_rating: hasSourceHybrid ? 49 : 47,
+                        trakt_rating: hasSourceHybrid ? 50 : 48
                     };
                     const rowData = {
                         filename: row[idx.filename], category: row[idx.category], profile: row[idx.profile], el_type: row[idx.el_type],
@@ -5127,6 +5210,7 @@
                         bl_id: row[idx.bl_id], audio_codecs: row[idx.audio_codecs], audio_langs: idx.audio_langs >= 0 ? row[idx.audio_langs] : null, audio_channels: row[idx.audio_channels], subtitles: row[idx.subtitles], max_cll: row[idx.max_cll], max_fall: row[idx.max_fall],
                         video_source: row[idx.video_source], source_format: row[idx.source_format], video_codec: row[idx.video_codec], is_3d: row[idx.is_3d], edition: row[idx.edition], year: row[idx.year],
                         media_type: row[idx.media_type], show_title: row[idx.show_title], season: row[idx.season], episode: row[idx.episode], movie_title: row[idx.movie_title], episode_title: row[idx.episode_title],
+                        nfo_missing: row[idx.nfo_missing],
                         fps: row[idx.fps], aspect_ratio: row[idx.aspect_ratio],
                         imdb_id: row[idx.imdb_id], tvdb_id: row[idx.tvdb_id], tmdb_id: row[idx.tmdb_id], rotten_id: row[idx.rotten_id], metacritic_id: row[idx.metacritic_id], trakt_id: row[idx.trakt_id],
                         imdb_rating: row[idx.imdb_rating], tvdb_rating: row[idx.tvdb_rating], tmdb_rating: row[idx.tmdb_rating], rotten_rating: row[idx.rotten_rating], metacritic_rating: row[idx.metacritic_rating], trakt_rating: row[idx.trakt_rating]
@@ -5139,6 +5223,12 @@
                     const hasError = row[10]; 
                     const isDualHdr = row[idx.is_hybrid] === 1;
                     const isSourceHybrid = idx.is_source_hybrid >= 0 ? row[idx.is_source_hybrid] === 1 : false;
+                    const nfoMissing = row[idx.nfo_missing] === 1;
+                    const nfoHtml = row[idx.nfo_missing] == null
+                        ? '-'
+                        : (nfoMissing
+                            ? '<span style="color:#e67e22; font-weight:bold;">Missing</span>'
+                            : '<span style="color:#2ecc71; font-weight:bold;">Found</span>');
                     const secHdr = row[idx.secondary_hdr];
                     const resText = row[idx.resolution] || '-';
                     const vidW = row[idx.width] || 0;
@@ -5255,6 +5345,7 @@
                             <td class="td-center col-cont" style="font-family:monospace; font-size:0.85em; color:#aaa; text-transform:uppercase;">${row[idx.container] || '-'}</td>
                             <td class="col-scan" style="opacity:0.4; font-size:0.8em">${dateDisplay}</td>
                             <td class="td-center col-stat">${statusText}</td>
+                            <td class="td-center col-nfo">${nfoHtml}</td>
                             <td class="col-audio hide-col-audio" title="${escAttr(audioTxt)}">${escHtml(audioTxt)}</td>
                             <td class="td-center col-audio-ch hide-col-audio-ch">${escHtml(audioChTxt)}</td>
                             <td class="col-audio-combined hide-col-audio-combined" title="${escAttr(audioCombinedTxt)}">${escHtml(audioCombinedTxt)}</td>
@@ -5320,10 +5411,11 @@
             console.error(e);
             const tbody = document.getElementById('video-table-body');
             if (tbody) {
-                tbody.innerHTML = `<tr><td colspan="50" style="text-align:center; padding: 20px; color:#e74c3c; font-weight:bold;">Error Loading Data: ${e.message}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="51" style="text-align:center; padding: 20px; color:#e74c3c; font-weight:bold;">Error Loading Data: ${e.message}</td></tr>`;
             }
         } finally {
             isLoading = false;
+            if (loadingOverlay) loadingOverlay.style.display = 'none';
             if (pendingReload) {
                 pendingReload = false;
                 resetAndLoad();
@@ -6795,6 +6887,82 @@
         }
     }
 
+    let scanHistoryEntries = [];
+
+    async function openScanHistory() {
+        const modal = document.getElementById('scan-history-modal');
+        const list = document.getElementById('scan-history-list');
+        if (!modal || !list) return;
+        list.innerHTML = '<div class="warn">Loading...</div>';
+        modal.style.display = 'block';
+        try {
+            const res = await fetch('/api/scan_history');
+            const data = await res.json();
+            if (!res.ok || data.status !== 'ok') {
+                throw new Error(data.message || 'Failed to load history');
+            }
+            const entries = Array.isArray(data.entries) ? data.entries : [];
+            scanHistoryEntries = entries;
+            if (!entries.length) {
+                list.innerHTML = '<div class="warn">No history yet.</div>';
+                return;
+            }
+            list.innerHTML = entries.map((entry, idx) => {
+                const ts = entry.timestamp || 'Unknown';
+                const status = (entry.status || 'complete').toUpperCase();
+                const dur = entry.duration || '--';
+                const scanned = entry.scanned ?? 0;
+                const added = entry.new ?? 0;
+                const failed = entry.failed ?? 0;
+                const warnings = entry.warnings ?? 0;
+                const mode = entry.scan_mode || 'all';
+                const folder = entry.scan_folder ? ` | ${entry.scan_folder}` : '';
+                const vols = Array.isArray(entry.target_vols) && entry.target_vols.length
+                    ? ` | ${entry.target_vols.join(', ')}`
+                    : '';
+                const cls = status === 'ABORTED' ? 'fail' : 'warn';
+                return `<div class="${cls}" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+                    <div>${ts} | ${status} | ${dur} | scanned ${scanned} | new ${added} | failed ${failed} | warn ${warnings} | ${mode}${vols}${folder}</div>
+                    <button class="btn-grey" style="flex:0 0 auto; padding:4px 10px; font-size:0.75em;" onclick="openScanHistoryReport(${idx})">View report</button>
+                </div>`;
+            }).join('');
+        } catch (e) {
+            list.innerHTML = `<div class="fail">Failed to load history.</div>`;
+        }
+    }
+
+    function openScanHistoryReport(index) {
+        const entry = scanHistoryEntries[index];
+        if (!entry) return;
+        const statusEl = document.getElementById('rep-status');
+        if (statusEl) {
+            if (entry.status === 'aborted') {
+                statusEl.innerText = "ABORTED";
+                statusEl.style.color = "#e74c3c";
+            } else {
+                statusEl.innerText = "COMPLETE";
+                statusEl.style.color = "#3498db";
+            }
+        }
+        document.getElementById('rep-scanned').innerText = entry.scanned ?? 0;
+        document.getElementById('rep-new').innerText = entry.new ?? 0;
+        document.getElementById('rep-failed').innerText = entry.failed ?? 0;
+        document.getElementById('rep-warn').innerText = entry.warnings ?? 0;
+        document.getElementById('rep-time').innerText = formatDuration(entry.duration || '0s');
+        const offlineBox = document.getElementById('rep-offline-box');
+        if (offlineBox) offlineBox.style.display = 'none';
+        const failList = document.getElementById('report-fail-list');
+        const warnList = document.getElementById('report-warn-list');
+        if (failList) failList.innerHTML = '<div class="fail">Details not available for history.</div>';
+        if (warnList) warnList.innerHTML = '<div class="warn">Details not available for history.</div>';
+        document.getElementById('report-modal').style.display = 'block';
+    }
+
+    function closeScanHistory() {
+        const modal = document.getElementById('scan-history-modal');
+        if (modal) modal.style.display = 'none';
+    }
+
     let exportScope = 'filtered';
 
     function getExportScopeLabel(scope) {
@@ -6868,6 +7036,8 @@
         currentFilters.source_hybrid = document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '';
         try { currentFilters.secondary_hdr = getMultiselectValue('secondary-filter'); } catch (e) { currentFilters.secondary_hdr = ''; }
         currentFilters.status = document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '';
+        currentFilters.nfo_missing = document.getElementById('nfo-filter-header') ? document.getElementById('nfo-filter-header').value : '';
+        currentFilters.nfo_missing = document.getElementById('nfo-filter-header') ? document.getElementById('nfo-filter-header').value : '';
         try { currentFilters.resolution = getMultiselectValue('res-filter'); } catch (e) { currentFilters.resolution = ''; }
         const sizeFilter = document.getElementById('size-filter-header') ? document.getElementById('size-filter-header').value : '';
         const sizeParsed = parseFilterValue(sizeFilter);
@@ -7148,6 +7318,7 @@
                 if (filters.source_hybrid !== undefined) document.getElementById('source-hybrid-filter-header').value = filters.source_hybrid;
                 if (filters.secondary_hdr) setMultiselectValue('secondary-filter', filters.secondary_hdr, true);
                 if (filters.status !== undefined) document.getElementById('status-filter-header').value = filters.status;
+                if (filters.nfo_missing !== undefined) document.getElementById('nfo-filter-header').value = filters.nfo_missing;
                 if (filters.resolution) setMultiselectValue('res-filter', filters.resolution, true);
                 if (filters.size_op && filters.size_val) {
                     const sizeVal = filters.size_op + filters.size_val;
