@@ -853,12 +853,16 @@
             background: rgba(0,0,0,0.7);
             border: 1px solid #333;
             border-radius: 10px;
-            padding: 15px 27px;
+            padding: 22px 40px;
             color: #ddd;
             font-weight: bold;
-            font-size: 1.2em;
+            font-size: 1.35em;
             z-index: 500;
             display: none;
+        }
+        body.loading-table .table-wrap,
+        body.loading-table .control-stack {
+            filter: blur(2px) brightness(0.8);
         }
 
         /* New: Force Rescan */
@@ -5062,6 +5066,7 @@
         isLoading = true;
         const loadingOverlay = document.getElementById('table-loading-overlay');
         if (loadingOverlay) loadingOverlay.style.display = 'block';
+        document.body.classList.add('loading-table');
         
         activeFilters.search = document.getElementById('search-bar') ? document.getElementById('search-bar').value : '';
         try { 
@@ -5416,6 +5421,7 @@
         } finally {
             isLoading = false;
             if (loadingOverlay) loadingOverlay.style.display = 'none';
+            document.body.classList.remove('loading-table');
             if (pendingReload) {
                 pendingReload = false;
                 resetAndLoad();
