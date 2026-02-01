@@ -3358,11 +3358,13 @@
         const widthsKey = `column_widths_${key}`;
         const visibleCols = data[visibleKey] ?? data.visible_cols;
         const columnOrder = data[orderKey] ?? data.column_order;
-        const columnWidths = data[widthsKey] ?? data.column_widths;
-        let parsedWidths = columnWidthsByMediaKey[key] ?? (columnWidths ? (() => {
-            try { return JSON.parse(columnWidths); } catch (e) { return null; }
-        })() : null);
-        if (!parsedWidths) {
+        const columnWidths = key === 'all' ? (data[widthsKey] ?? data.column_widths) : null;
+        let parsedWidths = key === 'all'
+            ? (columnWidthsByMediaKey[key] ?? (columnWidths ? (() => {
+                try { return JSON.parse(columnWidths); } catch (e) { return null; }
+            })() : null))
+            : null;
+        if (key === 'all' && !parsedWidths) {
             parsedWidths = getLocalColumnWidths(key);
         }
 
@@ -3382,8 +3384,6 @@
             columnWidthsByMediaKey[key] = parsedWidths;
             applyColumnWidths(parsedWidths);
             hasSavedWidths = true;
-        } else {
-            hasSavedWidths = false;
         }
         columnPrefsMediaType = key;
     }
@@ -3393,21 +3393,23 @@
         const visibleCols = getVisibleCols();
         const order = getColumnOrder();
         const widths = getColumnWidths();
+        const prevWidths = columnWidthsByMediaKey['all'] || getLocalColumnWidths('all') || {};
+        const mergedWidths = { ...prevWidths, ...widths };
         visibleColsByMediaKey[key] = visibleCols;
         columnOrderByMediaKey[key] = order;
-        columnWidthsByMediaKey[key] = widths;
-        setLocalColumnWidths(key, widths);
+        columnWidthsByMediaKey['all'] = mergedWidths;
+        setLocalColumnWidths('all', mergedWidths);
         if (!settingsCache) settingsCache = {};
         settingsCache[`visible_cols_${key}`] = visibleCols;
         settingsCache[`column_order_${key}`] = JSON.stringify(order);
-        settingsCache[`column_widths_${key}`] = JSON.stringify(widths);
+        settingsCache[`column_widths`] = JSON.stringify(mergedWidths);
         fetch('/api/settings', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
                 [`visible_cols_${key}`]: visibleCols,
                 [`column_order_${key}`]: JSON.stringify(order),
-                [`column_widths_${key}`]: JSON.stringify(widths)
+                column_widths: JSON.stringify(mergedWidths)
             })
         }).catch(() => {});
     }
@@ -3422,8 +3424,7 @@
     }
 
     function restoreColumnWidthsForCurrentMedia() {
-        const key = getMediaTypeKeyFromValue(activeFilters?.media_type || '');
-        const widths = columnWidthsByMediaKey[key];
+        const widths = columnWidthsByMediaKey['all'] || getLocalColumnWidths('all');
         if (widths) {
             applyColumnWidths(widths);
             hasSavedWidths = true;
@@ -4060,12 +4061,18 @@
     
     function getColumnWidths() {
         const widths = {};
+        const tableWrap = document.querySelector('.table-wrap');
         document.querySelectorAll('th[class*="col-"]').forEach(th => {
             const classes = th.className.split(' ');
             const colClass = classes.find(c => c.startsWith('col-') && c !== 'col-chk' && c !== 'col-del');
             if (colClass) {
+                const computed = window.getComputedStyle(th);
+                const isHidden = (tableWrap && tableWrap.classList.contains('hide-' + colClass)) || computed.display === 'none';
+                if (isHidden) return;
                 const computedStyle = window.getComputedStyle(th);
                 const width = computedStyle.width;
+                const numWidth = parseFloat(width.toString().replace('px', ''));
+                if (!Number.isFinite(numWidth) || numWidth <= 0) return;
                 widths[colClass] = width;
             }
         });
@@ -6796,7 +6803,9 @@
         const mediaKey = getMediaTypeKeyFromValue(mediaTypeVal);
         const visibleColsValue = getVisibleCols();
         const columnOrderValue = JSON.stringify(getColumnOrder());
-        const columnWidthsValue = JSON.stringify(getColumnWidths());
+        const currentWidths = getColumnWidths();
+        const prevWidths = columnWidthsByMediaKey['all'] || getLocalColumnWidths('all') || {};
+        const columnWidthsValue = JSON.stringify({ ...prevWidths, ...currentWidths });
         const payload = {
             mode: mode, value: val,
             skip_words: document.getElementById('skip-words').value,
