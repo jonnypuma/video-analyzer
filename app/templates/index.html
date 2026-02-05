@@ -121,6 +121,7 @@
         .stat-card:hover { transform: translateY(-3px); background: #1a1a1a; border-color: #555; }
         .stat-label { font-size: 0.65em; opacity: 0.6; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px; font-weight: bold; }
         .stat-value { font-size: 1.4em; font-weight: 800; font-variant-numeric: tabular-nums; }
+        .summary-ribbon .stat-value { font-size: 1.1em; }
         #stat-duration { font-family: 'Consolas', 'Monaco', monospace; letter-spacing: -1px; }
 
         /* --- CONTROL STACK & BUTTON --- */
@@ -139,7 +140,9 @@
         button:hover { filter: brightness(1.15); transform: scale(1.02); }
         button:active { transform: scale(0.98); }
 
-        #main-action-wrapper, #btn-export, #btn-toggle-charts, #btn-save, #export-group { width: 140px; height: 40px; box-sizing: border-box; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+        #main-action-wrapper, #btn-toggle-charts, #btn-save, #export-group { width: 140px; height: 40px; box-sizing: border-box; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+        #btn-toggle-charts { width: 120px; font-size: 0.85em; }
+        #export-group { width: 160px; }
         #main-action-wrapper { position: relative; }
         #scan-group { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; transition: opacity 0.3s ease, visibility 0.3s; box-sizing: border-box; z-index: 20; }
         #btn-scan { background: #3498db; }
@@ -177,7 +180,17 @@
         #progress-container.paused #progress-text { animation: pulse-blue 1.2s ease-in-out infinite; }
         #progress-container.paused #progress-subtext { opacity: 1; }
 
-        .sched-group, .filter-group { display: flex; gap: 10px; align-items: center; flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; }
+        .sched-group, .filter-group { display: flex; gap: 8px; align-items: center; flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; font-size: 0.8em; }
+        .filter-group span {
+            font-size: 0.8em;
+        }
+        .filter-group input[type="text"],
+        .filter-group input[type="number"] {
+            font-size: 0.8em;
+            padding: 0 6px;
+            height: 28px;
+            line-height: 28px;
+        }
         .filter-group::-webkit-scrollbar { height: 4px; }
         .filter-group::-webkit-scrollbar-track { background: #222; }
         .filter-group::-webkit-scrollbar-thumb { background: #555; border-radius: 2px; }
@@ -595,11 +608,11 @@
         }
         
         .main-menu-section {
-            display: flex; align-items: center; gap: 10px;
+            display: flex; align-items: center; gap: 8px; font-size: 0.75em;
         }
         
         .main-menu-section-label {
-            color: #888; font-size: 0.8em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;
+            color: #888; font-size: 0.7em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;
         }
         
         /* New: Scroll Buttons inside Column Menu */
@@ -745,9 +758,20 @@
         .folder-remove-btn { font-weight: 800; font-size: 0.95em; line-height: 1; text-shadow: 0 0 2px rgba(0,0,0,0.9); }
         .folder-type-select { background: #111; color: #ddd; border: 1px solid #333; border-radius: 6px; padding: 2px 6px; font-size: 0.75em; }
         .btn-group-scan { display: inline-flex; align-items: center; width: 100%; height: 100%; }
-        .btn-scan-main { border-top-right-radius: 0; border-bottom-right-radius: 0; flex: 1; height: 100%; background: #3498db; display: flex; flex-direction: column; justify-content: center; line-height: 1.1; }
+        .btn-scan-main { border-top-right-radius: 0; border-bottom-right-radius: 0; flex: 1; height: 100%; background: #3498db; display: flex; flex-direction: column; justify-content: center; line-height: 1.1; font-size: 0.85em; }
         .btn-scan-toggle { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 10px; height: 100%; background: #3498db; }
-        .btn-export-main { border-top-right-radius: 0; border-bottom-right-radius: 0; flex: 1; height: 100%; background: #27ae60; display: flex; align-items: center; justify-content: center; line-height: 1.1; }
+        .btn-export-main { border-top-right-radius: 0; border-bottom-right-radius: 0; flex: 1; height: 100%; background: #27ae60; display: flex; align-items: center; justify-content: center; line-height: 1.1; font-size: 0.85em; text-align: center; }
+        .btn-export-content { display: flex; align-items: center; justify-content: center; gap: 10px; }
+        .btn-export-lines { display: flex; flex-direction: column; line-height: 1.1; }
+        .btn-export-scope { display: flex; align-items: center; gap: 6px; }
+        #sched-mode,
+        #notif-style,
+        #sched-val-container select,
+        #sched-val-container input {
+            font-size: 0.7em;
+            font-weight: bold;
+            color: #3498db;
+        }
         .btn-export-toggle { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 10px; height: 100%; background: #27ae60; }
         #export-group button { height: 100%; }
         .scan-dropdown { position: absolute; top: 100%; left: 0; margin-top: 6px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 6px 0; min-width: 160px; z-index: 300; display: none; }
@@ -1325,45 +1349,42 @@
             </div>
             <div class="main-menu-content">
                 <div class="main-menu-section">
-                    <span class="main-menu-section-label">Export Format:</span>
-                    <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                    <span class="main-menu-section-label" style="color: #3498db; letter-spacing: 1px;">EXPORT FORMAT:</span>
+                    <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; font-size: 0.75em;">
                         <input type="radio" name="export-format" value="csv" id="export-format-csv" checked onchange="updateExportButtonText()" style="width: 16px; height: 16px;">
                         <span>CSV</span>
                     </label>
-                    <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                    <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; font-size: 0.75em;">
                         <input type="radio" name="export-format" value="json" id="export-format-json" onchange="updateExportButtonText()" style="width: 16px; height: 16px;">
                         <span>JSON</span>
                     </label>
                 </div>
                 <div style="width: 1px; height: 20px; background: #444; margin: 0 10px;"></div>
                 <div class="main-menu-section">
-                    <button class="btn-grey" onclick="backupDatabase()" style="padding: 5px 15px; font-size: 0.85em;">Backup DB</button>
+                    <span class="main-menu-section-label" style="color: #3498db; letter-spacing: 1px;">DATABASE:</span>
+                    <button class="btn-grey" onclick="backupDatabase()" style="padding: 4px 10px; font-size: 0.75em;">Backup DB</button>
                     <input type="file" id="restore-file-input" accept=".zip,.tar,.gz" style="display: none;" onchange="restoreDatabase(this)">
-                    <button class="btn-grey" onclick="document.getElementById('restore-file-input').click()" style="padding: 5px 15px; font-size: 0.85em;">Restore DB</button>
+                    <button class="btn-grey" onclick="document.getElementById('restore-file-input').click()" style="padding: 4px 10px; font-size: 0.75em;">Restore DB</button>
+                    <button id="maintenance-db-btn" class="btn-grey" onclick="runDatabaseMaintenance()" style="padding: 4px 10px; font-size: 0.75em;">Optimize DB</button>
+                    <button class="btn-grey" onclick="backfillMetadata()" style="padding: 4px 10px; font-size: 0.75em;">Backfill Metadata</button>
+                    <button class="btn-orange" onclick="openCleanDbModal()" style="padding: 4px 10px; font-size: 0.75em;">Clean DB</button>
                 </div>
                 <div style="width: 1px; height: 20px; background: #444; margin: 0 10px;"></div>
                 <div class="main-menu-section">
-                    <span style="font-size: 0.7em; color: #3498db; font-weight: bold; letter-spacing: 1px;">DATABASE:</span>
-                    <button id="maintenance-db-btn" class="btn-grey" onclick="runDatabaseMaintenance()" style="padding: 5px 15px; font-size: 0.85em;">Optimize DB</button>
-                    <button class="btn-grey" onclick="backfillMetadata()" style="padding: 5px 15px; font-size: 0.85em;">Backfill Metadata</button>
-                    <button class="btn-orange" onclick="openCleanDbModal()" style="padding: 5px 15px; font-size: 0.85em;">Clean DB</button>
+                    <span class="main-menu-section-label" style="color: #3498db; letter-spacing: 1px;">SCAN:</span>
+                    <button class="btn-grey" onclick="openFoldersModal()" style="padding: 4px 10px; font-size: 0.75em;">Folders</button>
                 </div>
                 <div style="width: 1px; height: 20px; background: #444; margin: 0 10px;"></div>
                 <div class="main-menu-section">
-                    <span style="font-size: 0.7em; color: #3498db; font-weight: bold; letter-spacing: 1px;">SCAN:</span>
-                    <button class="btn-grey" onclick="openFoldersModal()" style="padding: 5px 15px; font-size: 0.85em;">Folders</button>
-                </div>
-                <div style="width: 1px; height: 20px; background: #444; margin: 0 10px;"></div>
-                <div class="main-menu-section">
-                    <span class="main-menu-section-label">Filter Presets:</span>
-                    <input type="text" id="preset-name-input" placeholder="Preset name" style="width: 120px; padding: 4px; font-size: 0.85em;">
-                    <button class="btn-grey" onclick="saveFilterPreset()" style="padding: 5px 10px; font-size: 0.85em;">Save</button>
-                    <select id="preset-select" style="width: 140px; padding: 4px; font-size: 0.85em;">
+                    <span class="main-menu-section-label" style="color: #3498db; letter-spacing: 1px;">FILTER PRESETS:</span>
+                    <input type="text" id="preset-name-input" placeholder="Preset name" style="width: 110px; padding: 3px; font-size: 0.75em;">
+                    <button class="btn-grey" onclick="saveFilterPreset()" style="padding: 4px 8px; font-size: 0.75em;">Save</button>
+                    <select id="preset-select" style="width: 120px; padding: 3px; font-size: 0.75em;">
                         <option value="">Select preset...</option>
                     </select>
-                    <button class="btn-grey" onclick="loadFilterPreset()" style="padding: 5px 10px; font-size: 0.85em;">Load</button>
-                    <button class="btn-grey" onclick="deleteFilterPreset()" style="padding: 5px 10px; font-size: 0.85em;">Delete</button>
-                    <button class="btn-grey btn-health" onclick="openHealthModal()" title="Health Status">
+                    <button class="btn-grey" onclick="loadFilterPreset()" style="padding: 4px 8px; font-size: 0.75em;">Load</button>
+                    <button class="btn-grey" onclick="deleteFilterPreset()" style="padding: 4px 8px; font-size: 0.75em;">Delete</button>
+                    <button class="btn-grey btn-health" onclick="openHealthModal()" title="Health Status" style="padding: 4px 8px; font-size: 0.75em;">
                         <img src="/static/health.png" alt="Health" class="btn-health-icon">
                         Health
                     </button>
@@ -1459,7 +1480,15 @@
                 </div>
                 <button id="btn-abort" onclick="abortScan()">Abort Scan</button>
                 <div id="export-group" class="btn-group-scan" style="position: relative;">
-                    <button class="btn-export-main" id="btn-export" onclick="exportData()">Export CSV | All filtered</button>
+                    <button class="btn-export-main" id="btn-export" onclick="exportData()">
+                        <span class="btn-export-content">
+                            <span class="btn-export-lines">
+                                <span>Export</span>
+                                <span>CSV</span>
+                            </span>
+                            <span class="btn-export-scope">| <span>Filtered</span></span>
+                        </span>
+                    </button>
                     <button class="btn-export-toggle" onclick="toggleExportMenu(event)">▾</button>
                     <div id="export-mode-menu" class="scan-dropdown">
                         <button onclick="selectExportScope('all')">All</button>
@@ -1510,7 +1539,7 @@
                             <input type="number" id="sched-val-day" placeholder="Day (1-31)" min="1" max="31" style="display:none;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
                         </div>
                         <div style="display:flex; align-items:center; gap:5px;">
-                        <span style="font-size: 0.7em; color: #888;">Notification:</span>
+                        <span style="font-size: 0.7em; color: #3498db; font-weight: bold; letter-spacing: 1px;">NOTIFICATION:</span>
                         <select id="notif-style" style="width: 70px;">
                             <option value="modal">Modal</option>
                             <option value="toast">Toast</option>
@@ -1525,7 +1554,7 @@
                             <span style="font-size: 0.7em; color: #e74c3c; font-weight: bold;">Debug Log</span>
                         </div>
                         <div style="display:flex; align-items:center; gap:5px;">
-                            <span style="font-size: 0.7em; color: #888; font-weight: bold; margin-left: 5px;">THREADS:</span>
+                            <span style="font-size: 0.7em; color: #3498db; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">THREADS:</span>
                             <input type="number" id="scan-threads" value="4" min="1" max="32" style="width: 50px; text-align: center; color: #3498db; font-weight: bold;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
                         </div>
                     </div>
@@ -1533,22 +1562,24 @@
                         <span style="font-size: 0.7em; color: #e67e22; font-weight: bold; letter-spacing: 1px;">IGNORE:</span>
                         <input type="text" id="skip-words" placeholder="extras, sample..." style="width: 130px;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
                         <span style="font-size: 0.7em; color: #e67e22; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">MIN(MB):</span>
-                        <input type="number" id="min-size" placeholder="50" style="width: 50px;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
+                        <input type="number" id="min-size" placeholder="50" style="width: 42px;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
                         <span style="font-size: 0.7em; color: #e67e22; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">LOGS:</span>
-                        <input type="number" id="log-limit" value="200" placeholder="200" style="width: 50px;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
+                        <input type="number" id="log-limit" value="200" placeholder="200" style="width: 42px;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
                         <div style="display:flex; align-items:center; gap:5px; margin-left: 5px;">
                             <input type="checkbox" id="chk-scan-extras" class="set-chk" style="width:16px; height:16px;">
                             <span style="font-size: 0.7em; color: #e67e22; font-weight: bold;">Scan Extras</span>
                         </div>
                         <span style="font-size: 0.7em; color: #2ecc71; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">REFRESH(S):</span>
-                        <input type="number" id="scan-refresh" value="60" placeholder="60" style="width: 50px; text-align: center; color: #2ecc71;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
+                        <input type="number" id="scan-refresh" value="60" placeholder="60" style="width: 40px; text-align: center; color: #2ecc71;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
                         <span style="font-size: 0.7em; color: #9b59b6; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">BATCH:</span>
-                        <input type="number" id="batch-size" value="50" min="10" max="500" style="width: 50px; text-align: center; color: #9b59b6;" onkeypress="if(event.key==='Enter') triggerPulse(this)" title="Database batch size">
-                        <span style="font-size: 0.7em; color: #9b59b6; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">RPU THRESH:</span>
-                        <input type="number" id="rpu-threshold" value="50000" min="10000" max="200000" style="width: 70px; text-align: center; color: #9b59b6;" onkeypress="if(event.key==='Enter') triggerPulse(this)" title="RPU size threshold for FEL detection (bytes)">
+                        <input type="number" id="batch-size" value="50" min="10" max="500" style="width: 45px; text-align: center; color: #9b59b6;" onkeypress="if(event.key==='Enter') triggerPulse(this)" title="Database batch size">
+                        <div style="display:flex; align-items:center; gap:5px; margin-left: 5px; margin-right: 31px;">
+                            <span style="font-size: 0.7em; color: #9b59b6; font-weight: bold; letter-spacing: 1px;">RPU THRESH:</span>
+                            <input type="number" id="rpu-threshold" value="50000" min="10000" max="200000" style="width: 63px; text-align: center; color: #9b59b6; margin-right: 0;" onkeypress="if(event.key==='Enter') triggerPulse(this)" title="RPU size threshold for FEL detection (bytes)">
+                        </div>
                     </div>
                     <div class="right-anchored">
-                        <button id="btn-save" onclick="saveSettings()">Save Settings</button>
+                        <button id="btn-save" onclick="saveSettings()" style="width: 90px;">Save</button>
                     </div>
                 </div>
             </div>
@@ -7018,10 +7049,10 @@
 
     function getExportScopeLabel(scope) {
         if (scope === 'all') return 'All';
-        if (scope === 'movies') return 'All Movies';
-        if (scope === 'tv') return 'All TV';
-        if (scope === 'page') return 'Current page';
-        return 'All filtered';
+        if (scope === 'movies') return 'Movies';
+        if (scope === 'tv') return 'TV';
+        if (scope === 'page') return 'Page';
+        return 'Filtered';
     }
 
     function updateExportButtonText() {
@@ -7029,7 +7060,14 @@
         const btn = document.getElementById('btn-export');
         if (btn) {
             const fmtLabel = format === 'json' ? 'JSON' : 'CSV';
-            btn.textContent = `Export ${fmtLabel} | ${getExportScopeLabel(exportScope)}`;
+            const scopeLabel = getExportScopeLabel(exportScope);
+            btn.innerHTML = `<span class="btn-export-content">
+                <span class="btn-export-lines">
+                    <span>Export</span>
+                    <span>${fmtLabel}</span>
+                </span>
+                <span class="btn-export-scope">| <span>${scopeLabel}</span></span>
+            </span>`;
         }
     }
 
