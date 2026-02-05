@@ -5052,6 +5052,12 @@
             } else {
                 refreshChartsOnly();
             }
+            requestAnimationFrame(() => {
+                window.dispatchEvent(new Event('resize'));
+                [formatChart, secChart, resChart, volChart].forEach(c => {
+                    if (c && typeof c.resize === 'function') c.resize();
+                });
+            });
         } else {
             view.style.display = 'none'; 
             btn.innerHTML = 'Charts ⏵';
