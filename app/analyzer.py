@@ -830,12 +830,14 @@ def find_kodi_nfo_candidates(file_path: str, media_type_hint: str | None) -> lis
                 if normalize(nfo.stem) == target_norm:
                     candidates.append(str(nfo))
                     break
-            if not candidates and len(nfo_files) == 1:
+            # Only use "single .nfo in folder" for non-TV; for episodes we require a per-episode match
+            if not candidates and len(nfo_files) == 1 and media_type_hint != 'tv':
                 candidates.append(str(nfo_files[0]))
         except OSError:
             pass
     if media_type_hint == 'tv':
-        # Try to locate episode NFOs that don't share the same stem
+        # Episode NFO must match this episode (same-stem already handled above).
+        # Also try same-folder NFOs whose content has matching season/episode (e.g. different stem).
         try:
             filename_lower = file_path_obj.name.lower()
             _, season_guess, episode_guess = parse_tv_from_filename(filename_lower)
@@ -853,21 +855,18 @@ def find_kodi_nfo_candidates(file_path: str, media_type_hint: str | None) -> lis
                         break
         except OSError:
             pass
-        # tvshow.nfo often lives in the series root (up to a few levels up)
-        for parent in [file_path_obj.parent, file_path_obj.parent.parent, file_path_obj.parent.parent.parent]:
-            tvshow_nfo = parent / 'tvshow.nfo'
-            if tvshow_nfo.exists():
-                candidates.append(str(tvshow_nfo))
+        # tvshow.nfo is series-level; do not count as NFO found for individual episodes
     else:
-        # movie.nfo or folder-named .nfo can live a few levels up
-        for parent in [file_path_obj.parent, file_path_obj.parent.parent, file_path_obj.parent.parent.parent]:
-            movie_nfo = parent / 'movie.nfo'
-            if movie_nfo.exists():
-                candidates.append(str(movie_nfo))
-            folder_nfo = parent / f"{parent.name}.nfo"
-            if folder_nfo.exists():
-                candidates.append(str(folder_nfo))
-        tvshow_nfo = file_path_obj.parent / 'tvshow.nfo'
+        # movie.nfo or folder-named .nfo only in the same directory as the video file
+        # (do not walk up: a movie.nfo in a parent folder applies to the whole tree, not this file)
+        parent = file_path_obj.parent
+        movie_nfo = parent / 'movie.nfo'
+        if movie_nfo.exists():
+            candidates.append(str(movie_nfo))
+        folder_nfo = parent / f"{parent.name}.nfo"
+        if folder_nfo.exists():
+            candidates.append(str(folder_nfo))
+        tvshow_nfo = parent / 'tvshow.nfo'
         if tvshow_nfo.exists():
             candidates.append(str(tvshow_nfo))
     # Keep order but dedupe
@@ -1641,6 +1640,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
                 "video_source": None, "source_format": None, "video_codec": None,
                 "is_3d": 0, "edition": None, "year": None, "media_type": None,
                 "show_title": None, "season": None, "episode": None, "movie_title": None, "episode_title": None,
+                "nfo_missing": 1,
                 "validation_flag": None
             }
         if not os.access(full_path_str, os.R_OK):
@@ -1771,6 +1771,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
         "media_type": meta.get('media_type'), "show_title": meta.get('show_title'),
         "season": meta.get('season'), "episode": meta.get('episode'),
         "movie_title": meta.get('movie_title'), "episode_title": meta.get('episode_title'),
+        "nfo_missing": meta.get('nfo_missing', 1),
         "validation_flag": validation_flag
     }
 
@@ -2391,6 +2392,7 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
             "failed": PROGRESS["failed_count"],
             "warnings": PROGRESS.get("warning_count", 0),
             "duration": dur,
+            "date": now,
             "avg_bitrate": avg_bitrate,
             "avg_width": avg_width,
             "avg_height": avg_height,
@@ -2528,12 +2530,14 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
             dur = f"{int(time.time() - start_time)}s"
             with progress_lock:
                 PROGRESS.update({"status": "idle", "file": "Aborted", "paused": False, "scan_completed": True, "last_duration": dur})
+                _now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 PROGRESS["last_report"] = {
                     "scanned": PROGRESS.get("current", 0),
                     "new": PROGRESS.get("new_found", 0),
                     "failed": PROGRESS.get("failed_count", 0),
                     "warnings": PROGRESS.get("warning_count", 0),
                     "duration": dur,
+                    "date": _now,
                     "aborted": True
                 }
             record_scan_history({
@@ -2684,10 +2688,16 @@ def get_failures() -> Response:
         try:
             with open(FAIL_FILE, 'r', encoding='utf-8', newline='') as f:
                 reader = csv.reader(f, delimiter='|')
+                first_row = True
                 for row in reader:
                     if len(row) < 5:
                         continue
                     ts, vol, path, name, msg = row[:5]
+                    # Skip header row
+                    if first_row and vol == 'Volume':
+                        first_row = False
+                        continue
+                    first_row = False
                     entry_type = 'warning' if vol == 'WARNING' else 'failure'
                     entries.append({
                         "type": entry_type,
@@ -3494,6 +3504,15 @@ def get_videos() -> Response:
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'source_hybrid': 'is_source_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size', 'video_source': 'video_source', 'source_format': 'source_format', 'video_codec': 'video_codec', 'is_3d': 'is_3d', 'edition': 'edition', 'year': 'year', 'media_type': 'media_type', 'show_title': 'show_title', 'season': 'season', 'episode': 'episode', 'movie_title': 'movie_title', 'episode_title': 'episode_title', 'cll': 'max_cll', 'fall': 'max_fall'}
     db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
 
+    # Media-type scope for ribbons/charts: only single 'movie' or 'tv' gets scoped stats
+    media_type_arg = (request.args.get('media_type') or '').strip().lower()
+    if media_type_arg == 'movie':
+        media_where, media_params = "LOWER(media_type) = 'movie'", []
+    elif media_type_arg == 'tv':
+        media_where, media_params = "LOWER(media_type) = 'tv'", []
+    else:
+        media_where, media_params = "1=1", []
+
     with get_db_readonly() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
         rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
@@ -3609,6 +3628,23 @@ def get_videos() -> Response:
         stats_filtered['res_labels'] = list(cnt_res_filtered.keys()); stats_filtered['res_data'] = list(cnt_res_filtered.values())
         stats_filtered['secondary_hdrs'] = get_secondary_counts(main_where, main_params)
         stats_filtered['path_labels'], stats_filtered['path_data'] = get_path_counts(main_where, main_params)
+
+        # Stats scoped by media type only (for ribbons/charts when filtering on Movies or TV)
+        stats_media_scoped_raw = conn.execute(
+            "SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, is_source_hybrid, secondary_hdr FROM videos WHERE " + media_where,
+            media_params
+        ).fetchall()
+        stats_media_scoped = _build_stats_from_rows(stats_media_scoped_raw)
+        cnt_vol_media = get_cnt_with_where('source_vol', media_where, media_params)
+        cnt_res_media = get_cnt_with_where('resolution', media_where, media_params)
+        stats_media_scoped['vol_labels'] = list(cnt_vol_media.keys())
+        stats_media_scoped['vol_data'] = list(cnt_vol_media.values())
+        stats_media_scoped['res_labels'] = list(cnt_res_media.keys())
+        stats_media_scoped['res_data'] = list(cnt_res_media.values())
+        stats_media_scoped['secondary_hdrs'] = get_secondary_counts(media_where, media_params)
+        stats_media_scoped['last_scan_time'] = PROGRESS["last_duration"]
+        stats_media_scoped['path_labels'], stats_media_scoped['path_data'] = get_path_counts(media_where, media_params)
+
         cnt_vol = get_cnt('source_vol', 'volume')
         cnt_res = get_cnt('resolution', 'resolution')
 
@@ -3656,7 +3692,7 @@ def get_videos() -> Response:
             'special_status': {'ok': ok_cnt, 'failed': failed_cnt},
             'special_is_3d': {'1': d3d_yes, '0': d3d_no}
         }
-        return jsonify({"rows": [list(r) for r in rows], "stats": stats, "stats_filtered": stats_filtered, "page": page, "total_items": total, "total_pages": (total + per_page - 1) // per_page, "filter_options": opts})
+        return jsonify({"rows": [list(r) for r in rows], "stats": stats, "stats_filtered": stats_filtered, "stats_media_scoped": stats_media_scoped, "page": page, "total_items": total, "total_pages": (total + per_page - 1) // per_page, "filter_options": opts})
 
 
 @app.route('/api/filter_paths', methods=['POST'])

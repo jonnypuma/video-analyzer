@@ -9,6 +9,7 @@ Video analyzer and library for HDR content with deep metadata extraction, flexib
 - **HDR Detection:** Dolby Vision profiles, EL types (FEL/MEL), HDR10+, HDR10, HLG detection.
 - **Metadata Enrichment:** Filename parsing, Kodi `.nfo` ingestion, and backfill tools.
 - **Smart Filtering:** Multi‑select filters with counts, `All` + `Blanks` options, and advanced search tokens.
+- **Media-type–aware ribbons:** When filtering on Movies or TV, ribbons and charts show totals for that type only; ribbon and badge clicks preserve the media type.
 - **Charts:** Real‑time visualizations with **Totals / Filtered** toggle.
 - **Manual Edits:** Edit titles, year, source, HDR info, and media type directly in the file modal.
 - **Bulk Edit/Rescan:** Multi‑select rows and apply edits or rescan selected files.
@@ -57,7 +58,7 @@ The top‑left menu contains:
 | DV P5 / P8.x | Dolby Vision profiles |
 | HDR10+ / HDR10 / HLG / SDR | Base HDR format |
 
-Clicking badges applies a filter immediately.
+Clicking badges applies a filter immediately. When you have **Movies** or **TV** selected, badge clicks keep that media type and add the chosen filter on top.
 
 ### Filters
 - Multi‑select filters include **All** + **Blanks** and show counts.
@@ -138,6 +139,11 @@ Any folder with `.scanignore` is skipped.
 - Episode `.nfo` (`episodedetails`) → episode title, season, episode, year
 - `tvshow.nfo` → show title
 - `movie.nfo` → movie title + year
+
+### NFO Column (Table)
+- **NFO** indicates whether a matching `.nfo` file was found for that row.
+- **Movies:** Counted only if an `.nfo` exists in the same folder as the video (same stem, `movie.nfo`, or folder-named `.nfo`). A `movie.nfo` in a parent folder does not count.
+- **TV episodes:** Counted only if an episode-specific `.nfo` exists (same stem as the video, or same-folder `.nfo` with matching season/episode). `tvshow.nfo` is series-level and does not count as “NFO found” for individual episodes.
 
 ### Filename Heuristics (Fallback Only)
 - Movie title fallback (only if `.nfo` missing)

@@ -11,6 +11,7 @@
             /* Palette */
             --col-fel: #a55eea;
             --col-mel: #5f27cd;
+            --col-p7: #F6DCAC;
             --col-p7-mel: #72251f;
             --col-p5: #27ae60;
             --col-p8: #e74c3c;
@@ -656,7 +657,7 @@
         .badge:hover { transform: scale(1.1); filter: brightness(1.2); }
         .badge-p7-fel { background: var(--col-fel); border: 1px solid #dcc6e0; }
         .badge-p7-mel { background: var(--col-p7-mel); }
-        .badge-p7 { background: var(--col-mel); }
+        .badge-p7 { background: var(--col-p7); color: #333; }
         .badge-el-fel { background: var(--col-fel); border: 1px solid #dcc6e0; }
         .badge-el-mel { background: var(--col-p7-mel); }
         .badge-p5 { background: var(--col-p5); }
@@ -782,7 +783,8 @@
         .vol-chk { margin-left: 10px; transform: scale(1.2); }
         
         /* Modal Base Styles */
-        .modal-bg { display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); }
+        .modal-bg { display: none; position: fixed; z-index: 200; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); }
+        #report-modal { z-index: 600; }
         .report-content { background: #1a1a1a; width: 450px; margin: 10% auto; padding: 30px; border-radius: 20px; border: 1px solid #3498db; text-align: center; box-shadow: 0 0 30px rgba(0,0,0,0.5); }
         .report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 25px 0; }
         .report-item { background: #000; padding: 15px; border-radius: 10px; border: 1px solid #222; }
@@ -845,6 +847,18 @@
         .toast { background: #1a1a1a; border-left: 5px solid #2ecc71; color: white; padding: 15px 25px; border-radius: 4px; margin-top: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.5); opacity: 0; transform: translateY(20px); transition: all 0.3s ease; display: none; }
         .toast.show { opacity: 1; transform: translateY(0); display: block; }
 
+        #table-loading-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 499;
+            display: none;
+            pointer-events: auto;
+        }
+        body.loading-table .container {
+            filter: blur(3px) brightness(0.75);
+            transition: filter 0.2s ease;
+        }
         #table-loading-overlay {
             position: fixed;
             top: 50%;
@@ -859,10 +873,6 @@
             font-size: 1.35em;
             z-index: 500;
             display: none;
-        }
-        body.loading-table .table-wrap,
-        body.loading-table .control-stack {
-            filter: blur(2px) brightness(0.8);
         }
 
         /* New: Force Rescan */
@@ -1101,6 +1111,7 @@
     <div id="toast-container">
         <div id="toast-notif" class="toast">Scan Complete!</div>
     </div>
+    <div id="table-loading-backdrop"></div>
     <div id="table-loading-overlay">Loading... <span class="spinner"></span></div>
 
     <div id="volume-modal" class="modal-bg">
@@ -1163,6 +1174,7 @@
                 <div class="report-item"><div class="stat-label">Failures</div><div class="stat-value" id="rep-failed" style="color:#e74c3c">0</div></div>
                 <div class="report-item"><div class="stat-label">Warnings</div><div class="stat-value" id="rep-warn" style="color:#e67e22">0</div></div>
                 <div class="report-item"><div class="stat-label">Duration</div><div class="stat-value" id="rep-time">0s</div></div>
+                <div class="report-item"><div class="stat-label">Date</div><div class="stat-value" id="rep-date">--</div></div>
             </div>
             <div class="report-details">
                 <div class="report-detail-section" id="report-fail-section">
@@ -2210,7 +2222,7 @@
             </div>
         </div>
 
-        <div style="display: flex; justify-content: center; gap: 8px; margin-top: 25px; padding-bottom: 20px; align-items: center;">
+        <div class="page-nav-wrap" style="display: flex; justify-content: center; gap: 8px; margin-top: 25px; padding-bottom: 20px; align-items: center;">
             <button class="btn-grey" onclick="jumpPage(1)">First</button>
             <button class="btn-grey" onclick="changePage(-10)">&#171;</button>
             <button class="btn-grey" onclick="changePage(-1)">Prev</button>
@@ -3470,6 +3482,10 @@
     function filterBadge(cat, prof, elType, sec) {
         console.log(`[DEBUG] filterBadge(${cat}, ${prof}, ${elType}, ${sec})`);
         
+        const currentMediaType = (() => {
+            try { return getMultiselectValue('media-type-filter'); } catch (e) { return ''; }
+        })();
+        
         // Set pending values BEFORE clearFilters (so they're available when loadData runs)
         // Only set format filter if cat is a valid format (not 'sec' or null)
         if (cat && cat !== 'sec') {
@@ -3507,6 +3523,11 @@
         // Now clear all filters (pending values are already set above)
         console.log(`[DEBUG] Badge: Clearing all filters...`);
         clearFilters(false);
+        
+        setMultiselectValue('media-type-filter', currentMediaType || '', true);
+        const normalizedType = normalizeMediaTypeFilter(currentMediaType);
+        updateMediaTypeButtons(normalizedType);
+        applyMediaTypeColumnVisibility(normalizedType);
         
         // Re-set pending values after clearFilters to ensure they persist through setTimeout
         // Only set format filter if cat is a valid format (not 'sec' or null)
@@ -4977,7 +4998,9 @@
             if (!res.ok) return;
             const data = await res.json();
             if (data && data.stats) {
-                lastStats = data.stats;
+                const mt = (activeFilters.media_type || '').trim().toLowerCase();
+                const ribbonStats = (mt === 'movie' || mt === 'tv') && data.stats_media_scoped ? data.stats_media_scoped : data.stats;
+                lastStats = ribbonStats;
                 lastStatsFiltered = data.stats_filtered;
                 lastFilterOptions = data.filter_options || {};
                 updateCharts(lastStats, lastStatsFiltered, lastFilterOptions);
@@ -5071,7 +5094,9 @@
         }
         if (isLoading) return;
         isLoading = true;
+        const loadingBackdrop = document.getElementById('table-loading-backdrop');
         const loadingOverlay = document.getElementById('table-loading-overlay');
+        if (loadingBackdrop) loadingBackdrop.style.display = 'block';
         if (loadingOverlay) loadingOverlay.style.display = 'block';
         document.body.classList.add('loading-table');
         
@@ -5140,13 +5165,18 @@
             if (!data || !data.rows) {
                 throw new Error("Invalid API response: missing data or rows");
             }
-            
-            lastStats = data.stats; 
-            lastStatsFiltered = data.stats_filtered;
-            currentRows = []; 
-            applyStatsToUI(data.stats, data.total_items);
 
-            updateCharts(data.stats, data.stats_filtered, data.filter_options); 
+            // Ribbons and "Totals" chart use media-scoped stats when filtering on Movies or TV only
+            const mt = (activeFilters.media_type || '').trim().toLowerCase();
+            const ribbonStats = (mt === 'movie' || mt === 'tv') && data.stats_media_scoped
+                ? data.stats_media_scoped
+                : data.stats;
+            lastStats = ribbonStats;
+            lastStatsFiltered = data.stats_filtered;
+            currentRows = [];
+            applyStatsToUI(ribbonStats, data.total_items);
+
+            updateCharts(ribbonStats, data.stats_filtered, data.filter_options); 
             updateFilterDropdowns(data.filter_options);
             
             // Only load settings once; avoid recalculating widths on every data refresh
@@ -5427,6 +5457,8 @@
             }
         } finally {
             isLoading = false;
+            const loadingBackdrop = document.getElementById('table-loading-backdrop');
+            if (loadingBackdrop) loadingBackdrop.style.display = 'none';
             if (loadingOverlay) loadingOverlay.style.display = 'none';
             document.body.classList.remove('loading-table');
             if (pendingReload) {
@@ -6437,14 +6469,16 @@
                             .then(r => r.json())
                             .then(d => {
                                 if (d.stats) {
-                                lastStats = d.stats;
-                                lastStatsFiltered = d.stats_filtered;
-                                    applyStatsToUI(d.stats, d.total_items);
+                                    const mt = (activeFilters.media_type || '').trim().toLowerCase();
+                                    const ribbonStats = (mt === 'movie' || mt === 'tv') && d.stats_media_scoped ? d.stats_media_scoped : d.stats;
+                                    lastStats = ribbonStats;
+                                    lastStatsFiltered = d.stats_filtered;
+                                    applyStatsToUI(ribbonStats, d.total_items);
                                 }
-                            if (shouldUpdateCharts && d.filter_options) {
-                                lastFilterUpdate = now;
-                                updateFilterDropdowns(d.filter_options);
-                                updateCharts(d.stats, d.stats_filtered, d.filter_options);
+                                if (shouldUpdateCharts && d.filter_options) {
+                                    lastFilterUpdate = now;
+                                    updateFilterDropdowns(d.filter_options);
+                                    updateCharts(lastStats, d.stats_filtered, d.filter_options);
                                 }
                             })
                             .catch(e => console.error("Failed to update filter options:", e));
@@ -6489,6 +6523,7 @@
                             document.getElementById('rep-failed').innerText = data.last_report.failed;
                             document.getElementById('rep-warn').innerText = data.last_report.warnings ?? 0;
                             document.getElementById('rep-time').innerText = formatDuration(data.last_report.duration);
+                            document.getElementById('rep-date').innerText = data.last_report.date || '--';
                             updateReportDetails();
                             const offlineBox = document.getElementById('rep-offline-box');
                             const offlineList = document.getElementById('rep-offline-list');
@@ -6964,6 +6999,7 @@
         document.getElementById('rep-failed').innerText = entry.failed ?? 0;
         document.getElementById('rep-warn').innerText = entry.warnings ?? 0;
         document.getElementById('rep-time').innerText = formatDuration(entry.duration || '0s');
+        document.getElementById('rep-date').innerText = entry.timestamp || '--';
         const offlineBox = document.getElementById('rep-offline-box');
         if (offlineBox) offlineBox.style.display = 'none';
         const failList = document.getElementById('report-fail-list');
