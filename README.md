@@ -9,12 +9,13 @@ Video analyzer and library for HDR content with deep metadata extraction, flexib
 - **HDR Detection:** Dolby Vision profiles, EL types (FEL/MEL), HDR10+, HDR10, HLG detection.
 - **Metadata Enrichment:** Filename parsing, Kodi `.nfo` ingestion, and backfill tools.
 - **Smart Filtering:** Multi‑select filters with counts, `All` + `Blanks` options, and advanced search tokens.
+- **Media-type–aware ribbons:** When filtering on Movies or TV, ribbons and charts show totals for that type only; ribbon and badge clicks preserve the media type.
 - **Charts:** Real‑time visualizations with **Totals / Filtered** toggle.
 - **Manual Edits:** Edit titles, year, source, HDR info, and media type directly in the file modal.
 - **Bulk Edit/Rescan:** Multi‑select rows and apply edits or rescan selected files.
 - **Column Control:** Show/hide, resize, drag‑reorder columns, and header‑only scrollbar (persisted).
 - **Scheduling:** Manual, daily, and interval scanning.
-- **Exports:** CSV/JSON of current filtered state.
+- **Exports:** CSV/JSON of All, Movies, TV, Filtered, or Current page.
 - **Notifications:** Toasts for scan actions, backfill, settings saves, and more.
 - **Scan Controls:** Split scan button with All/TV/Movie and per-folder targeting.
 
@@ -38,6 +39,21 @@ Video analyzer and library for HDR content with deep metadata extraction, flexib
    ```
 3. Open: `http://localhost:6002` (or host IP)
 
+### ARR Integration Environment Variables
+
+To enable right-click ARR search/replace actions, set these environment variables in your compose service:
+
+- `RADARR_URL` (example: `http://192.168.5.10:7878`)
+- `RADARR_API_KEY`
+- `SONARR_URL` (example: `http://192.168.5.10:8989`)
+- `SONARR_API_KEY`
+
+Notes:
+- API keys are read from environment variables only (not stored in app settings DB).
+- For TV rows, Sonarr lookup uses `tvdb_series_id` only (from `tvshow.nfo`) and `season`; triggers **SeasonSearch** for the season.
+- For movie rows, Radarr lookup uses `tmdb_id` or `imdb_id`; triggers **MoviesSearch**.
+- A green/red dot next to the ARR menu option indicates connectivity status (checked when you open the context menu).
+
 ---
 
 ## 🖥 UI Guide
@@ -54,10 +70,10 @@ The top‑left menu contains:
 |-------|---------|
 | DV P7 FEL | Dolby Vision P7 + Full EL |
 | DV P7 MEL | Dolby Vision P7 + Minimal EL |
-| DV P5 / P8.x | Dolby Vision profiles |
+| DV P5 / P8.x / P10.x | Dolby Vision profiles |
 | HDR10+ / HDR10 / HLG / SDR | Base HDR format |
 
-Clicking badges applies a filter immediately.
+Clicking badges applies a filter immediately. When you have **Movies** or **TV** selected, badge clicks keep that media type and add the chosen filter on top.
 
 ### Filters
 - Multi‑select filters include **All** + **Blanks** and show counts.
@@ -89,6 +105,7 @@ The toggle is in the **lower‑left** of the chart panel.
 - Order and widths are persisted
 - Sticky left/right columns keep checkbox and delete visible
 - Header scrollbar for wide column sets
+- Column header menu stays pinned when the header is stickied
 
 ### Details Modal (Manual Edits)
 Editable fields saved on modal close:
@@ -102,18 +119,40 @@ Editable fields saved on modal close:
 - Ctrl+Click (Windows) or Cmd+Click (macOS) to multi‑select rows.
 - Apply edits across selected rows or rescan selected files.
 - Per‑field **Clear** toggles allow blanking specific fields.
+- Bulk rescan shows a busy overlay while rescanning.
+
+### Row Right‑Click Menu (ARR)
+- Right-click one or more selected rows and choose **ARR Search/Replace**.
+- A **green dot** next to the option means Sonarr and Radarr are reachable; **red** means one or both failed the connection check.
+- The app queues search commands in Radarr (movies) or Sonarr (TV) for matching library items.
+- Mixed selection is supported; each row routes to Sonarr or Radarr by `media_type` (with ID fallback).
+- **Fallbacks:** If direct ID lookup returns empty (e.g. NFO has wrong tvdbId or Sonarr lookup is down), the app fetches all series/movies and matches by `tvdb_series_id`/`tmdb_id`/`imdb_id`, or by show/movie title when IDs don't match.
+- **Series vs Episode IDs:** TV rows store `tvdb_series_id` (from `tvshow.nfo`, e.g. 73940 for 'Allo 'Allo) and `tvdb_episode_id` (from episode NFO, e.g. 133064). Same for imdb, tmdb, trakt, rotten, metacritic. Movies continue to use `tvdb_id`, `imdb_id`, etc. After adding these columns, a **full rescan** is required to populate them from NFOs.
 
 ### Scan Folders
 - **Folders** button in the main menu opens a folder picker.
 - Choose a volume, browse directories, and add folders to the scan list.
 - **Type** selector per folder (Auto/TV/Movie) for targeted scans.
 - **Mute** keeps a folder in the list but skips it during scans.
+- Any folder containing an empty `.scanignore` file is skipped (including all subfolders).
 - If no scan folders are configured, scans default to all mounted volumes.
+
+Example:
+```
+/media/Movies/.scanignore
+```
+Any folder with `.scanignore` is skipped.
 
 ### Scan Button
 - Split scan button: **All**, **TV**, **Movie**.
 - Hover TV/Movie to pick a specific typed folder from a submenu.
 - The main button shows the selected mode and folder target.
+- Click the progress bar during a scan to pause/resume scanning and analyzing.
+- History button appears when idle and shows recent scan history with a per-entry report view.
+
+### Export Button
+- Split export button with scopes: **All**, **All Movies**, **All TV**, **All filtered**, **Current page**.
+- Output format is set in the main menu (CSV/JSON).
 
 ---
 
@@ -123,6 +162,11 @@ Editable fields saved on modal close:
 - Episode `.nfo` (`episodedetails`) → episode title, season, episode, year
 - `tvshow.nfo` → show title
 - `movie.nfo` → movie title + year
+
+### NFO Column (Table)
+- **NFO** indicates whether a matching `.nfo` file was found for that row.
+- **Movies:** Counted only if an `.nfo` exists in the same folder as the video (same stem, `movie.nfo`, or folder-named `.nfo`). A `movie.nfo` in a parent folder does not count.
+- **TV episodes:** Counted only if an episode-specific `.nfo` exists (same stem as the video, or same-folder `.nfo` with matching season/episode). `tvshow.nfo` is series-level and does not count as “NFO found” for individual episodes.
 
 ### Filename Heuristics (Fallback Only)
 - Movie title fallback (only if `.nfo` missing)
@@ -142,6 +186,7 @@ Editable fields saved on modal close:
 
 - `DOVI P7 FEL` → `category=dovi`, `profile=7`, `el=FEL`
 - `DOVI P7 MEL` → `category=dovi`, `profile=7`, `el=MEL`
+- `DOVI P10.1` / `DOVI P10.4` → AV1 Dolby Vision with HDR10/HLG backward compatibility
 - `HDR10+` → `category=hdr10plus`
 - `HDR10` → `category=hdr10`
 - `HLG` → `category=hlg`
@@ -197,6 +242,12 @@ Update manual fields:
 Rescan a single file and update DB entry:
 ```json
 {"full_path": "/path/file.mkv"}
+```
+
+### POST `/api/arr_search_replace`
+Queue Sonarr/Radarr search commands for selected files:
+```json
+{"paths": ["/path/file1.mkv", "/path/file2.mkv"]}
 ```
 
 ---
