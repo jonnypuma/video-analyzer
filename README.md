@@ -7,6 +7,7 @@ Video analyzer and library for HDR content with deep metadata extraction, flexib
 ## 🚀 Key Features
 
 - **HDR Detection:** Dolby Vision profiles, EL types (FEL/MEL), HDR10+, HDR10, HLG detection.
+- **ARR Integration:** Right-click to queue Sonarr/Radarr search commands; separate status dots for each service with individual tooltips.
 - **Metadata Enrichment:** Filename parsing, Kodi `.nfo` ingestion, and backfill tools.
 - **Smart Filtering:** Multi‑select filters with counts, `All` + `Blanks` options, and advanced search tokens.
 - **Media-type–aware ribbons:** When filtering on Movies or TV, ribbons and charts show totals for that type only; ribbon and badge clicks preserve the media type.
@@ -52,7 +53,7 @@ Notes:
 - API keys are read from environment variables only (not stored in app settings DB).
 - For TV rows, Sonarr lookup uses `tvdb_series_id` only (from `tvshow.nfo`) and `season`; triggers **SeasonSearch** for the season.
 - For movie rows, Radarr lookup uses `tmdb_id` or `imdb_id`; triggers **MoviesSearch**.
-- A green/red dot next to the ARR menu option indicates connectivity status (checked when you open the context menu).
+- Two status dots (Sonarr and Radarr) next to the ARR menu option show connectivity per service; each dot has its own tooltip (checked when you open the context menu).
 
 ---
 
@@ -123,7 +124,7 @@ Editable fields saved on modal close:
 
 ### Row Right‑Click Menu (ARR)
 - Right-click one or more selected rows and choose **ARR Search/Replace**.
-- A **green dot** next to the option means Sonarr and Radarr are reachable; **red** means one or both failed the connection check.
+- **Two status dots** (Sonarr | Radarr) show connectivity per service; each has its own tooltip. Green = reachable, red = connection failed.
 - The app queues search commands in Radarr (movies) or Sonarr (TV) for matching library items.
 - Mixed selection is supported; each row routes to Sonarr or Radarr by `media_type` (with ID fallback).
 - **Fallbacks:** If direct ID lookup returns empty (e.g. NFO has wrong tvdbId or Sonarr lookup is down), the app fetches all series/movies and matches by `tvdb_series_id`/`tmdb_id`/`imdb_id`, or by show/movie title when IDs don't match.
