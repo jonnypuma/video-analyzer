@@ -15,6 +15,9 @@ import signal
 import tempfile
 import zipfile
 import shutil
+import urllib.parse
+import urllib.request
+import urllib.error
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -53,10 +56,16 @@ LOG_CLEANUP_LIMIT = 5  # Number of old log files to keep
 MAX_SCAN_ATTEMPTS = 3  # Maximum scan attempts before skipping a file
 PROGRESS_UPDATE_INTERVAL = 10  # Update progress every N files (reduces lock contention)
 SUBPROCESS_TIMEOUT = 30  # Subprocess timeout in seconds (30 seconds per command)
+MEDIAINFO_TIMEOUT = 120  # MediaInfo can be slower on large REMUX files
 
 # --- GLOBAL STATE ---
 APP_START_TIME = time.time()
 APP_VERSION = os.environ.get("APP_VERSION", "dev")
+RADARR_URL = (os.environ.get("RADARR_URL") or "").strip().rstrip("/")
+RADARR_API_KEY = (os.environ.get("RADARR_API_KEY") or "").strip()
+SONARR_URL = (os.environ.get("SONARR_URL") or "").strip().rstrip("/")
+SONARR_API_KEY = (os.environ.get("SONARR_API_KEY") or "").strip()
+ARR_STATUS_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": None}
 PROGRESS = {
     "status": "idle", "current": 0, "total": 0, "file": "Waiting...", 
     "last_full_scan": "Never", "last_duration": "--",
@@ -310,6 +319,326 @@ def ensure_video_column(col: str, type_def: str) -> None:
                 conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {type_def}")
     except sqlite3.Error as e:
         log_debug(f"Migration Error: {e}", "ERROR")
+
+
+def _as_int(value: Any) -> Optional[int]:
+    """Convert value to int when possible; otherwise return None."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+ARR_RETRY_MAX_ATTEMPTS = 3
+ARR_RETRY_INITIAL_DELAY = 3.0  # Give ARR servers time to recover (avoid hammering when overloaded)
+ARR_RETRY_BACKOFF = 2.0
+
+
+def _arr_request(
+    base_url: str,
+    api_key: str,
+    method: str,
+    endpoint: str,
+    payload: Optional[dict] = None,
+    query: Optional[dict] = None,
+    timeout_seconds: int = 20
+) -> Any:
+    """
+    Make an authenticated ARR API request with retry logic (5xx, 429, timeouts).
+    Returns parsed JSON when present.
+    """
+    ep = endpoint.lstrip('/')
+    url = f"{base_url}/api/v3/{ep}"
+    if query:
+        query_clean = {k: v for k, v in query.items() if v is not None and str(v).strip() != ''}
+        if query_clean:
+            url = f"{url}?{urllib.parse.urlencode(query_clean)}"
+
+    _log_safe = f"{method} {base_url}/api/v3/{ep}"
+    if DEBUG_MODE:
+        log_debug(f"[ARR] {_log_safe}", "DEBUG")
+
+    body = None
+    headers = {"X-Api-Key": api_key, "Accept": "application/json"}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    last_err: Optional[Exception] = None
+    for attempt in range(1, ARR_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                raw = resp.read().decode("utf-8", errors="replace").strip()
+                if not raw:
+                    return {}
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    return {"raw": raw}
+        except urllib.error.HTTPError as e:
+            err_text = ""
+            try:
+                err_text = e.read().decode("utf-8", errors="replace").strip()
+            except Exception:
+                err_text = ""
+            msg = f"ARR HTTP {e.code}: {err_text[:300]}" if err_text else f"ARR HTTP {e.code}"
+            last_err = RuntimeError(msg)
+            retryable = e.code >= 500 or e.code == 429
+            if retryable and attempt < ARR_RETRY_MAX_ATTEMPTS:
+                delay = ARR_RETRY_INITIAL_DELAY * (ARR_RETRY_BACKOFF ** (attempt - 1))
+                log_debug(f"[ARR] {_log_safe} -> {msg}, retry {attempt}/{ARR_RETRY_MAX_ATTEMPTS} in {delay:.1f}s", "WARNING")
+                time.sleep(delay)
+            else:
+                log_debug(f"[ARR] FAIL {_log_safe} -> {msg}", "ERROR")
+                raise last_err
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            reason = getattr(e, "reason", e) if hasattr(e, "reason") else e
+            msg = f"ARR connection failed: {reason}"
+            last_err = RuntimeError(msg)
+            if attempt < ARR_RETRY_MAX_ATTEMPTS:
+                delay = ARR_RETRY_INITIAL_DELAY * (ARR_RETRY_BACKOFF ** (attempt - 1))
+                log_debug(f"[ARR] {_log_safe} -> {msg}, retry {attempt}/{ARR_RETRY_MAX_ATTEMPTS} in {delay:.1f}s", "WARNING")
+                time.sleep(delay)
+            else:
+                log_debug(f"[ARR] FAIL {_log_safe} -> {msg}", "ERROR")
+                raise last_err
+    raise last_err or RuntimeError("ARR request failed")
+
+
+def _queue_radarr_search(item: Dict[str, Any]) -> Tuple[bool, str]:
+    """Queue a Radarr movie search for a single DB item."""
+    if not RADARR_URL or not RADARR_API_KEY:
+        return False, "Radarr is not configured (RADARR_URL/RADARR_API_KEY)"
+
+    tmdb_id = _as_int(item.get("tmdb_id"))
+    imdb_id = str(item.get("imdb_id") or "").strip()
+    movie_id: Optional[int] = None
+
+    log_debug(f"[ARR] Radarr lookup: tmdb_id={tmdb_id}, imdb_id={imdb_id or '(none)'}", "INFO")
+
+    if tmdb_id is not None:
+        movies = _arr_request(RADARR_URL, RADARR_API_KEY, "GET", "movie", query={"tmdbId": tmdb_id})
+        if isinstance(movies, list) and movies:
+            movie_id = _as_int(movies[0].get("id") or movies[0].get("Id"))
+
+    if movie_id is None and imdb_id:
+        movies = _arr_request(RADARR_URL, RADARR_API_KEY, "GET", "movie", query={"imdbId": imdb_id})
+        if isinstance(movies, list) and movies:
+            movie_id = _as_int(movies[0].get("id") or movies[0].get("Id"))
+
+    if movie_id is None:
+        log_debug(f"[ARR] Radarr movie?tmdbId/imdbId= returned empty, trying GET /movie (all)", "INFO")
+        all_movies = _arr_request(RADARR_URL, RADARR_API_KEY, "GET", "movie")
+        if isinstance(all_movies, list):
+            for m in all_movies:
+                mid = _as_int(m.get("id") or m.get("Id"))
+                mtmdb = _as_int(m.get("tmdbId") or m.get("tmdb_id") or m.get("TmdbId"))
+                mimdb = str(m.get("imdbId") or m.get("imdb_id") or "").strip()
+                if mid and (mtmdb == tmdb_id or (imdb_id and mimdb == imdb_id)):
+                    movie_id = mid
+                    log_debug(f"[ARR] Radarr found via all-movies filter: movieId={movie_id}", "INFO")
+                    break
+
+    if movie_id is None:
+        msg = "Radarr item not found (tmdb_id/imdb_id missing or unmatched)"
+        log_debug(f"[ARR] Radarr skip: {msg}", "WARNING")
+        return False, msg
+
+    _arr_request(
+        RADARR_URL,
+        RADARR_API_KEY,
+        "POST",
+        "command",
+        payload={"name": "MoviesSearch", "movieIds": [movie_id]}
+    )
+    log_debug(f"[ARR] Radarr queued MoviesSearch for movieId={movie_id}", "INFO")
+    return True, "Queued Radarr movie search"
+
+
+def _queue_sonarr_search(item: Dict[str, Any]) -> Tuple[bool, str]:
+    """Queue a Sonarr episode/series search for a single DB item."""
+    if not SONARR_URL or not SONARR_API_KEY:
+        return False, "Sonarr is not configured (SONARR_URL/SONARR_API_KEY)"
+
+    tvdb_series_id = _as_int(item.get("tvdb_series_id"))
+    season = _as_int(item.get("season"))
+    episode = _as_int(item.get("episode"))
+    series_id: Optional[int] = None
+
+    log_debug(f"[ARR] Sonarr lookup: tvdb_series_id={tvdb_series_id}, season={season}, episode={episode}", "INFO")
+
+    def _extract_series_id(resp: Any) -> Optional[int]:
+        """Extract series id from Sonarr API response (list or single object)."""
+        if isinstance(resp, list) and resp:
+            s = resp[0]
+        elif isinstance(resp, dict) and resp:
+            s = resp
+        else:
+            return None
+        return _as_int(s.get("id") or s.get("Id"))
+
+    if tvdb_series_id is not None:
+        # Try series?tvdbid= (lowercase - some Sonarr versions expect this)
+        series = _arr_request(SONARR_URL, SONARR_API_KEY, "GET", "series", query={"tvdbid": tvdb_series_id})
+        series_id = _extract_series_id(series)
+        if series_id is None:
+            log_debug(f"[ARR] Sonarr series?tvdbid= returned {type(series).__name__} len={len(series) if isinstance(series, (list, dict)) else 0}, trying tvdbId", "INFO")
+            # Fallback: series?tvdbId= (camelCase)
+            series = _arr_request(SONARR_URL, SONARR_API_KEY, "GET", "series", query={"tvdbId": tvdb_series_id})
+            series_id = _extract_series_id(series)
+        if series_id is None:
+            log_debug(f"[ARR] Sonarr series?tvdbId= returned {type(series).__name__} len={len(series) if isinstance(series, (list, dict)) else 0}, trying series/lookup", "INFO")
+            # Fallback: series/lookup (can 503 when SkyHook/TVDB is down - catch and continue)
+            for lookup_query in [{"tvdbId": tvdb_series_id}, {"term": f"tvdb:{tvdb_series_id}"}]:
+                if series_id is not None:
+                    break
+                try:
+                    lookup = _arr_request(SONARR_URL, SONARR_API_KEY, "GET", "series/lookup", query=lookup_query)
+                    if isinstance(lookup, list) and lookup:
+                        for s in lookup:
+                            sid = _as_int(s.get("id") or s.get("Id"))
+                            if sid and sid > 0:
+                                series_id = sid
+                                log_debug(f"[ARR] Sonarr found via lookup: seriesId={series_id}", "INFO")
+                                break
+                except Exception as lookup_err:
+                    log_debug(f"[ARR] Sonarr series/lookup failed (continuing): {lookup_err}", "WARNING")
+        if series_id is None:
+            log_debug(f"[ARR] Sonarr trying GET /series (all) and filter by tvdbId", "INFO")
+            # Fallback: fetch all series and filter client-side (tvdbId param often returns empty)
+            all_series = _arr_request(SONARR_URL, SONARR_API_KEY, "GET", "series")
+            if isinstance(all_series, list):
+                count = len(all_series)
+                log_debug(f"[ARR] Sonarr GET /series returned {count} series", "INFO")
+                sample_tvdb = []
+                for s in all_series[:10]:
+                    stvdb = _as_int(s.get("tvdbId") or s.get("tvdb_id") or s.get("TvdbId"))
+                    if stvdb is not None:
+                        sample_tvdb.append(stvdb)
+                if sample_tvdb:
+                    log_debug(f"[ARR] Sonarr sample tvdbIds from /series: {sample_tvdb}", "INFO")
+                for s in all_series:
+                    sid = _as_int(s.get("id") or s.get("Id"))
+                    stvdb = _as_int(s.get("tvdbId") or s.get("tvdb_id") or s.get("TvdbId"))
+                    if sid and stvdb == tvdb_series_id:
+                        series_id = sid
+                        log_debug(f"[ARR] Sonarr found via all-series filter: seriesId={series_id}", "INFO")
+                        break
+                if series_id is None and count > 0:
+                    all_tvdb = [_as_int(s.get("tvdbId") or s.get("tvdb_id") or s.get("TvdbId")) for s in all_series]
+                    log_debug(f"[ARR] Sonarr no match for tvdbId={tvdb_series_id}; series tvdbIds present: {len([x for x in all_tvdb if x is not None])}", "WARNING")
+                    # Match by show title within all_series (NFO tvdbId can be wrong, e.g. old TVDB migration)
+                    show_title = str(item.get("show_title") or "").strip()
+                    if not show_title:
+                        # Fallback: derive from filename (e.g. The.Secret.Life.of.Us.S03E01... -> The Secret Life of Us)
+                        fn = str(item.get("filename") or "").strip()
+                        m = re.search(r"^(.+?)[.\s_-]*[sS]\d{1,2}[.\s_-]*[eE]\d{1,2}", fn)
+                        if m:
+                            show_title = m.group(1).replace(".", " ").replace("_", " ").strip()
+                    if show_title and series_id is None:
+                        log_debug(f"[ARR] Sonarr trying title match: '{show_title[:50]}'", "INFO")
+
+                        def _norm(t: str) -> str:
+                            return re.sub(r"[^\w]", "", t.lower()) if t else ""
+
+                        want = _norm(show_title)
+                        for s in all_series:
+                            title = str(s.get("title") or s.get("Title") or "").strip()
+                            sid = _as_int(s.get("id") or s.get("Id"))
+                            tnorm = _norm(title)
+                            matched = want in tnorm or (len(tnorm) >= 8 and tnorm in want)
+                            if sid and want and matched:
+                                series_id = sid
+                                log_debug(f"[ARR] Sonarr found via title match in /series: seriesId={series_id} title={title}", "INFO")
+                                break
+
+    if series_id is None and tvdb_series_id is None and season is not None and episode is not None:
+        show_title = str(item.get("show_title") or "").strip()
+        if not show_title:
+            fn = str(item.get("filename") or "").strip()
+            m = re.search(r"^(.+?)[.\s_-]*[sS]\d{1,2}[.\s_-]*[eE]\d{1,2}", fn)
+            if m:
+                show_title = m.group(1).replace(".", " ").replace("_", " ").strip()
+        if show_title:
+            log_debug(f"[ARR] Sonarr no tvdb_series_id; trying title match: '{show_title[:50]}'", "INFO")
+            all_series = _arr_request(SONARR_URL, SONARR_API_KEY, "GET", "series")
+            if isinstance(all_series, list):
+
+                def _norm(t: str) -> str:
+                    return re.sub(r"[^\w]", "", t.lower()) if t else ""
+
+                want = _norm(show_title)
+                for s in all_series:
+                    title = str(s.get("title") or s.get("Title") or "").strip()
+                    sid = _as_int(s.get("id") or s.get("Id"))
+                    tnorm = _norm(title)
+                    matched = want in tnorm or (len(tnorm) >= 8 and tnorm in want)
+                    if sid and want and matched:
+                        series_id = sid
+                        log_debug(f"[ARR] Sonarr found via title match (no NFO): seriesId={series_id} title={title}", "INFO")
+                        break
+
+    if series_id is None:
+        msg = "Sonarr series not found (tvdb_series_id missing or unmatched)"
+        log_debug(f"[ARR] Sonarr skip: {msg}", "WARNING")
+        return False, msg
+
+    if season is not None:
+        _arr_request(
+            SONARR_URL,
+            SONARR_API_KEY,
+            "POST",
+            "command",
+            payload={"name": "SeasonSearch", "seriesId": series_id, "seasonNumber": season}
+        )
+        log_debug(f"[ARR] Sonarr queued SeasonSearch for seriesId={series_id} S{season}", "INFO")
+        return True, "Queued Sonarr season search"
+
+    _arr_request(
+        SONARR_URL,
+        SONARR_API_KEY,
+        "POST",
+        "command",
+        payload={"name": "SeriesSearch", "seriesId": series_id}
+    )
+    log_debug(f"[ARR] Sonarr queued SeriesSearch for seriesId={series_id}", "INFO")
+    return True, "Queued Sonarr series search"
+
+
+def _arr_service_status(name: str, base_url: str, api_key: str) -> Dict[str, Any]:
+    """Return connectivity/config status for a single ARR service."""
+    if not base_url or not api_key:
+        return {
+            "name": name,
+            "ok": False,
+            "configured": False,
+            "message": "Not configured"
+        }
+    try:
+        payload = _arr_request(base_url, api_key, "GET", "system/status", timeout_seconds=5)
+        version = str((payload or {}).get("version") or "").strip() if isinstance(payload, dict) else ""
+        msg = "Connected"
+        if version:
+            msg = f"Connected ({version})"
+        return {
+            "name": name,
+            "ok": True,
+            "configured": True,
+            "message": msg
+        }
+    except Exception as e:
+        return {
+            "name": name,
+            "ok": False,
+            "configured": True,
+            "message": str(e)
+        }
 def init_db() -> None:
     """
     Initialize the database with required tables and migrations.
@@ -346,7 +675,10 @@ def init_db() -> None:
                 'video_source': 'TEXT', 'source_format': 'TEXT', 'video_codec': 'TEXT', 
                 'is_3d': 'INTEGER DEFAULT 0', 'edition': 'TEXT', 'year': 'INTEGER',
                 'media_type': 'TEXT', 'show_title': 'TEXT', 'season': 'INTEGER', 'episode': 'INTEGER',
-                'movie_title': 'TEXT', 'episode_title': 'TEXT', 'nfo_missing': 'INTEGER DEFAULT 0', 'validation_flag': 'TEXT'
+                'movie_title': 'TEXT', 'episode_title': 'TEXT', 'nfo_missing': 'INTEGER DEFAULT 0', 'validation_flag': 'TEXT',
+                'tvdb_series_id': 'TEXT', 'tvdb_episode_id': 'TEXT', 'imdb_series_id': 'TEXT', 'imdb_episode_id': 'TEXT',
+                'tmdb_series_id': 'TEXT', 'tmdb_episode_id': 'TEXT', 'trakt_series_id': 'TEXT', 'trakt_episode_id': 'TEXT',
+                'rotten_series_id': 'TEXT', 'rotten_episode_id': 'TEXT', 'metacritic_series_id': 'TEXT', 'metacritic_episode_id': 'TEXT'
             }
             for col, type_def in required_cols.items():
                 if col not in existing_cols: 
@@ -384,7 +716,7 @@ def init_db() -> None:
         log_debug("⚠️ No media volumes detected in root.")
 
 # --- EXECUTION WRAPPER ---
-def run_command(cmd_list: list, capture: bool = True, capture_stderr: bool = False) -> tuple[int, str, str]:
+def run_command(cmd_list: list, capture: bool = True, capture_stderr: bool = False, timeout_seconds: Optional[int] = None) -> tuple[int, str, str]:
     """
     Runs a command with ability to kill it instantly.
     
@@ -408,10 +740,12 @@ def run_command(cmd_list: list, capture: bool = True, capture_stderr: bool = Fal
     
     with proc_lock: ACTIVE_PROCS.add(p)
     
+    timeout_value = timeout_seconds if timeout_seconds is not None else SUBPROCESS_TIMEOUT
+    
     # Use a separate thread to enforce timeout (communicate timeout may not work if process is truly hung)
     timeout_occurred = threading.Event()
     def kill_on_timeout():
-        time.sleep(SUBPROCESS_TIMEOUT)
+        time.sleep(timeout_value)
         if p.poll() is None:  # Process still running
             timeout_occurred.set()
             if DEBUG_MODE: log_debug(f"[RUN_COMMAND] Timeout thread killing process {p.pid} for: {cmd_list[0]}", "WARNING")
@@ -436,7 +770,7 @@ def run_command(cmd_list: list, capture: bool = True, capture_stderr: bool = Fal
         stdout = ""
         stderr = ""
         try:
-            stdout_result, stderr_result = p.communicate(timeout=SUBPROCESS_TIMEOUT + 2)  # Give timeout thread a head start
+            stdout_result, stderr_result = p.communicate(timeout=timeout_value + 2)  # Give timeout thread a head start
             stdout = stdout_result if stdout_result else ""
             stderr = (stderr_result if stderr_result else "") if capture_stderr else ""
         except subprocess.TimeoutExpired:
@@ -455,7 +789,7 @@ def run_command(cmd_list: list, capture: bool = True, capture_stderr: bool = Fal
                 except (OSError, ProcessLookupError, ValueError, subprocess.TimeoutExpired):
                     pass
             with proc_lock: ACTIVE_PROCS.discard(p)
-            raise RuntimeError(f"Command timed out after {SUBPROCESS_TIMEOUT}s: {cmd_list[0]}")
+            raise RuntimeError(f"Command timed out after {timeout_value}s: {cmd_list[0]}")
     finally:
         timeout_thread.join(timeout=0.1)  # Wait briefly for timeout thread
         with proc_lock: ACTIVE_PROCS.discard(p)
@@ -855,7 +1189,18 @@ def find_kodi_nfo_candidates(file_path: str, media_type_hint: str | None) -> lis
                         break
         except OSError:
             pass
-        # tvshow.nfo is series-level; do not count as NFO found for individual episodes
+        # tvshow.nfo is series-level; add it for series ID extraction (does not count as NFO found for episodes)
+        for parent in file_path_obj.parents:
+            if re.match(r'^(season|s\d{1,2}|specials?)$', parent.name, re.IGNORECASE):
+                continue
+            if re.match(r'^(season)[\s._-]*\d{1,2}$', parent.name, re.IGNORECASE):
+                continue
+            if re.match(r'^s[\s._-]*\d{1,2}$', parent.name, re.IGNORECASE):
+                continue
+            tvshow_nfo = parent / 'tvshow.nfo'
+            if tvshow_nfo.exists():
+                candidates.append(str(tvshow_nfo))
+                break
     else:
         # movie.nfo or folder-named .nfo only in the same directory as the video file
         # (do not walk up: a movie.nfo in a parent folder applies to the whole tree, not this file)
@@ -895,6 +1240,81 @@ def guess_show_title_from_path(file_path: str) -> str | None:
             continue
         return name
     return None
+
+def _enrich_from_nfo_and_filename(path: str, result: dict) -> None:
+    """
+    Merge metadata from filename and NFO into result. Used so that even when
+    ffprobe/MediaInfo fails, we still have ARR-relevant metadata (tmdb_id,
+    tvdb_series_id, season, episode, show_title, etc.) for Sonarr/Radarr lookup.
+    """
+    filename_base = os.path.basename(path)
+    filename_lower = filename_base.lower()
+    filename_meta = parse_filename_metadata(filename_base)
+    media_type_guess, season_guess, episode_guess = parse_tv_from_filename(filename_lower)
+    if media_type_guess and not result.get('media_type'):
+        result['media_type'] = media_type_guess
+    if season_guess is not None and result.get('season') is None:
+        result['season'] = season_guess
+    if episode_guess is not None and result.get('episode') is None:
+        result['episode'] = episode_guess
+    if not result.get('year') and filename_meta.get('year'):
+        result['year'] = filename_meta['year']
+    if not result.get('video_source') and filename_meta.get('video_source'):
+        result['video_source'] = filename_meta['video_source']
+    if not result.get('source_format') and filename_meta.get('source_format'):
+        result['source_format'] = filename_meta['source_format']
+    if not result.get('edition') and filename_meta.get('edition'):
+        result['edition'] = filename_meta['edition']
+    if not result.get('is_3d') and filename_meta.get('is_3d'):
+        result['is_3d'] = filename_meta['is_3d']
+
+    nfo_candidates = find_kodi_nfo_candidates(path, result.get('media_type'))
+    for nfo_path in nfo_candidates:
+        nfo_data = parse_kodi_nfo(nfo_path)
+        if not nfo_data:
+            continue
+        is_tvshow_nfo = pathlib.Path(nfo_path).name.lower() == 'tvshow.nfo'
+        if not result.get('year') and nfo_data.get('year'):
+            result['year'] = nfo_data['year']
+        if not result.get('media_type') and nfo_data.get('media_type'):
+            result['media_type'] = nfo_data['media_type']
+        if not result.get('show_title') and nfo_data.get('show_title'):
+            result['show_title'] = nfo_data['show_title']
+        if result.get('season') is None and nfo_data.get('season') is not None:
+            result['season'] = nfo_data['season']
+        if result.get('episode') is None and nfo_data.get('episode') is not None:
+            result['episode'] = nfo_data['episode']
+        if not result.get('episode_title') and nfo_data.get('episode_title'):
+            result['episode_title'] = nfo_data['episode_title']
+        if is_tvshow_nfo:
+            for k in ('tvdb', 'imdb', 'tmdb', 'trakt', 'rotten', 'metacritic'):
+                val = nfo_data.get(f'{k}_id')
+                if val and not result.get(f'{k}_series_id'):
+                    result[f'{k}_series_id'] = val
+        else:
+            if nfo_data.get('media_type') != 'movie':
+                for k in ('tvdb', 'imdb', 'tmdb', 'trakt', 'rotten', 'metacritic'):
+                    val = nfo_data.get(f'{k}_id')
+                    if val and not result.get(f'{k}_episode_id'):
+                        result[f'{k}_episode_id'] = val
+            if result.get('media_type') != 'tv':
+                if not result.get('imdb_id') and nfo_data.get('imdb_id'):
+                    result['imdb_id'] = nfo_data['imdb_id']
+                if not result.get('tvdb_id') and nfo_data.get('tvdb_id'):
+                    result['tvdb_id'] = nfo_data['tvdb_id']
+                if not result.get('tmdb_id') and nfo_data.get('tmdb_id'):
+                    result['tmdb_id'] = nfo_data['tmdb_id']
+                if not result.get('rotten_id') and nfo_data.get('rotten_id'):
+                    result['rotten_id'] = nfo_data['rotten_id']
+                if not result.get('metacritic_id') and nfo_data.get('metacritic_id'):
+                    result['metacritic_id'] = nfo_data['metacritic_id']
+                if not result.get('trakt_id') and nfo_data.get('trakt_id'):
+                    result['trakt_id'] = nfo_data['trakt_id']
+        if not result.get('movie_title') and nfo_data.get('title') and (nfo_data.get('media_type') == 'movie' or result.get('media_type') != 'tv'):
+            result['movie_title'] = nfo_data['title']
+    coerce_tv_nfo_to_movie(result, filename_base, media_type_guess, path)
+    if result.get('media_type') == 'tv' and not result.get('show_title'):
+        result['show_title'] = guess_show_title_from_path(path)
 
 def extract_video_codec(filename: str, probe_data: dict) -> str | None:
     """
@@ -982,6 +1402,9 @@ def analyze_file_deep(path: str) -> dict:
         'max_cll': None, 'max_fall': None,
         'fps': None, 'aspect_ratio': None,
         'imdb_id': None, 'tvdb_id': None, 'tmdb_id': None, 'rotten_id': None, 'metacritic_id': None, 'trakt_id': None,
+        'tvdb_series_id': None, 'tvdb_episode_id': None, 'imdb_series_id': None, 'imdb_episode_id': None,
+        'tmdb_series_id': None, 'tmdb_episode_id': None, 'trakt_series_id': None, 'trakt_episode_id': None,
+        'rotten_series_id': None, 'rotten_episode_id': None, 'metacritic_series_id': None, 'metacritic_episode_id': None,
         'imdb_rating': None, 'tvdb_rating': None, 'tmdb_rating': None, 'rotten_rating': None, 'metacritic_rating': None, 'trakt_rating': None,
         'video_source': None, 'source_format': None, 'video_codec': None, 
         'is_3d': 0, 'edition': None, 'year': None,
@@ -1003,6 +1426,9 @@ def analyze_file_deep(path: str) -> dict:
         if DEBUG_MODE:
             log_debug(f"Early file access check failed for {path}: {e}", "ERROR")
         return _finalize_result(result)
+
+    # Extract metadata from filename and NFO early, so we have ARR-relevant data even when ffprobe/MediaInfo fails
+    _enrich_from_nfo_and_filename(path, result)
 
     # Initialize variables that might be used in nested try blocks
     enhancement_layer_found = False
@@ -1096,12 +1522,14 @@ def analyze_file_deep(path: str) -> dict:
             result['episode'] = episode_guess
 
         nfo_candidates = find_kodi_nfo_candidates(path, result['media_type'])
-        result['nfo_missing'] = 0 if nfo_candidates else 1
+        episode_nfo_candidates = [c for c in nfo_candidates if pathlib.Path(c).name.lower() != 'tvshow.nfo']
+        result['nfo_missing'] = 0 if episode_nfo_candidates else 1
         if nfo_candidates:
             for nfo_path in nfo_candidates:
                 nfo_data = parse_kodi_nfo(nfo_path)
                 if not nfo_data:
                     continue
+                is_tvshow_nfo = pathlib.Path(nfo_path).name.lower() == 'tvshow.nfo'
                 if not result['year'] and nfo_data.get('year'):
                     result['year'] = nfo_data['year']
                 if not result['media_type'] and nfo_data.get('media_type'):
@@ -1116,18 +1544,31 @@ def analyze_file_deep(path: str) -> dict:
                     result['show_title'] = nfo_data['show_title']
                 if not result['episode_title'] and nfo_data.get('episode_title'):
                     result['episode_title'] = nfo_data['episode_title']
-                if not result.get('imdb_id') and nfo_data.get('imdb_id'):
-                    result['imdb_id'] = nfo_data['imdb_id']
-                if not result.get('tvdb_id') and nfo_data.get('tvdb_id'):
-                    result['tvdb_id'] = nfo_data['tvdb_id']
-                if not result.get('tmdb_id') and nfo_data.get('tmdb_id'):
-                    result['tmdb_id'] = nfo_data['tmdb_id']
-                if not result.get('rotten_id') and nfo_data.get('rotten_id'):
-                    result['rotten_id'] = nfo_data['rotten_id']
-                if not result.get('metacritic_id') and nfo_data.get('metacritic_id'):
-                    result['metacritic_id'] = nfo_data['metacritic_id']
-                if not result.get('trakt_id') and nfo_data.get('trakt_id'):
-                    result['trakt_id'] = nfo_data['trakt_id']
+                if is_tvshow_nfo:
+                    for k in ('tvdb', 'imdb', 'tmdb', 'trakt', 'rotten', 'metacritic'):
+                        val = nfo_data.get(f'{k}_id')
+                        if val:
+                            result[f'{k}_series_id'] = val
+                else:
+                    # Only set episode_id for TV episode NFOs; movie NFOs have imdb_id/tmdb_id etc. which go to main columns only
+                    if nfo_data.get('media_type') != 'movie':
+                        for k in ('tvdb', 'imdb', 'tmdb', 'trakt', 'rotten', 'metacritic'):
+                            val = nfo_data.get(f'{k}_id')
+                            if val:
+                                result[f'{k}_episode_id'] = val
+                if result.get('media_type') != 'tv':
+                    if not result.get('imdb_id') and nfo_data.get('imdb_id'):
+                        result['imdb_id'] = nfo_data['imdb_id']
+                    if not result.get('tvdb_id') and nfo_data.get('tvdb_id'):
+                        result['tvdb_id'] = nfo_data['tvdb_id']
+                    if not result.get('tmdb_id') and nfo_data.get('tmdb_id'):
+                        result['tmdb_id'] = nfo_data['tmdb_id']
+                    if not result.get('rotten_id') and nfo_data.get('rotten_id'):
+                        result['rotten_id'] = nfo_data['rotten_id']
+                    if not result.get('metacritic_id') and nfo_data.get('metacritic_id'):
+                        result['metacritic_id'] = nfo_data['metacritic_id']
+                    if not result.get('trakt_id') and nfo_data.get('trakt_id'):
+                        result['trakt_id'] = nfo_data['trakt_id']
                 if result.get('imdb_rating') is None and nfo_data.get('imdb_rating') is not None:
                     result['imdb_rating'] = nfo_data['imdb_rating']
                 if result.get('tvdb_rating') is None and nfo_data.get('tvdb_rating') is not None:
@@ -1142,7 +1583,6 @@ def analyze_file_deep(path: str) -> dict:
                     result['trakt_rating'] = nfo_data['trakt_rating']
                 if not result['movie_title'] and nfo_data.get('title') and (nfo_data.get('media_type') == 'movie' or result['media_type'] != 'tv'):
                     result['movie_title'] = nfo_data['title']
-
         coerce_tv_nfo_to_movie(result, filename_base, media_type_guess, path)
 
         if result['media_type'] == 'tv':
@@ -1155,7 +1595,11 @@ def analyze_file_deep(path: str) -> dict:
                 result['movie_title'] = movie_title_guess
                 if not result['media_type']:
                     result['media_type'] = 'movie'
-        
+        # Movies must not have series/episode IDs; those columns are for TV only
+        if result.get('media_type') == 'movie':
+            for k in ('tvdb', 'imdb', 'tmdb', 'trakt', 'rotten', 'metacritic'):
+                result[f'{k}_series_id'] = None
+                result[f'{k}_episode_id'] = None
         is_remux = result['source_format'] == 'Remux' or 'remux' in filename_lower
         if is_remux and not result['video_source']:
             is_uhd_remux = bool(re.search(r'\b(uhd|ultra[-\s]?hd|2160p|uhd[-\s]?blu[-\s]?ray)\b', filename_lower)) or result['resolution'] == "4K"
@@ -1184,10 +1628,24 @@ def analyze_file_deep(path: str) -> dict:
         if "arib-std-b67" in color_transfer: is_hlg_base = True; sec_hdrs.append("HLG")
         elif "smpte2084" in color_transfer: sec_hdrs.append("HDR10")
 
-        # Extract Dolby Vision compatibility ID from ffprobe side_data
+        # Extract Dolby Vision profile/compatibility from ffprobe side_data
+        dovi_profile_from_ffprobe = None
         bl_compatibility_id = None
         dv_header = next((x for x in side_data if 'DOVI configuration record' in x.get('side_data_type', '')), None)
         if dv_header:
+            # Try to get profile directly from ffprobe side_data payload
+            for profile_key in ('dv_profile', 'dovi_profile', 'profile'):
+                profile_val = dv_header.get(profile_key)
+                if profile_val is not None and str(profile_val).strip():
+                    dovi_profile_from_ffprobe = str(profile_val).strip()
+                    break
+            # Some ffprobe builds only include profile in side_data_type text
+            if not dovi_profile_from_ffprobe:
+                sd_type_text = str(dv_header.get('side_data_type', ''))
+                m = re.search(r'profile[^0-9]*([0-9]{1,2})', sd_type_text, flags=re.IGNORECASE)
+                if m:
+                    dovi_profile_from_ffprobe = m.group(1)
+
             # Try multiple possible field names for compatibility ID
             bl_compatibility_id = (dv_header.get('compatibility_id') or 
                                   dv_header.get('dv_bl_signal_compatibility_id') or
@@ -1352,9 +1810,56 @@ def analyze_file_deep(path: str) -> dict:
                         # Otherwise, for P7 without clear indicators, default to MEL
                         # (MEL is more common for P7)
                         dovi_el_type_raw = 'MEL'
+        elif dovi_profile_from_ffprobe:
+            dovi_profile_raw = dovi_profile_from_ffprobe
+            if DEBUG_MODE:
+                log_debug(f"Dolby Vision detected from ffprobe DOVI side_data: profile={dovi_profile_raw}", "DEBUG")
         
         # Note: Format determination happens AFTER MediaInfo to ensure all sources are checked
         # This will be done at the end after MediaInfo has a chance to add to sec_hdrs
+        def parse_dv_profile_from_mediainfo(*values: Any) -> str | None:
+            """
+            Parse Dolby Vision profile hints from MediaInfo HDR fields.
+
+            Handles tokens like:
+              - dvhe.08.06
+              - dvav.10.01 / dva1.10.04
+              - Profile 10 / Profile 10.1
+            """
+            parts = [str(v) for v in values if v]
+            if not parts:
+                return None
+            text = " ".join(parts)
+            lower = text.lower()
+
+            if not any(tok in lower for tok in ("dolby vision", "dovi", "dvhe", "dvh1", "dvav", "dva1")):
+                return None
+
+            # Codec/profile token format:
+            #   dvav.10.01, dva1.10.04, dvhe.08.04, dav1.10
+            m = re.search(r'(?:dv(?:he|h1|av|a1)|dav1)\.(\d{2})(?:\.(\d{2}))?', lower)
+            if m:
+                profile_num = str(int(m.group(1)))
+                compat_raw = m.group(2)
+                if compat_raw is not None:
+                    compat_num = str(int(compat_raw))
+                    if compat_num == "1":
+                        return f"{profile_num}.1"
+                    if compat_num == "4":
+                        return f"{profile_num}.4"
+                return profile_num
+
+            # Free-form "Profile 10.1" style
+            m = re.search(r'profile\s*([0-9]{1,2}(?:\.[0-9])?)', lower)
+            if m:
+                return m.group(1)
+
+            # Filename-like "DOVI P10.1" style
+            m = re.search(r'\bdovi?\s*p?([0-9]{1,2}(?:\.[0-9])?)\b', lower)
+            if m:
+                return m.group(1)
+
+            return None
 
         # 3. MEDIAINFO (Raw CLI Parsing)
         # Note: HAS_MEDIAINFO check removed because we now use CLI which is always installed in Docker
@@ -1364,7 +1869,7 @@ def analyze_file_deep(path: str) -> dict:
         try:
             if DEBUG_MODE: log_debug(f"[MEDIAINFO] Starting mediainfo for: {path}", "DEBUG")
             try:
-                rc_mi, out_mi, _ = run_command(['mediainfo', '--Output=JSON', path])
+                rc_mi, out_mi, _ = run_command(['mediainfo', '--Output=JSON', path], timeout_seconds=MEDIAINFO_TIMEOUT)
                 if DEBUG_MODE: log_debug(f"[MEDIAINFO] Completed with return code: {rc_mi}", "DEBUG")
             except (RuntimeError, Exception) as e:
                 # Catch ALL exceptions from MediaInfo (timeout, errors, etc.) and continue without it
@@ -1408,6 +1913,24 @@ def analyze_file_deep(path: str) -> dict:
                             # Check MediaInfo for HDR10+ indicators (especially important for DV hybrids)
                             hdr_format = t.get('HDR_Format', '')
                             hdr_compat = t.get('HDR_Format_Compatibility', '')
+                            hdr_profile = t.get('HDR_Format_Profile', '')
+                            hdr_format_string = t.get('HDR_Format_String', '')
+                            hdr_settings = t.get('HDR_Format_Settings', '')
+                            hdr_version = t.get('HDR_Format_Version', '')
+
+                            # AV1 Dolby Vision can be present in MediaInfo strings even when dovi_tool
+                            # cannot extract RPU (e.g. dvav/dva1 profile markers).
+                            if not dovi_profile_raw:
+                                mi_dv_profile = parse_dv_profile_from_mediainfo(
+                                    hdr_format, hdr_compat, hdr_profile, hdr_format_string, hdr_settings, hdr_version
+                                )
+                                if mi_dv_profile:
+                                    dovi_profile_raw = mi_dv_profile
+                                    if DEBUG_MODE:
+                                        log_debug(
+                                            f"Dolby Vision detected from MediaInfo fields: profile={mi_dv_profile}",
+                                            "DEBUG"
+                                        )
                             
                             # Check HDR_Format_Compatibility first (most reliable for hybrids)
                             if hdr_compat:
@@ -1417,6 +1940,12 @@ def analyze_file_deep(path: str) -> dict:
                                         sec_hdrs.append("HDR10+")
                                         if DEBUG_MODE:
                                             log_debug(f"HDR10+ detected from MediaInfo HDR_Format_Compatibility: {hdr_compat}", "DEBUG")
+                                if 'HDR10' in compat_str and "HDR10" not in sec_hdrs:
+                                    sec_hdrs.append("HDR10")
+                                if 'HLG' in compat_str:
+                                    is_hlg_base = True
+                                    if "HLG" not in sec_hdrs:
+                                        sec_hdrs.append("HLG")
                             
                             # Check HDR_Format for SMPTE ST 2094 (HDR10+)
                             if hdr_format:
@@ -1451,26 +1980,30 @@ def analyze_file_deep(path: str) -> dict:
             
             # Determine DV profile
             bl_id = result['bl_compatibility_id']
-            if dovi_profile_raw == "8":
-                # P8.4: compatibility_id = 4 OR HLG base layer (even if compatibility_id is None)
+            if dovi_profile_raw in ("8", "10"):
+                # For profiles 8/10:
+                #   *.4 => HLG compatibility (HLG base layer or bl_id=4)
+                #   *.1 => HDR10 compatibility (bl_id=1 or HDR10/HDR10+ signals)
+                #   bare profile => no compatibility hint available
+                profile_prefix = dovi_profile_raw
                 if is_hlg_base:
-                    result['dovi_profile'] = "8.4"
+                    result['dovi_profile'] = f"{profile_prefix}.4"
                     if DEBUG_MODE:
-                        log_debug(f"Detected P8.4 (HLG base layer, bl_id={bl_id})", "DEBUG")
+                        log_debug(f"Detected P{profile_prefix}.4 (HLG base layer, bl_id={bl_id})", "DEBUG")
                 elif bl_id == "4":
-                    result['dovi_profile'] = "8.4"
+                    result['dovi_profile'] = f"{profile_prefix}.4"
                     if DEBUG_MODE:
-                        log_debug(f"Detected P8.4 (bl_id=4)", "DEBUG")
-                elif bl_id == "1": 
-                    result['dovi_profile'] = "8.1"
-                else: 
+                        log_debug(f"Detected P{profile_prefix}.4 (bl_id=4)", "DEBUG")
+                elif bl_id == "1":
+                    result['dovi_profile'] = f"{profile_prefix}.1"
+                else:
                     # Check sec_hdrs for highest level (HDR10+ > HDR10)
                     if "HDR10+" in sec_hdrs:
-                        result['dovi_profile'] = "8.1"  # P8.1 with HDR10+ base
+                        result['dovi_profile'] = f"{profile_prefix}.1"
                     elif "HDR10" in sec_hdrs:
-                        result['dovi_profile'] = "8.1"
+                        result['dovi_profile'] = f"{profile_prefix}.1"
                     else:
-                        result['dovi_profile'] = "8"
+                        result['dovi_profile'] = profile_prefix
             else:
                 result['dovi_profile'] = dovi_profile_raw
             
@@ -1622,7 +2155,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
         if not os.path.exists(full_path_str):
             if DEBUG_MODE:
                 log_debug(f"File does not exist: {full_path_str}", "ERROR")
-            return {
+            err_result = {
                 "filename": filename, "category": 'sdr_only', "profile": None,
                 "el_type": None, "container": path_obj.suffix.lower().replace('.', ''), 
                 "source_vol": path_obj.parts[1] if len(path_obj.parts) > 1 else "Unknown",
@@ -1635,6 +2168,9 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
                 "audio_codecs": [], "audio_langs": [], "audio_channels": [], "subtitles": [], "max_cll": None, "max_fall": None,
                 "fps": None, "aspect_ratio": None,
                 "imdb_id": None, "tvdb_id": None, "tmdb_id": None, "rotten_id": None, "metacritic_id": None, "trakt_id": None,
+                "tvdb_series_id": None, "tvdb_episode_id": None, "imdb_series_id": None, "imdb_episode_id": None,
+                "tmdb_series_id": None, "tmdb_episode_id": None, "trakt_series_id": None, "trakt_episode_id": None,
+                "rotten_series_id": None, "rotten_episode_id": None, "metacritic_series_id": None, "metacritic_episode_id": None,
                 "imdb_rating": None, "tvdb_rating": None, "tmdb_rating": None, "rotten_rating": None, "metacritic_rating": None, "trakt_rating": None,
                 "scan_attempts": 0,
                 "video_source": None, "source_format": None, "video_codec": None,
@@ -1643,10 +2179,12 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
                 "nfo_missing": 1,
                 "validation_flag": None
             }
+            _enrich_from_nfo_and_filename(full_path_str, err_result)
+            return err_result
         if not os.access(full_path_str, os.R_OK):
             if DEBUG_MODE:
                 log_debug(f"File not accessible: {full_path_str}", "ERROR")
-            return {
+            err_result = {
                 "filename": filename, "category": 'sdr_only', "profile": None,
                 "el_type": None, "container": path_obj.suffix.lower().replace('.', ''), 
                 "source_vol": path_obj.parts[1] if len(path_obj.parts) > 1 else "Unknown",
@@ -1659,16 +2197,22 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
                 "audio_codecs": [], "audio_langs": [], "audio_channels": [], "subtitles": [], "max_cll": None, "max_fall": None,
                 "fps": None, "aspect_ratio": None,
                 "imdb_id": None, "tvdb_id": None, "tmdb_id": None, "rotten_id": None, "metacritic_id": None, "trakt_id": None,
+                "tvdb_series_id": None, "tvdb_episode_id": None, "imdb_series_id": None, "imdb_episode_id": None,
+                "tmdb_series_id": None, "tmdb_episode_id": None, "trakt_series_id": None, "trakt_episode_id": None,
+                "rotten_series_id": None, "rotten_episode_id": None, "metacritic_series_id": None, "metacritic_episode_id": None,
                 "imdb_rating": None, "tvdb_rating": None, "tmdb_rating": None, "rotten_rating": None, "metacritic_rating": None, "trakt_rating": None,
                 "scan_attempts": 0,
                 "video_source": None, "source_format": None, "video_codec": None,
                 "is_3d": 0, "edition": None, "year": None, "media_type": None,
-                "show_title": None, "season": None, "episode": None, "movie_title": None, "episode_title": None
+                "show_title": None, "season": None, "episode": None, "movie_title": None, "episode_title": None,
+                "nfo_missing": 1, "validation_flag": None
             }
+            _enrich_from_nfo_and_filename(full_path_str, err_result)
+            return err_result
     except (OSError, UnicodeEncodeError, UnicodeDecodeError) as e:
         if DEBUG_MODE:
             log_debug(f"File validation error for {full_path_str}: {e}", "ERROR")
-        return {
+        err_result = {
             "filename": filename, "category": 'sdr_only', "profile": None,
             "el_type": None, "container": path_obj.suffix.lower().replace('.', ''), 
             "source_vol": path_obj.parts[1] if len(path_obj.parts) > 1 else "Unknown",
@@ -1681,13 +2225,18 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
             "audio_codecs": [], "audio_langs": [], "audio_channels": [], "subtitles": [], "max_cll": None, "max_fall": None,
             "fps": None, "aspect_ratio": None,
             "imdb_id": None, "tvdb_id": None, "tmdb_id": None, "rotten_id": None, "metacritic_id": None, "trakt_id": None,
+            "tvdb_series_id": None, "tvdb_episode_id": None, "imdb_series_id": None, "imdb_episode_id": None,
+            "tmdb_series_id": None, "tmdb_episode_id": None, "trakt_series_id": None, "trakt_episode_id": None,
+            "rotten_series_id": None, "rotten_episode_id": None, "metacritic_series_id": None, "metacritic_episode_id": None,
             "imdb_rating": None, "tvdb_rating": None, "tmdb_rating": None, "rotten_rating": None, "metacritic_rating": None, "trakt_rating": None,
             "scan_attempts": 0,
             "video_source": None, "source_format": None, "video_codec": None,
             "is_3d": 0, "edition": None, "year": None, "media_type": None,
             "show_title": None, "season": None, "episode": None, "movie_title": None, "episode_title": None,
-            "validation_flag": None
+            "nfo_missing": 1, "validation_flag": None
         }
+        _enrich_from_nfo_and_filename(full_path_str, err_result)
+        return err_result
     
     container = path_obj.suffix.lower().replace('.', '')
     source_vol = path_obj.parts[1] if len(path_obj.parts) > 1 else "Unknown"
@@ -1734,6 +2283,8 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
     
     if meta is None:
         meta = _create_error_result("Analysis failed")
+    if meta.get('error'):
+        _enrich_from_nfo_and_filename(full_path_str, meta)
     file_size = 0
     try:
         file_size = os.path.getsize(full_path_str)
@@ -1763,6 +2314,18 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
         "fps": meta.get('fps'), "aspect_ratio": meta.get('aspect_ratio'),
         "imdb_id": meta.get('imdb_id'), "tvdb_id": meta.get('tvdb_id'), "tmdb_id": meta.get('tmdb_id'),
         "rotten_id": meta.get('rotten_id'), "metacritic_id": meta.get('metacritic_id'), "trakt_id": meta.get('trakt_id'),
+        "tvdb_series_id": None if meta.get('media_type') == 'movie' else meta.get('tvdb_series_id'),
+        "tvdb_episode_id": None if meta.get('media_type') == 'movie' else meta.get('tvdb_episode_id'),
+        "imdb_series_id": None if meta.get('media_type') == 'movie' else meta.get('imdb_series_id'),
+        "imdb_episode_id": None if meta.get('media_type') == 'movie' else meta.get('imdb_episode_id'),
+        "tmdb_series_id": None if meta.get('media_type') == 'movie' else meta.get('tmdb_series_id'),
+        "tmdb_episode_id": None if meta.get('media_type') == 'movie' else meta.get('tmdb_episode_id'),
+        "trakt_series_id": None if meta.get('media_type') == 'movie' else meta.get('trakt_series_id'),
+        "trakt_episode_id": None if meta.get('media_type') == 'movie' else meta.get('trakt_episode_id'),
+        "rotten_series_id": None if meta.get('media_type') == 'movie' else meta.get('rotten_series_id'),
+        "rotten_episode_id": None if meta.get('media_type') == 'movie' else meta.get('rotten_episode_id'),
+        "metacritic_series_id": None if meta.get('media_type') == 'movie' else meta.get('metacritic_series_id'),
+        "metacritic_episode_id": None if meta.get('media_type') == 'movie' else meta.get('metacritic_episode_id'),
         "imdb_rating": meta.get('imdb_rating'), "tvdb_rating": meta.get('tvdb_rating'), "tmdb_rating": meta.get('tmdb_rating'),
         "rotten_rating": meta.get('rotten_rating'), "metacritic_rating": meta.get('metacritic_rating'), "trakt_rating": meta.get('trakt_rating'),
         "scan_attempts": 0,  # Will be updated in run_scan based on previous attempts
@@ -1796,6 +2359,7 @@ def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dic
         nfo_data = parse_kodi_nfo(nfo_path)
         if not nfo_data:
             continue
+        is_tvshow_nfo = pathlib.Path(nfo_path).name.lower() == 'tvshow.nfo'
         if not current.get('year') and nfo_data.get('year'):
             result['year'] = nfo_data['year']
         if not current.get('media_type') and nfo_data.get('media_type'):
@@ -1812,11 +2376,25 @@ def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dic
             media_type_val = current.get('media_type') or result.get('media_type')
             if nfo_data.get('media_type') == 'movie' or media_type_val != 'tv':
                 result['movie_title'] = nfo_data['title']
+        if is_tvshow_nfo:
+            for k in ('tvdb', 'imdb', 'tmdb', 'trakt', 'rotten', 'metacritic'):
+                val = nfo_data.get(f'{k}_id')
+                if val and current.get(f'{k}_series_id') is None:
+                    result[f'{k}_series_id'] = val
+        else:
+            # Only set episode_id for TV episode NFOs; movie NFOs must not write to episode_id
+            if nfo_data.get('media_type') != 'movie':
+                for k in ('tvdb', 'imdb', 'tmdb', 'trakt', 'rotten', 'metacritic'):
+                    val = nfo_data.get(f'{k}_id')
+                    if val and current.get(f'{k}_episode_id') is None:
+                        result[f'{k}_episode_id'] = val
         for key in (
             'imdb_id', 'tvdb_id', 'tmdb_id', 'rotten_id', 'metacritic_id', 'trakt_id',
             'imdb_rating', 'tvdb_rating', 'tmdb_rating', 'rotten_rating', 'metacritic_rating', 'trakt_rating'
         ):
             if current.get(key) is None and nfo_data.get(key) is not None:
+                if key.endswith('_id') and (current.get('media_type') == 'tv' or result.get('media_type') == 'tv'):
+                    continue
                 result[key] = nfo_data[key]
 
     if not current.get('media_type'):
@@ -1920,12 +2498,16 @@ def save_batch_to_db(data_list: list) -> None:
                  resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, 
                  file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio,
                  imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id,
+                 tvdb_series_id, tvdb_episode_id, imdb_series_id, imdb_episode_id, tmdb_series_id, tmdb_episode_id,
+                 trakt_series_id, trakt_episode_id, rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id,
                  imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating,
                  scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, validation_flag) 
                 VALUES (:filename, :category, :profile, :el_type, :container, :source_vol, :full_path, :last_scanned, 
                  :resolution, :bitrate_mbps, :scan_error, :is_hybrid, :is_source_hybrid, :secondary_hdr, :width, :height, 
                  :file_size, :bl_compatibility_id, :audio_codecs, :audio_langs, :audio_channels, :subtitles, :max_cll, :max_fall, :fps, :aspect_ratio,
                  :imdb_id, :tvdb_id, :tmdb_id, :rotten_id, :metacritic_id, :trakt_id,
+                 :tvdb_series_id, :tvdb_episode_id, :imdb_series_id, :imdb_episode_id, :tmdb_series_id, :tmdb_episode_id,
+                 :trakt_series_id, :trakt_episode_id, :rotten_series_id, :rotten_episode_id, :metacritic_series_id, :metacritic_episode_id,
                  :imdb_rating, :tvdb_rating, :tmdb_rating, :rotten_rating, :metacritic_rating, :trakt_rating,
                  :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :nfo_missing, :validation_flag)""", sanitized_list)
             if DEBUG_MODE:
@@ -1935,22 +2517,6 @@ def save_batch_to_db(data_list: list) -> None:
         log_debug(f"Database error saving batch: {e}", "ERROR")
         if DEBUG_MODE:
             log_debug(f"Failed batch items: {[item.get('filename', 'unknown') for item in sanitized_list]}", "ERROR")
-    except sqlite3.Error as e:
-        log_debug(f"Unexpected error saving batch: {e}", "ERROR")
-        if DEBUG_MODE:
-            log_debug(f"Failed batch items: {[item.get('filename', 'unknown') for item in sanitized_list]}", "ERROR")
-            # Log the specific problematic item if possible
-            try:
-                for idx, item in enumerate(sanitized_list):
-                    try:
-                        # Try to identify which item is causing the issue
-                        test_str = str(item)
-                    except (UnicodeEncodeError, UnicodeDecodeError) as item_err:
-                        log_debug(f"Item {idx} has encoding issue: {item_err}", "ERROR")
-            except (OSError, sqlite3.Error) as cleanup_err:
-                # Silently ignore errors during cleanup of problematic items
-                if DEBUG_MODE:
-                    log_debug(f"Error during cleanup iteration: {cleanup_err}", "DEBUG")
 
 # --- SCAN HELPERS ---
 def load_processed_map() -> dict:
@@ -2081,6 +2647,7 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
     files_to_scan = []
     all_found_files = set() 
     total_seen = 0
+    last_vol_started = None
     
     with progress_lock:
         PROGRESS["file"] = "Scanning directories..."
@@ -2096,8 +2663,11 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
             log_debug(f"[CRAWL] Volume path does not exist: {path}", "WARNING")
             continue
         
-        with progress_lock:
-            PROGRESS["file"] = f"Scanning [{current_vol}]: Starting..."
+        # Only show "Starting..." when we begin a new volume, not a new path on same volume
+        if current_vol != last_vol_started:
+            last_vol_started = current_vol
+            with progress_lock:
+                PROGRESS["file"] = f"Scanning [{current_vol}]: Starting..."
         log_debug(f"[CRAWL] Starting scan of volume: {current_vol}", "INFO")
         
         try:
@@ -2635,6 +3205,19 @@ def get_logs() -> Response:
     with progress_lock: 
         return jsonify(list(LOG_CACHE))
 
+
+@app.route('/api/log_client_error', methods=['POST'])
+def log_client_error() -> Response:
+    """
+    Append a client-side error to the log cache so it appears in the in-app console.
+    """
+    payload = request.get_json(silent=True) or {}
+    msg = payload.get("message") or payload.get("msg") or ""
+    if msg:
+        log_debug(f"[CLIENT] {msg}", "ERROR")
+    return jsonify({"status": "ok"})
+
+
 @app.route('/api/scan_history')
 def get_scan_history() -> Response:
     """
@@ -3117,6 +3700,7 @@ def _build_stats_from_rows(rows: list) -> dict:
     stats = {
         "total": len(rows), "failed": 0, "hybrid": 0, "source_hybrid": 0,
         "dovi": 0, "dovi_p7_fel": 0, "dovi_p7_mel": 0, "dovi_p81": 0, "dovi_p84": 0, "dovi_p8": 0, "dovi_p5": 0,
+        "dovi_p101": 0, "dovi_p104": 0, "dovi_p10": 0,
         "hdr10plus": 0, "hdr10": 0, "hlg": 0, "sdr": 0,
         "vol_labels": [], "vol_data": [], "res_labels": [], "res_data": [],
         "secondary_hdrs": {}
@@ -3145,6 +3729,12 @@ def _build_stats_from_rows(rows: list) -> dict:
                 stats['dovi_p84'] += 1
             elif prof == '8':
                 stats['dovi_p8'] += 1
+            elif prof == '10.1':
+                stats['dovi_p101'] += 1
+            elif prof == '10.4':
+                stats['dovi_p104'] += 1
+            elif prof == '10':
+                stats['dovi_p10'] += 1
         elif cat == 'hdr10plus':
             stats['hdr10plus'] += 1
         elif cat == 'hdr10':
@@ -3185,11 +3775,11 @@ def download_csv() -> Response:
         limit_params = []
     with get_db() as conn:
         rows = conn.execute(
-            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating, nfo_missing FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
+            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, tvdb_series_id, tvdb_episode_id, imdb_series_id, imdb_episode_id, tmdb_series_id, tmdb_episode_id, trakt_series_id, trakt_episode_id, rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating, nfo_missing FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
             params + limit_params
         ).fetchall()
     si = io.StringIO()
-    csv.writer(si).writerows([['Filename', 'Cat', 'Prof', 'EL', 'Cont', 'Vol', 'Path', 'Date', 'Res', 'Bitrate', 'Error', 'Dual HDR', 'Hybrid', 'SecHDR', 'Width', 'Height', 'Size', 'BL_ID', 'Audio', 'AudioCh', 'Subs', 'MaxCLL', 'FPS', 'Aspect', 'IMDB_ID', 'TVDB_ID', 'TMDB_ID', 'Rotten_ID', 'Metacritic_ID', 'Trakt_ID', 'IMDB_Rating', 'TVDB_Rating', 'TMDB_Rating', 'Rotten_Rating', 'Metacritic_Rating', 'Trakt_Rating', 'NFO_Missing']] + list(rows))
+    csv.writer(si).writerows([['Filename', 'Cat', 'Prof', 'EL', 'Cont', 'Vol', 'Path', 'Date', 'Res', 'Bitrate', 'Error', 'Dual HDR', 'Hybrid', 'SecHDR', 'Width', 'Height', 'Size', 'BL_ID', 'Audio', 'AudioCh', 'Subs', 'MaxCLL', 'FPS', 'Aspect', 'IMDB_ID', 'TVDB_ID', 'TMDB_ID', 'Rotten_ID', 'Metacritic_ID', 'Trakt_ID', 'TVDB_Series_ID', 'TVDB_Episode_ID', 'IMDB_Series_ID', 'IMDB_Episode_ID', 'TMDB_Series_ID', 'TMDB_Episode_ID', 'Trakt_Series_ID', 'Trakt_Episode_ID', 'Rotten_Series_ID', 'Rotten_Episode_ID', 'Metacritic_Series_ID', 'Metacritic_Episode_ID', 'IMDB_Rating', 'TVDB_Rating', 'TMDB_Rating', 'Rotten_Rating', 'Metacritic_Rating', 'Trakt_Rating', 'NFO_Missing']] + list(rows))
     return make_response(si.getvalue(), 200, {"Content-Disposition": "attachment; filename=media_export.csv", "Content-type": "text/csv"})
 
 @app.route('/download_json')
@@ -3222,7 +3812,7 @@ def download_json() -> Response:
         limit_params = []
     with get_db() as conn:
         rows = conn.execute(
-            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating, nfo_missing FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
+            f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_channels, subtitles, max_cll, max_fall, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, tvdb_series_id, tvdb_episode_id, imdb_series_id, imdb_episode_id, tmdb_series_id, tmdb_episode_id, trakt_series_id, trakt_episode_id, rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating, nfo_missing FROM videos WHERE {where_clause} ORDER BY {db_sort} {order}{limit_clause}",
             params + limit_params
         ).fetchall()
     
@@ -3237,8 +3827,11 @@ def download_json() -> Response:
             'bl_compatibility_id': row[17], 'audio_codecs': row[18], 'audio_channels': row[19], 'subtitles': row[20],
             'max_cll': row[21], 'max_fall': row[22], 'fps': row[23], 'aspect_ratio': row[24],
             'imdb_id': row[25], 'tvdb_id': row[26], 'tmdb_id': row[27], 'rotten_id': row[28], 'metacritic_id': row[29], 'trakt_id': row[30],
-            'imdb_rating': row[31], 'tvdb_rating': row[32], 'tmdb_rating': row[33], 'rotten_rating': row[34], 'metacritic_rating': row[35], 'trakt_rating': row[36],
-            'nfo_missing': row[37]
+            'tvdb_series_id': row[31], 'tvdb_episode_id': row[32], 'imdb_series_id': row[33], 'imdb_episode_id': row[34],
+            'tmdb_series_id': row[35], 'tmdb_episode_id': row[36], 'trakt_series_id': row[37], 'trakt_episode_id': row[38],
+            'rotten_series_id': row[39], 'rotten_episode_id': row[40], 'metacritic_series_id': row[41], 'metacritic_episode_id': row[42],
+            'imdb_rating': row[43], 'tvdb_rating': row[44], 'tmdb_rating': row[45], 'rotten_rating': row[46], 'metacritic_rating': row[47], 'trakt_rating': row[48],
+            'nfo_missing': row[49]
         })
     
     json_str = json.dumps(data, indent=2, ensure_ascii=False)
@@ -3515,7 +4108,7 @@ def get_videos() -> Response:
 
     with get_db_readonly() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
+        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, tvdb_series_id, tvdb_episode_id, imdb_series_id, imdb_episode_id, tmdb_series_id, tmdb_episode_id, trakt_series_id, trakt_episode_id, rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
         global API_LOG_TS
         now = time.time()
         if PROGRESS.get("status") == "scanning" and now - API_LOG_TS >= 5:
@@ -3708,6 +4301,122 @@ def filter_paths() -> Response:
     return jsonify({"paths": [r[0] for r in rows]})
 
 
+@app.route('/api/arr_search_replace', methods=['POST'])
+def arr_search_replace() -> Response:
+    """
+    Queue Sonarr/Radarr searches for one or more selected files.
+    """
+    payload = request.get_json(silent=True) or {}
+    raw_paths = payload.get("paths")
+    single_path = payload.get("full_path")
+    if isinstance(raw_paths, list):
+        paths = [str(p).strip() for p in raw_paths if str(p).strip()]
+    elif single_path:
+        paths = [str(single_path).strip()]
+    else:
+        paths = []
+
+    if not paths:
+        return jsonify({"status": "error", "message": "Missing paths"}), 400
+    if len(paths) > 500:
+        return jsonify({"status": "error", "message": "Too many paths in one request (max 500)"}), 400
+
+    placeholders = ",".join(["?"] * len(paths))
+    sql = (
+        "SELECT full_path, filename, media_type, season, episode, tmdb_id, tvdb_id, tvdb_series_id, imdb_id, show_title "
+        f"FROM videos WHERE full_path IN ({placeholders})"
+    )
+    with get_db_readonly() as conn:
+        rows = conn.execute(sql, paths).fetchall()
+
+    by_path: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        by_path[str(row[0])] = {
+            "full_path": row[0],
+            "filename": row[1],
+            "media_type": row[2],
+            "season": row[3],
+            "episode": row[4],
+            "tmdb_id": row[5],
+            "tvdb_id": row[6],
+            "tvdb_series_id": row[7] if len(row) > 7 else None,
+            "imdb_id": row[8] if len(row) > 8 else None,
+            "show_title": row[9] if len(row) > 9 else None,
+        }
+
+    results = []
+    success_count = 0
+    for path in paths:
+        item = by_path.get(path)
+        if not item:
+            log_debug(f"[ARR] Path not in DB: {path[:80]}...", "WARNING")
+            results.append({"full_path": path, "status": "error", "message": "Path not found in database"})
+            continue
+
+        media_type = str(item.get("media_type") or "").strip().lower()
+        fn = item.get("filename") or "(unknown)"
+        log_debug(f"[ARR] Processing: {fn} media_type={media_type or '(blank)'} tvdb={item.get('tvdb_id')} tmdb={item.get('tmdb_id')}", "INFO")
+        try:
+            if media_type == "movie":
+                ok, message = _queue_radarr_search(item)
+            elif media_type == "tv":
+                ok, message = _queue_sonarr_search(item)
+            else:
+                # Fallback inference when media_type is blank/missing
+                if _as_int(item.get("tmdb_id")) is not None:
+                    ok, message = _queue_radarr_search(item)
+                elif _as_int(item.get("tvdb_series_id")) is not None:
+                    ok, message = _queue_sonarr_search(item)
+                elif _as_int(item.get("season")) is not None and _as_int(item.get("episode")) is not None:
+                    ok, message = _queue_sonarr_search(item)
+                else:
+                    ok, message = False, "Unknown media_type and no tmdb_id/tvdb_series_id/season+episode for ARR lookup"
+        except Exception as e:
+            log_debug(f"[ARR] Exception for {fn}: {e}", "ERROR")
+            ok, message = False, str(e)
+
+        if ok:
+            success_count += 1
+            results.append({"full_path": path, "status": "ok", "message": message})
+        else:
+            results.append({"full_path": path, "status": "error", "message": message})
+
+    failed_count = len(paths) - success_count
+    return jsonify({
+        "status": "ok",
+        "processed": len(paths),
+        "success": success_count,
+        "failed": failed_count,
+        "results": results
+    })
+
+
+@app.route('/api/arr_status', methods=['GET'])
+def arr_status() -> Response:
+    """
+    Get Sonarr/Radarr connectivity status for menu indicator.
+    """
+    now = time.time()
+    cached = ARR_STATUS_CACHE.get("payload")
+    cached_ts = float(ARR_STATUS_CACHE.get("ts") or 0.0)
+    # Short cache keeps context menu snappy while avoiding constant network calls.
+    if cached and (now - cached_ts) < 15:
+        return jsonify(cached)
+
+    sonarr = _arr_service_status("sonarr", SONARR_URL, SONARR_API_KEY)
+    radarr = _arr_service_status("radarr", RADARR_URL, RADARR_API_KEY)
+    overall_ok = bool(sonarr.get("ok")) and bool(radarr.get("ok"))
+    payload = {
+        "status": "ok",
+        "overall_ok": overall_ok,
+        "sonarr": sonarr,
+        "radarr": radarr
+    }
+    ARR_STATUS_CACHE["ts"] = now
+    ARR_STATUS_CACHE["payload"] = payload
+    return jsonify(payload)
+
+
 @app.route('/api/rescan_file', methods=['POST'])
 def rescan_file() -> Response:
     """
@@ -3724,6 +4433,35 @@ def rescan_file() -> Response:
         return jsonify({"status": "ok"})
     except Exception as e:
         log_debug(f"Rescan failed for {payload.get('full_path')}: {e}", "ERROR")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/debug_deep', methods=['POST'])
+def debug_deep_file() -> Response:
+    """
+    Run debug_deep.py for a single file and return raw output.
+    """
+    payload = request.get_json(silent=True) or {}
+    full_path = payload.get('full_path')
+    if not full_path:
+        return jsonify({"status": "error", "message": "Missing full_path"}), 400
+    if not os.path.exists(full_path):
+        return jsonify({"status": "error", "message": "File not found"}), 404
+
+    script_path = os.path.join(BASE_DIR, 'debug_deep.py')
+    if not os.path.exists(script_path):
+        return jsonify({"status": "error", "message": "debug_deep.py not found"}), 500
+
+    try:
+        rc, out, err = run_command([sys.executable, script_path, full_path], capture=True, capture_stderr=True, timeout_seconds=180)
+        output = (out or "")
+        if err:
+            output += f"\n\n--- STDERR ---\n{err}"
+        # Keep payload bounded to avoid huge API responses.
+        if len(output) > 200000:
+            output = output[-200000:]
+        return jsonify({"status": "ok", "return_code": rc, "output": output})
+    except Exception as e:
+        log_debug(f"debug_deep failed for {full_path}: {e}", "ERROR")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/update_media_type', methods=['POST'])
@@ -3892,6 +4630,8 @@ def backfill_metadata() -> Response:
             rows = conn.execute(
                 """SELECT full_path, filename, media_type, show_title, episode_title, season, episode, movie_title, year,
                           imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id,
+                          tvdb_series_id, tvdb_episode_id, imdb_series_id, imdb_episode_id, tmdb_series_id, tmdb_episode_id,
+                          trakt_series_id, trakt_episode_id, rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id,
                           imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating
                    FROM videos
                    WHERE media_type IS NULL OR media_type = ''
@@ -3935,6 +4675,18 @@ def backfill_metadata() -> Response:
                     'rotten_id': row['rotten_id'],
                     'metacritic_id': row['metacritic_id'],
                     'trakt_id': row['trakt_id'],
+                    'tvdb_series_id': row['tvdb_series_id'] if 'tvdb_series_id' in row.keys() else None,
+                    'tvdb_episode_id': row['tvdb_episode_id'] if 'tvdb_episode_id' in row.keys() else None,
+                    'imdb_series_id': row['imdb_series_id'] if 'imdb_series_id' in row.keys() else None,
+                    'imdb_episode_id': row['imdb_episode_id'] if 'imdb_episode_id' in row.keys() else None,
+                    'tmdb_series_id': row['tmdb_series_id'] if 'tmdb_series_id' in row.keys() else None,
+                    'tmdb_episode_id': row['tmdb_episode_id'] if 'tmdb_episode_id' in row.keys() else None,
+                    'trakt_series_id': row['trakt_series_id'] if 'trakt_series_id' in row.keys() else None,
+                    'trakt_episode_id': row['trakt_episode_id'] if 'trakt_episode_id' in row.keys() else None,
+                    'rotten_series_id': row['rotten_series_id'] if 'rotten_series_id' in row.keys() else None,
+                    'rotten_episode_id': row['rotten_episode_id'] if 'rotten_episode_id' in row.keys() else None,
+                    'metacritic_series_id': row['metacritic_series_id'] if 'metacritic_series_id' in row.keys() else None,
+                    'metacritic_episode_id': row['metacritic_episode_id'] if 'metacritic_episode_id' in row.keys() else None,
                     'imdb_rating': row['imdb_rating'],
                     'tvdb_rating': row['tvdb_rating'],
                     'tmdb_rating': row['tmdb_rating'],
@@ -3962,6 +4714,18 @@ def backfill_metadata() -> Response:
                 new_rotten_id = updates.get('rotten_id', current.get('rotten_id'))
                 new_metacritic_id = updates.get('metacritic_id', current.get('metacritic_id'))
                 new_trakt_id = updates.get('trakt_id', current.get('trakt_id'))
+                new_tvdb_series_id = updates.get('tvdb_series_id', current.get('tvdb_series_id'))
+                new_tvdb_episode_id = updates.get('tvdb_episode_id', current.get('tvdb_episode_id'))
+                new_imdb_series_id = updates.get('imdb_series_id', current.get('imdb_series_id'))
+                new_imdb_episode_id = updates.get('imdb_episode_id', current.get('imdb_episode_id'))
+                new_tmdb_series_id = updates.get('tmdb_series_id', current.get('tmdb_series_id'))
+                new_tmdb_episode_id = updates.get('tmdb_episode_id', current.get('tmdb_episode_id'))
+                new_trakt_series_id = updates.get('trakt_series_id', current.get('trakt_series_id'))
+                new_trakt_episode_id = updates.get('trakt_episode_id', current.get('trakt_episode_id'))
+                new_rotten_series_id = updates.get('rotten_series_id', current.get('rotten_series_id'))
+                new_rotten_episode_id = updates.get('rotten_episode_id', current.get('rotten_episode_id'))
+                new_metacritic_series_id = updates.get('metacritic_series_id', current.get('metacritic_series_id'))
+                new_metacritic_episode_id = updates.get('metacritic_episode_id', current.get('metacritic_episode_id'))
                 new_imdb_rating = updates.get('imdb_rating', current.get('imdb_rating'))
                 new_tvdb_rating = updates.get('tvdb_rating', current.get('tvdb_rating'))
                 new_tmdb_rating = updates.get('tmdb_rating', current.get('tmdb_rating'))
@@ -3977,7 +4741,7 @@ def backfill_metadata() -> Response:
                     "episode": new_episode
                 })
                 conn.execute(
-                    "UPDATE videos SET media_type=?, show_title=?, episode_title=?, season=?, episode=?, movie_title=?, year=?, imdb_id=?, tvdb_id=?, tmdb_id=?, rotten_id=?, metacritic_id=?, trakt_id=?, imdb_rating=?, tvdb_rating=?, tmdb_rating=?, rotten_rating=?, metacritic_rating=?, trakt_rating=?, validation_flag=? WHERE full_path=?",
+                    "UPDATE videos SET media_type=?, show_title=?, episode_title=?, season=?, episode=?, movie_title=?, year=?, imdb_id=?, tvdb_id=?, tmdb_id=?, rotten_id=?, metacritic_id=?, trakt_id=?, tvdb_series_id=?, tvdb_episode_id=?, imdb_series_id=?, imdb_episode_id=?, tmdb_series_id=?, tmdb_episode_id=?, trakt_series_id=?, trakt_episode_id=?, rotten_series_id=?, rotten_episode_id=?, metacritic_series_id=?, metacritic_episode_id=?, imdb_rating=?, tvdb_rating=?, tmdb_rating=?, rotten_rating=?, metacritic_rating=?, trakt_rating=?, validation_flag=? WHERE full_path=?",
                     (
                         new_media_type,
                         new_show_title,
@@ -3992,6 +4756,18 @@ def backfill_metadata() -> Response:
                         new_rotten_id,
                         new_metacritic_id,
                         new_trakt_id,
+                        new_tvdb_series_id,
+                        new_tvdb_episode_id,
+                        new_imdb_series_id,
+                        new_imdb_episode_id,
+                        new_tmdb_series_id,
+                        new_tmdb_episode_id,
+                        new_trakt_series_id,
+                        new_trakt_episode_id,
+                        new_rotten_series_id,
+                        new_rotten_episode_id,
+                        new_metacritic_series_id,
+                        new_metacritic_episode_id,
                         new_imdb_rating,
                         new_tvdb_rating,
                         new_tmdb_rating,
@@ -4107,6 +4883,36 @@ def handle_settings() -> Response:
     else:
         with get_db() as conn: res = dict(conn.execute("SELECT key, value FROM settings").fetchall())
         return jsonify(res)
+
+
+@app.route('/api/nfo_content', methods=['GET'])
+def get_nfo_content() -> Response:
+    """
+    Return the raw NFO file content for a video path.
+    Looks up NFO candidates (same-stem, tvshow.nfo for TV) and returns the first found.
+    """
+    path_arg = request.args.get('path', '').strip()
+    if not path_arg:
+        return jsonify({"status": "error", "message": "Missing path"}), 400
+    try:
+        full_path = os.path.normpath(path_arg)
+    except (OSError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid path"}), 400
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT media_type FROM videos WHERE full_path = ?", (full_path,)
+        ).fetchone()
+    media_type = row[0] if row else None
+    candidates = find_kodi_nfo_candidates(full_path, media_type)
+    if not candidates:
+        return jsonify({"status": "error", "message": "No NFO found for this file"}), 404
+    nfo_path = candidates[0]
+    try:
+        with open(nfo_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+    except OSError as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify({"status": "ok", "content": content, "nfo_path": nfo_path})
 
 
 @app.route('/api/browse', methods=['GET'])

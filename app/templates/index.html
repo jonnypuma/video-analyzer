@@ -16,6 +16,9 @@
             --col-p5: #27ae60;
             --col-p8: #e74c3c;
             --col-p84: #fd79a8;
+            --col-p10: #778873;
+            --col-p101: #A1BC98;
+            --col-p104: #D2DCB6;
             --col-10p: #f1c40f;
             --col-10: #e67e22;
             --col-hlg: #3498db;
@@ -321,6 +324,10 @@
             background: #0f0f0f; border: 1px solid #222; border-radius: 6px;
             pointer-events: auto;
         }
+        .header-scrollbar::-webkit-scrollbar { height: 6px; }
+        .header-scrollbar::-webkit-scrollbar-track { background: #1a1a1a; border-radius: 3px; }
+        .header-scrollbar::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+        .header-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
         .header-scrollbar-inner { height: 1px; }
         tbody { margin-top: 0; padding-top: 0; }
         th { background: #1f1f1f; padding: 8px 5px 0px 5px; text-align: left; color: #3498db; font-size: 0.88em; text-transform: uppercase; cursor: default; user-select: none; vertical-align: top; margin: 0; border-bottom: none; box-sizing: border-box; }
@@ -474,6 +481,18 @@
         .hide-col-rotten-id .col-rotten-id { display: none; }
         .hide-col-metacritic-id .col-metacritic-id { display: none; }
         .hide-col-trakt-id .col-trakt-id { display: none; }
+        .hide-col-tvdb-series-id .col-tvdb-series-id { display: none; }
+        .hide-col-tvdb-episode-id .col-tvdb-episode-id { display: none; }
+        .hide-col-imdb-series-id .col-imdb-series-id { display: none; }
+        .hide-col-imdb-episode-id .col-imdb-episode-id { display: none; }
+        .hide-col-tmdb-series-id .col-tmdb-series-id { display: none; }
+        .hide-col-tmdb-episode-id .col-tmdb-episode-id { display: none; }
+        .hide-col-trakt-series-id .col-trakt-series-id { display: none; }
+        .hide-col-trakt-episode-id .col-trakt-episode-id { display: none; }
+        .hide-col-rotten-series-id .col-rotten-series-id { display: none; }
+        .hide-col-rotten-episode-id .col-rotten-episode-id { display: none; }
+        .hide-col-metacritic-series-id .col-metacritic-series-id { display: none; }
+        .hide-col-metacritic-episode-id .col-metacritic-episode-id { display: none; }
         .hide-col-imdb-rating .col-imdb-rating { display: none; }
         .hide-col-tvdb-rating .col-tvdb-rating { display: none; }
         .hide-col-tmdb-rating .col-tmdb-rating { display: none; }
@@ -502,6 +521,7 @@
         .col-episode-title { width: 10%; }
         .col-aspect { width: 4%; }
         .col-imdb-id, .col-tvdb-id, .col-tmdb-id, .col-rotten-id, .col-metacritic-id, .col-trakt-id { width: 6%; }
+        .col-tvdb-series-id, .col-tvdb-episode-id, .col-imdb-series-id, .col-imdb-episode-id, .col-tmdb-series-id, .col-tmdb-episode-id, .col-trakt-series-id, .col-trakt-episode-id, .col-rotten-series-id, .col-rotten-episode-id, .col-metacritic-series-id, .col-metacritic-episode-id { width: 6%; }
         .col-imdb-rating, .col-tvdb-rating, .col-tmdb-rating, .col-rotten-rating, .col-metacritic-rating, .col-trakt-rating { width: 5%; }
         td.col-cll, td.col-fall { font-family: monospace; }
 
@@ -676,6 +696,9 @@
         .badge-p5 { background: var(--col-p5); }
         .badge-p8 { background: var(--col-p8); }
         .badge-p84 { background: var(--col-p84); color: black; }
+        .badge-p10 { background: var(--col-p10); color: black; }
+        .badge-p101 { background: var(--col-p101); color: black; }
+        .badge-p104 { background: var(--col-p104); color: black; }
         .badge-dovi { background: var(--col-mel); } 
         .badge-hdr10plus { background: var(--col-10p); color: black; }
         .badge-hdr10 { background: var(--col-10); }
@@ -796,6 +819,10 @@
         .context-menu.active { display: block; }
         .context-menu button { width: 100%; background: transparent; border: none; color: #ddd; text-align: left; padding: 6px 12px; cursor: pointer; }
         .context-menu button:hover { background: #2a2a2a; color: #fff; }
+        .context-menu-btn-with-dot { display: flex; align-items: center; gap: 8px; }
+        .arr-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #777; box-shadow: 0 0 4px #777; flex-shrink: 0; }
+        .arr-status-dot.status-online { background: #2ecc71; box-shadow: 0 0 5px #2ecc71; }
+        .arr-status-dot.status-offline { background: #e74c3c; box-shadow: 0 0 5px #e74c3c; }
         .context-divider { height: 1px; background: #333; margin: 4px 0; }
         .vol-item { display: flex; align-items: center; padding: 8px; border-bottom: 1px solid #222; cursor: pointer; transition: background 0.15s; }
         .vol-item:hover { background: #161616; }
@@ -868,8 +895,9 @@
         
         /* New: Toast */
         #toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 200; }
-        .toast { background: #1a1a1a; border-left: 5px solid #2ecc71; color: white; padding: 15px 25px; border-radius: 4px; margin-top: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.5); opacity: 0; transform: translateY(20px); transition: all 0.3s ease; display: none; }
+        .toast { background: #1a1a1a; border-left: 5px solid #2ecc71; color: white; padding: 15px 25px; border-radius: 4px; margin-top: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.5); opacity: 0; transform: translateY(20px); transition: all 0.3s ease; display: none; user-select: text; cursor: text; max-width: 480px; }
         .toast.show { opacity: 1; transform: translateY(0); display: block; }
+        .toast.toast-error { border-left-color: #e74c3c; }
 
         #table-loading-backdrop {
             position: fixed;
@@ -1306,13 +1334,47 @@
 
     <div id="row-context-menu" class="context-menu">
         <button onclick="contextRescan()">Rescan</button>
+        <button id="ctx-arr-action" onclick="contextArrSearchReplace()">
+            <span class="context-menu-btn-with-dot">
+                <span id="ctx-sonarr-dot" class="arr-status-dot" title="Sonarr"></span>
+                <span id="ctx-radarr-dot" class="arr-status-dot" title="Radarr"></span>
+                <span>ARR Search/Replace</span>
+            </span>
+        </button>
         <button onclick="openBulkEdit()">Bulk Edit/Rescan</button>
         <button onclick="contextCopyPath()">Copy Path</button>
+        <button onclick="contextDeepDebug()">Deep Debug (DV)</button>
         <button id="ctx-remove-db" style="color:#e74c3c;" onclick="contextRemoveFromDb()">Remove item from DB</button>
         <div class="context-divider"></div>
         <button onclick="selectAllRows()">Select All on Page</button>
         <button onclick="selectAllFilteredRows()">Select All Filtered</button>
         <button onclick="deselectAllRows()">Deselect All</button>
+    </div>
+
+    <div id="deep-debug-modal" class="modal-bg" style="z-index: 700;">
+        <div class="report-content" style="width: 980px; margin: 5% auto; text-align: left; border-color: #9b59b6;">
+            <h2 style="margin-top:0; letter-spacing: 1px;">DEEP DEBUG <span style="color:#9b59b6">DV</span></h2>
+            <div id="deep-debug-path" style="font-family: monospace; font-size: 0.85em; color:#bbb; margin-bottom: 8px; word-break: break-all;"></div>
+            <div id="deep-debug-meta" style="font-size: 0.85em; color:#999; margin-bottom: 12px;"></div>
+            <pre id="deep-debug-output" style="background:#0b0b0b; border:1px solid #333; border-radius: 10px; padding: 12px; max-height: 520px; overflow: auto; white-space: pre-wrap; font-family: Consolas, monospace; font-size: 0.82em; color:#ddd;"></pre>
+            <div style="display:flex; gap:10px; margin-top:12px;">
+                <button class="btn-orange" style="flex:1;" onclick="copyDeepDebugSummary()">Copy Summary Only</button>
+                <button class="btn-green" style="flex:1;" onclick="copyDeepDebugOutput()">Copy Output</button>
+                <button class="btn-blue" style="flex:1;" onclick="closeDeepDebugModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="nfo-modal" class="modal-bg" style="z-index: 700; display:none;" onclick="if(event.target===this)closeNfoModal()">
+        <div class="report-content" style="width: 900px; margin: 5% auto; text-align: left; border-color: #2ecc71;">
+            <h2 style="margin-top:0; letter-spacing: 1px;">NFO <span style="color:#2ecc71">Content</span></h2>
+            <div id="nfo-modal-path" style="font-family: monospace; font-size: 0.8em; color:#888; margin-bottom: 8px; word-break: break-all;"></div>
+            <pre id="nfo-modal-content" style="background:#0b0b0b; border:1px solid #333; border-radius: 10px; padding: 12px; max-height: 480px; overflow: auto; white-space: pre-wrap; font-family: Consolas, monospace; font-size: 0.82em; color:#ddd;"></pre>
+            <div style="display:flex; gap:10px; margin-top:12px;">
+                <button class="btn-green" style="flex:1;" onclick="copyNfoContent()">Copy</button>
+                <button class="btn-blue" style="flex:1;" onclick="closeNfoModal()">Close</button>
+            </div>
+        </div>
     </div>
 
     <div class="container">
@@ -1420,6 +1482,18 @@
             <div class="stat-card" style="border-bottom: 3px dashed #fd79a8;" onclick="applyRibbonFilter('dovi_prof', '8.4')">
                 <div class="stat-label">P8.4</div>
                 <div class="stat-value" id="stat-p84" style="color: #fd79a8;">0</div>
+            </div>
+            <div class="stat-card" style="border-bottom: 3px dashed var(--col-p10);" onclick="applyRibbonFilter('dovi_prof', '10')">
+                <div class="stat-label">P10</div>
+                <div class="stat-value" id="stat-p10" style="color: var(--col-p10);">0</div>
+            </div>
+            <div class="stat-card" style="border-bottom: 3px dashed var(--col-p101);" onclick="applyRibbonFilter('dovi_prof', '10.1')">
+                <div class="stat-label">P10.1</div>
+                <div class="stat-value" id="stat-p101" style="color: var(--col-p101);">0</div>
+            </div>
+            <div class="stat-card" style="border-bottom: 3px dashed var(--col-p104);" onclick="applyRibbonFilter('dovi_prof', '10.4')">
+                <div class="stat-label">P10.4</div>
+                <div class="stat-value" id="stat-p104" style="color: var(--col-p104);">0</div>
             </div>
             <div class="stat-card" style="border-bottom: 3px solid #ffb6c1;" onclick="applyRibbonFilter('hybrid', '1')">
                 <div class="stat-label">Dual HDR</div>
@@ -1688,6 +1762,18 @@
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-rotten-id" onclick="toggleCol(this)"> Rotten ID</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-metacritic-id" onclick="toggleCol(this)"> Metacritic ID</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-trakt-id" onclick="toggleCol(this)"> Trakt ID</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tvdb-series-id" onclick="toggleCol(this)"> TVDB Series</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tvdb-episode-id" onclick="toggleCol(this)"> TVDB Episode</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-imdb-series-id" onclick="toggleCol(this)"> IMDb Series</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-imdb-episode-id" onclick="toggleCol(this)"> IMDb Episode</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tmdb-series-id" onclick="toggleCol(this)"> TMDB Series</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tmdb-episode-id" onclick="toggleCol(this)"> TMDB Episode</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-trakt-series-id" onclick="toggleCol(this)"> Trakt Series</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-trakt-episode-id" onclick="toggleCol(this)"> Trakt Episode</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-rotten-series-id" onclick="toggleCol(this)"> Rotten Series</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-rotten-episode-id" onclick="toggleCol(this)"> Rotten Episode</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-metacritic-series-id" onclick="toggleCol(this)"> Meta Series</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-metacritic-episode-id" onclick="toggleCol(this)"> Meta Episode</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-imdb-rating" onclick="toggleCol(this)"> IMDb Rt</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tvdb-rating" onclick="toggleCol(this)"> TVDB Rt</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-tmdb-rating" onclick="toggleCol(this)"> TMDB Rt</div>
@@ -1707,6 +1793,7 @@
             <div id="sticky-burger-slot"></div>
             <div class="table-scroll" id="table-scroll">
             <table>
+                <colgroup id="table-colgroup"></colgroup>
                 <thead>
                     <tr>
                         <th class="col-chk">
@@ -1895,7 +1982,7 @@
                                 <span id="sort-size" class="sort-icon"></span>
                             </div>
                             <div class="th-filter-row">
-                                <input type="text" id="size-filter-header" placeholder="e.g. >30GB, <100MB, =50GB" onkeypress="if(event.key==='Enter') resetAndLoad()">
+                                <input type="text" id="size-filter-header" placeholder="e.g. >30GB, <100MB, =50GB" onkeypress="if(event.key==='Enter') resetAndLoad()" onclick="event.stopPropagation()">
                             </div>
                         </th>
                         <th class="col-bit" onclick="sortBy('bit', event)" style="cursor: pointer;" title="Bitrate">
@@ -1904,7 +1991,7 @@
                                 <span id="sort-bit" class="sort-icon"></span>
                             </div>
                             <div class="th-filter-row">
-                                <input type="text" id="bit-filter-header" placeholder="e.g. >50Mbps, <20Mbps, =30Mbps" onkeypress="if(event.key==='Enter') resetAndLoad()">
+                                <input type="text" id="bit-filter-header" placeholder="e.g. >50Mbps, <20Mbps, =30Mbps" onkeypress="if(event.key==='Enter') resetAndLoad()" onclick="event.stopPropagation()">
                             </div>
                         </th>
                         <th class="col-vol" onclick="sortBy('vol', event)" style="cursor: pointer;" title="Source Volume">
@@ -2207,6 +2294,66 @@
                         <th class="col-trakt-id hide-col-trakt-id td-center" title="Trakt ID">
                             <div class="th-header-row">
                                 <span>Trakt ID</span>
+                            </div>
+                        </th>
+                        <th class="col-tvdb-series-id hide-col-tvdb-series-id td-center" title="TVDB Series ID">
+                            <div class="th-header-row">
+                                <span>TVDB Series</span>
+                            </div>
+                        </th>
+                        <th class="col-tvdb-episode-id hide-col-tvdb-episode-id td-center" title="TVDB Episode ID">
+                            <div class="th-header-row">
+                                <span>TVDB Episode</span>
+                            </div>
+                        </th>
+                        <th class="col-imdb-series-id hide-col-imdb-series-id td-center" title="IMDb Series ID">
+                            <div class="th-header-row">
+                                <span>IMDb Series</span>
+                            </div>
+                        </th>
+                        <th class="col-imdb-episode-id hide-col-imdb-episode-id td-center" title="IMDb Episode ID">
+                            <div class="th-header-row">
+                                <span>IMDb Episode</span>
+                            </div>
+                        </th>
+                        <th class="col-tmdb-series-id hide-col-tmdb-series-id td-center" title="TMDB Series ID">
+                            <div class="th-header-row">
+                                <span>TMDB Series</span>
+                            </div>
+                        </th>
+                        <th class="col-tmdb-episode-id hide-col-tmdb-episode-id td-center" title="TMDB Episode ID">
+                            <div class="th-header-row">
+                                <span>TMDB Episode</span>
+                            </div>
+                        </th>
+                        <th class="col-trakt-series-id hide-col-trakt-series-id td-center" title="Trakt Series ID">
+                            <div class="th-header-row">
+                                <span>Trakt Series</span>
+                            </div>
+                        </th>
+                        <th class="col-trakt-episode-id hide-col-trakt-episode-id td-center" title="Trakt Episode ID">
+                            <div class="th-header-row">
+                                <span>Trakt Episode</span>
+                            </div>
+                        </th>
+                        <th class="col-rotten-series-id hide-col-rotten-series-id td-center" title="Rotten Tomatoes Series ID">
+                            <div class="th-header-row">
+                                <span>Rotten Series</span>
+                            </div>
+                        </th>
+                        <th class="col-rotten-episode-id hide-col-rotten-episode-id td-center" title="Rotten Tomatoes Episode ID">
+                            <div class="th-header-row">
+                                <span>Rotten Episode</span>
+                            </div>
+                        </th>
+                        <th class="col-metacritic-series-id hide-col-metacritic-series-id td-center" title="Metacritic Series ID">
+                            <div class="th-header-row">
+                                <span>Meta Series</span>
+                            </div>
+                        </th>
+                        <th class="col-metacritic-episode-id hide-col-metacritic-episode-id td-center" title="Metacritic Episode ID">
+                            <div class="th-header-row">
+                                <span>Meta Episode</span>
                             </div>
                         </th>
                         <th class="col-imdb-rating hide-col-imdb-rating td-center" title="IMDb Rating">
@@ -3905,6 +4052,7 @@
         stickyHeaderTop = ribbonH + controlH + controlsH;
     }
 
+    let _stickyHeaderColWidths = null;
     function syncFixedHeader() {
         const tableWrap = document.querySelector('.table-wrap');
         const table = document.querySelector('table');
@@ -3925,13 +4073,36 @@
         const headerRow = thead.querySelector('tr');
 
         if (shouldFix) {
+            let colWidths = _stickyHeaderColWidths;
+            if (!headerIsFixed && headerRow) {
+                colWidths = [];
+                for (let i = 0; i < headerRow.children.length; i++) {
+                    const th = headerRow.children[i];
+                    colWidths.push(th ? th.offsetWidth : 0);
+                }
+                _stickyHeaderColWidths = colWidths;
+            }
+            if (!colWidths) colWidths = [];
+            const totalHeaderWidth = colWidths.reduce((a, b) => a + b, 0);
+            const colgroup = document.getElementById('table-colgroup');
+            if (colgroup && colWidths.length > 0) {
+                while (colgroup.children.length < colWidths.length) colgroup.appendChild(document.createElement('col'));
+                while (colgroup.children.length > colWidths.length) colgroup.lastChild.remove();
+                for (let i = 0; i < colWidths.length; i++) {
+                    const c = colgroup.children[i];
+                    const w = colWidths[i] || 0;
+                    c.style.width = w + 'px';
+                    c.style.minWidth = w + 'px';
+                    c.style.maxWidth = w + 'px';
+                }
+            }
             headerIsFixed = true;
             tableWrap.classList.add('header-fixed');
             tableWrap.style.paddingTop = `${headerHeight}px`;
             thead.style.position = 'fixed';
             thead.style.top = `${stickyHeaderTop}px`;
             thead.style.left = `${Math.round(wrapRect.left - tableWrap.scrollLeft)}px`;
-            thead.style.width = `${Math.round(table.scrollWidth)}px`;
+            thead.style.width = `${totalHeaderWidth}px`;
             thead.style.height = `${headerHeight}px`;
             thead.style.minHeight = `${headerHeight}px`;
             thead.style.maxHeight = `${headerHeight}px`;
@@ -3942,10 +4113,19 @@
                 headerRow.style.height = `${headerHeight}px`;
                 headerRow.style.minHeight = `${headerHeight}px`;
                 headerRow.style.maxHeight = `${headerHeight}px`;
+                for (let i = 0; i < headerRow.children.length; i++) {
+                    const th = headerRow.children[i];
+                    const w = colWidths[i] || 0;
+                    if (th && w > 0) {
+                        th.style.width = w + 'px';
+                        th.style.minWidth = w + 'px';
+                        th.style.maxWidth = w + 'px';
+                    }
+                }
             }
-            const theadRect = thead.getBoundingClientRect();
-            const clipLeft = Math.max(0, Math.round(wrapRect.left - theadRect.left));
-            const clipRight = Math.max(0, Math.round(theadRect.right - wrapRect.right));
+            const theadRect2 = thead.getBoundingClientRect();
+            const clipLeft = Math.max(0, Math.round(wrapRect.left - theadRect2.left));
+            const clipRight = Math.max(0, Math.round(theadRect2.right - wrapRect.right));
             thead.style.clipPath = `inset(0px ${clipRight}px 0px ${clipLeft}px)`;
             thead.style.webkitClipPath = `inset(0px ${clipRight}px 0px ${clipLeft}px)`;
             if (chkSlot && chkCell) {
@@ -3966,6 +4146,9 @@
             }
         } else {
             headerIsFixed = false;
+            _stickyHeaderColWidths = null;
+            const colgroup = document.getElementById('table-colgroup');
+            if (colgroup) { colgroup.innerHTML = ''; }
             tableWrap.classList.remove('header-fixed');
             tableWrap.style.paddingTop = '0';
             thead.style.position = '';
@@ -3984,6 +4167,11 @@
                 headerRow.style.height = '';
                 headerRow.style.minHeight = '';
                 headerRow.style.maxHeight = '';
+                Array.from(headerRow.children).forEach(th => {
+                    th.style.width = '';
+                    th.style.minWidth = '';
+                    th.style.maxWidth = '';
+                });
             }
             if (chkSlot) {
                 chkSlot.style.position = '';
@@ -4390,6 +4578,18 @@
             'col-rotten-id': 0.8,
             'col-metacritic-id': 0.8,
             'col-trakt-id': 0.8,
+            'col-tvdb-series-id': 0.8,
+            'col-tvdb-episode-id': 0.8,
+            'col-imdb-series-id': 0.8,
+            'col-imdb-episode-id': 0.8,
+            'col-tmdb-series-id': 0.8,
+            'col-tmdb-episode-id': 0.8,
+            'col-trakt-series-id': 0.8,
+            'col-trakt-episode-id': 0.8,
+            'col-rotten-series-id': 0.8,
+            'col-rotten-episode-id': 0.8,
+            'col-metacritic-series-id': 0.8,
+            'col-metacritic-episode-id': 0.8,
             'col-imdb-rating': 0.6,
             'col-tvdb-rating': 0.6,
             'col-tmdb-rating': 0.6,
@@ -4590,10 +4790,10 @@
         formatChart = new Chart(document.getElementById('formatChart'), {
             type: 'doughnut',
             data: {
-                labels: ['DV P7 FEL', 'DV P7 MEL', 'DV P8.1', 'DV P8.4', 'DV P5', 'HDR10+', 'HDR10', 'HLG', 'SDR'],
+                labels: ['DV P7 FEL', 'DV P7 MEL', 'DV P8.1', 'DV P8.4', 'DV P5', 'DV P10.1', 'DV P10.4', 'DV P10', 'HDR10+', 'HDR10', 'HLG', 'SDR'],
                 datasets: [{ 
-                    data: [stats.dovi_p7_fel, stats.dovi_p7_mel, (stats.dovi_p81 + stats.dovi_p8), stats.dovi_p84, stats.dovi_p5, stats.hdr10plus, stats.hdr10, stats.hlg, stats.sdr], 
-                    backgroundColor: ['#a55eea', '#5f27cd', '#e74c3c', '#fd79a8', '#27ae60', '#f1c40f', '#e67e22', '#3498db', '#555555'], borderWidth: 0 
+                    data: [stats.dovi_p7_fel, stats.dovi_p7_mel, (stats.dovi_p81 + stats.dovi_p8), stats.dovi_p84, stats.dovi_p5, stats.dovi_p101, stats.dovi_p104, stats.dovi_p10, stats.hdr10plus, stats.hdr10, stats.hlg, stats.sdr], 
+                    backgroundColor: ['#a55eea', '#5f27cd', '#e74c3c', '#fd79a8', '#27ae60', '#A1BC98', '#D2DCB6', '#778873', '#f1c40f', '#e67e22', '#3498db', '#555555'], borderWidth: 0 
                 }]
             },
             options: { 
@@ -4607,6 +4807,9 @@
                             else if (label.includes('P5')) { setFilter('format', 'dovi'); const el = document.getElementById('profile-filter-header'); if (el) el.value = '5'; resetAndLoad(); }
                             else if (label.includes('P8.1')) { setFilter('format', 'dovi'); const el = document.getElementById('profile-filter-header'); if (el) el.value = '8.1'; resetAndLoad(); }
                             else if (label.includes('P8.4')) { setFilter('format', 'dovi'); const el = document.getElementById('profile-filter-header'); if (el) el.value = '8.4'; resetAndLoad(); }
+                            else if (label.includes('P10.1')) { setFilter('format', 'dovi'); const el = document.getElementById('profile-filter-header'); if (el) el.value = '10.1'; resetAndLoad(); }
+                            else if (label.includes('P10.4')) { setFilter('format', 'dovi'); const el = document.getElementById('profile-filter-header'); if (el) el.value = '10.4'; resetAndLoad(); }
+                            else if (label.includes('P10')) { setFilter('format', 'dovi'); const el = document.getElementById('profile-filter-header'); if (el) el.value = '10'; resetAndLoad(); }
                         } else if (label === 'HDR10+') setFilter('format', 'hdr10plus');
                         else if (label === 'HDR10') setFilter('format', 'hdr10');
                         else if (label === 'HLG') setFilter('format', 'hlg');
@@ -4836,6 +5039,40 @@
             if (count > 1) removeBtn.innerText = `Remove ${count} item(s) from DB`;
             else removeBtn.innerText = 'Remove item from DB';
         }
+        refreshArrContextStatus();
+    }
+
+    async function refreshArrContextStatus() {
+        const sonarrDot = document.getElementById('ctx-sonarr-dot');
+        const radarrDot = document.getElementById('ctx-radarr-dot');
+        const btn = document.getElementById('ctx-arr-action');
+        if (!sonarrDot || !radarrDot || !btn) return;
+        sonarrDot.classList.remove('status-online', 'status-offline');
+        radarrDot.classList.remove('status-online', 'status-offline');
+        sonarrDot.title = 'Checking...';
+        radarrDot.title = 'Checking...';
+        btn.title = 'Checking ARR connectivity...';
+        try {
+            const res = await fetch('/api/arr_status');
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.status !== 'ok') {
+                throw new Error(data.message || `Status check failed (${res.status})`);
+            }
+            const sonarrOk = !!data?.sonarr?.ok;
+            const radarrOk = !!data?.radarr?.ok;
+            sonarrDot.classList.add(sonarrOk ? 'status-online' : 'status-offline');
+            radarrDot.classList.add(radarrOk ? 'status-online' : 'status-offline');
+            sonarrDot.title = `Sonarr: ${data?.sonarr?.message || 'Unknown'}`;
+            radarrDot.title = `Radarr: ${data?.radarr?.message || 'Unknown'}`;
+            btn.title = `Sonarr: ${data?.sonarr?.message || 'Unknown'} | Radarr: ${data?.radarr?.message || 'Unknown'}`;
+        } catch (e) {
+            sonarrDot.classList.add('status-offline');
+            radarrDot.classList.add('status-offline');
+            const tip = `ARR status check failed: ${e.message || e}`;
+            sonarrDot.title = tip;
+            radarrDot.title = tip;
+            btn.title = tip;
+        }
     }
 
     function closeContextMenu() {
@@ -4854,13 +5091,51 @@
         }
     }
 
+    async function contextArrSearchReplace() {
+        closeContextMenu();
+        let paths = [];
+        if (masterState === 2 || selectedPaths.size > 1) {
+            paths = await getBulkTargetPaths();
+        } else if (contextMenuPath) {
+            paths = [contextMenuPath];
+        }
+        if (!paths.length) {
+            showToast('No rows selected');
+            return;
+        }
+        showToast(`Queuing ARR search for ${paths.length} item(s)...`);
+        try {
+            const res = await fetch('/api/arr_search_replace', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paths })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.status !== 'ok') {
+                throw new Error(data.message || `ARR request failed (${res.status})`);
+            }
+            console.log('[ARR] Response:', data);
+            if (data.failed > 0) {
+                const failed = (data.results || []).filter(r => r.status === 'error');
+                const firstMsg = failed[0]?.message || 'Unknown error';
+                showToast(`ARR: ${data.success} queued, ${data.failed} failed. First: ${firstMsg}`, {isError: true});
+                console.warn('[ARR] Failures:', failed);
+            } else {
+                showToast(`ARR queued for ${data.success} item(s)`);
+            }
+        } catch (e) {
+            console.error('[ARR] Error:', e);
+            showToast(`ARR failed: ${e.message || e}`, {isError: true});
+        }
+    }
+
     function contextCopyPath() {
         closeContextMenu();
         if (!contextMenuPath) return;
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(contextMenuPath).then(() => showToast('Path copied'));
         } else {
-            showToast('Copy not supported');
+            showToast('Copy not supported', {isError: true});
         }
     }
 
@@ -4873,6 +5148,145 @@
         if (contextMenuPath) {
             promptDelete(contextMenuPath);
         }
+    }
+
+    function closeDeepDebugModal() {
+        const modal = document.getElementById('deep-debug-modal');
+        if (modal) modal.style.display = 'none';
+    }
+
+    let nfoModalContent = '';
+    async function openNfoModal(fullPath) {
+        if (!fullPath) return;
+        const modal = document.getElementById('nfo-modal');
+        const pathEl = document.getElementById('nfo-modal-path');
+        const contentEl = document.getElementById('nfo-modal-content');
+        if (!modal || !pathEl || !contentEl) return;
+        pathEl.textContent = fullPath;
+        contentEl.textContent = 'Loading...';
+        nfoModalContent = '';
+        modal.style.display = 'flex';
+        try {
+            const res = await fetch('/api/nfo_content?path=' + encodeURIComponent(fullPath));
+            const data = await res.json();
+            if (data.status === 'ok') {
+                nfoModalContent = data.content || '';
+                contentEl.textContent = nfoModalContent || '(empty)';
+                if (data.nfo_path) pathEl.textContent = data.nfo_path;
+            } else {
+                contentEl.textContent = 'Error: ' + (data.message || 'Failed to load NFO');
+            }
+        } catch (e) {
+            contentEl.textContent = 'Error: ' + (e.message || 'Request failed');
+        }
+    }
+    async function copyNfoContent() {
+        const contentEl = document.getElementById('nfo-modal-content');
+        const txt = contentEl ? (contentEl.textContent || '').replace(/^\(empty\)$/, '').trim() : '';
+        await copyTextWithFallback(txt, 'Copied to clipboard');
+    }
+    function closeNfoModal() {
+        const modal = document.getElementById('nfo-modal');
+        if (modal) modal.style.display = 'none';
+    }
+
+    async function contextDeepDebug() {
+        closeContextMenu();
+        if (!contextMenuPath) {
+            showToast('No file selected');
+            return;
+        }
+        try {
+            showToast('Running deep debug...');
+            const res = await fetch('/api/debug_deep', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ full_path: contextMenuPath })
+            });
+            const data = await res.json();
+            if (!res.ok || data.status !== 'ok') {
+                throw new Error(data.message || 'Deep debug failed');
+            }
+            const pathEl = document.getElementById('deep-debug-path');
+            const metaEl = document.getElementById('deep-debug-meta');
+            const outEl = document.getElementById('deep-debug-output');
+            if (pathEl) pathEl.textContent = contextMenuPath;
+            if (metaEl) metaEl.textContent = `Return code: ${data.return_code}`;
+            if (outEl) outEl.textContent = data.output || '(no output)';
+            const modal = document.getElementById('deep-debug-modal');
+            if (modal) modal.style.display = 'block';
+        } catch (e) {
+            console.error('Deep debug failed:', e);
+            showToast(`Deep debug failed: ${e.message || e}`, {isError: true});
+        }
+    }
+
+    async function copyTextWithFallback(txt, okMessage) {
+        if (!txt) {
+            showToast('No output to copy');
+            return;
+        }
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(txt);
+                showToast(okMessage);
+                return;
+            }
+        } catch (e) {
+            // Fall through to legacy fallback.
+        }
+
+        // Fallback for contexts where Clipboard API is unavailable/blocked.
+        const ta = document.createElement('textarea');
+        ta.value = txt;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        ta.style.pointerEvents = 'none';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        let copied = false;
+        try {
+            copied = document.execCommand('copy');
+        } catch (e) {
+            copied = false;
+        } finally {
+            document.body.removeChild(ta);
+        }
+        showToast(copied ? okMessage : 'Copy failed (use Ctrl+C)', copied ? {} : {isError: true});
+    }
+
+    function extractDeepDebugSummary(txt) {
+        if (!txt) return '';
+        const marker = 'INTERPRETATION SUMMARY';
+        const idx = txt.indexOf(marker);
+        if (idx < 0) return '';
+        const after = txt.slice(idx);
+        // Summary block ends at the next test section divider.
+        const nextTestIdx = after.indexOf('TEST 1 -');
+        if (nextTestIdx > 0) {
+            return after.slice(0, nextTestIdx).trim();
+        }
+        // Fallback: return from marker onward if test marker is missing.
+        return after.trim();
+    }
+
+    async function copyDeepDebugSummary() {
+        const outEl = document.getElementById('deep-debug-output');
+        const txt = outEl ? outEl.textContent || '' : '';
+        const summary = extractDeepDebugSummary(txt);
+        if (!summary) {
+            showToast('No interpretation summary found');
+            return;
+        }
+        await copyTextWithFallback(summary, 'Summary copied');
+    }
+
+    async function copyDeepDebugOutput() {
+        const outEl = document.getElementById('deep-debug-output');
+        const txt = outEl ? outEl.textContent || '' : '';
+        await copyTextWithFallback(txt, 'Debug output copied');
     }
 
     function selectAllRows() {
@@ -5113,6 +5527,9 @@
         document.getElementById('stat-p5').innerText = stats.dovi_p5 || 0;
         document.getElementById('stat-p81').innerText = stats.dovi_p81 || 0;
         document.getElementById('stat-p84').innerText = stats.dovi_p84 || 0;
+        document.getElementById('stat-p10').innerText = stats.dovi_p10 || 0;
+        document.getElementById('stat-p101').innerText = stats.dovi_p101 || 0;
+        document.getElementById('stat-p104').innerText = stats.dovi_p104 || 0;
         document.getElementById('res-total-display').innerText = stats.total ?? 0;
         if (typeof totalItems === 'number') {
             document.getElementById('res-filtered').innerText = totalItems;
@@ -5273,12 +5690,24 @@
                         rotten_id: hasSourceHybrid ? 42 : 40,
                         metacritic_id: hasSourceHybrid ? 43 : 41,
                         trakt_id: hasSourceHybrid ? 44 : 42,
-                        imdb_rating: hasSourceHybrid ? 45 : 43,
-                        tvdb_rating: hasSourceHybrid ? 46 : 44,
-                        tmdb_rating: hasSourceHybrid ? 47 : 45,
-                        rotten_rating: hasSourceHybrid ? 48 : 46,
-                        metacritic_rating: hasSourceHybrid ? 49 : 47,
-                        trakt_rating: hasSourceHybrid ? 50 : 48
+                        tvdb_series_id: hasSourceHybrid ? 45 : 43,
+                        tvdb_episode_id: hasSourceHybrid ? 46 : 44,
+                        imdb_series_id: hasSourceHybrid ? 47 : 45,
+                        imdb_episode_id: hasSourceHybrid ? 48 : 46,
+                        tmdb_series_id: hasSourceHybrid ? 49 : 47,
+                        tmdb_episode_id: hasSourceHybrid ? 50 : 48,
+                        trakt_series_id: hasSourceHybrid ? 51 : 49,
+                        trakt_episode_id: hasSourceHybrid ? 52 : 50,
+                        rotten_series_id: hasSourceHybrid ? 53 : 51,
+                        rotten_episode_id: hasSourceHybrid ? 54 : 52,
+                        metacritic_series_id: hasSourceHybrid ? 55 : 53,
+                        metacritic_episode_id: hasSourceHybrid ? 56 : 54,
+                        imdb_rating: hasSourceHybrid ? 57 : 55,
+                        tvdb_rating: hasSourceHybrid ? 58 : 56,
+                        tmdb_rating: hasSourceHybrid ? 59 : 57,
+                        rotten_rating: hasSourceHybrid ? 60 : 58,
+                        metacritic_rating: hasSourceHybrid ? 61 : 59,
+                        trakt_rating: hasSourceHybrid ? 62 : 60
                     };
                     const rowData = {
                         filename: row[idx.filename], category: row[idx.category], profile: row[idx.profile], el_type: row[idx.el_type],
@@ -5292,6 +5721,12 @@
                         nfo_missing: row[idx.nfo_missing],
                         fps: row[idx.fps], aspect_ratio: row[idx.aspect_ratio],
                         imdb_id: row[idx.imdb_id], tvdb_id: row[idx.tvdb_id], tmdb_id: row[idx.tmdb_id], rotten_id: row[idx.rotten_id], metacritic_id: row[idx.metacritic_id], trakt_id: row[idx.trakt_id],
+                        tvdb_series_id: idx.tvdb_series_id >= 0 ? row[idx.tvdb_series_id] : null, tvdb_episode_id: idx.tvdb_episode_id >= 0 ? row[idx.tvdb_episode_id] : null,
+                        imdb_series_id: idx.imdb_series_id >= 0 ? row[idx.imdb_series_id] : null, imdb_episode_id: idx.imdb_episode_id >= 0 ? row[idx.imdb_episode_id] : null,
+                        tmdb_series_id: idx.tmdb_series_id >= 0 ? row[idx.tmdb_series_id] : null, tmdb_episode_id: idx.tmdb_episode_id >= 0 ? row[idx.tmdb_episode_id] : null,
+                        trakt_series_id: idx.trakt_series_id >= 0 ? row[idx.trakt_series_id] : null, trakt_episode_id: idx.trakt_episode_id >= 0 ? row[idx.trakt_episode_id] : null,
+                        rotten_series_id: idx.rotten_series_id >= 0 ? row[idx.rotten_series_id] : null, rotten_episode_id: idx.rotten_episode_id >= 0 ? row[idx.rotten_episode_id] : null,
+                        metacritic_series_id: idx.metacritic_series_id >= 0 ? row[idx.metacritic_series_id] : null, metacritic_episode_id: idx.metacritic_episode_id >= 0 ? row[idx.metacritic_episode_id] : null,
                         imdb_rating: row[idx.imdb_rating], tvdb_rating: row[idx.tvdb_rating], tmdb_rating: row[idx.tmdb_rating], rotten_rating: row[idx.rotten_rating], metacritic_rating: row[idx.metacritic_rating], trakt_rating: row[idx.trakt_rating]
                     };
                     const rowJson = encodeURIComponent(JSON.stringify(rowData));
@@ -5307,7 +5742,7 @@
                         ? '-'
                         : (nfoMissing
                             ? '<span style="color:#e67e22; font-weight:bold;">Missing</span>'
-                            : '<span style="color:#2ecc71; font-weight:bold;">Found</span>');
+                            : '<span class="nfo-found-clickable" style="color:#2ecc71; font-weight:bold; cursor:pointer; text-decoration:underline;" data-full-path="' + escAttr(row[idx.full_path] || '') + '" onclick="event.stopPropagation(); openNfoModal(this.getAttribute(\'data-full-path\'))">Found</span>');
                     const secHdr = row[idx.secondary_hdr];
                     const resText = row[idx.resolution] || '-';
                     const vidW = row[idx.width] || 0;
@@ -5344,6 +5779,18 @@
                     const rottenIdTxt = row[idx.rotten_id] || '-';
                     const metaIdTxt = row[idx.metacritic_id] || '-';
                     const traktIdTxt = row[idx.trakt_id] || '-';
+                    const tvdbSeriesTxt = idx.tvdb_series_id >= 0 ? (row[idx.tvdb_series_id] || '-') : '-';
+                    const tvdbEpisodeTxt = idx.tvdb_episode_id >= 0 ? (row[idx.tvdb_episode_id] || '-') : '-';
+                    const imdbSeriesTxt = idx.imdb_series_id >= 0 ? (row[idx.imdb_series_id] || '-') : '-';
+                    const imdbEpisodeTxt = idx.imdb_episode_id >= 0 ? (row[idx.imdb_episode_id] || '-') : '-';
+                    const tmdbSeriesTxt = idx.tmdb_series_id >= 0 ? (row[idx.tmdb_series_id] || '-') : '-';
+                    const tmdbEpisodeTxt = idx.tmdb_episode_id >= 0 ? (row[idx.tmdb_episode_id] || '-') : '-';
+                    const traktSeriesTxt = idx.trakt_series_id >= 0 ? (row[idx.trakt_series_id] || '-') : '-';
+                    const traktEpisodeTxt = idx.trakt_episode_id >= 0 ? (row[idx.trakt_episode_id] || '-') : '-';
+                    const rottenSeriesTxt = idx.rotten_series_id >= 0 ? (row[idx.rotten_series_id] || '-') : '-';
+                    const rottenEpisodeTxt = idx.rotten_episode_id >= 0 ? (row[idx.rotten_episode_id] || '-') : '-';
+                    const metaSeriesTxt = idx.metacritic_series_id >= 0 ? (row[idx.metacritic_series_id] || '-') : '-';
+                    const metaEpisodeTxt = idx.metacritic_episode_id >= 0 ? (row[idx.metacritic_episode_id] || '-') : '-';
                     const imdbRtTxt = row[idx.imdb_rating] ?? '-';
                     const tvdbRtTxt = row[idx.tvdb_rating] ?? '-';
                     const tmdbRtTxt = row[idx.tmdb_rating] ?? '-';
@@ -5370,6 +5817,9 @@
                                 else if (profVal === '8.1') profCls = 'badge-p8';
                                 else if (profVal === '8.4') profCls = 'badge-p84';
                                 else if (profVal === '8') profCls = 'badge-p8';
+                                else if (profVal === '10') profCls = 'badge-p10';
+                                else if (profVal === '10.1') profCls = 'badge-p101';
+                                else if (profVal === '10.4') profCls = 'badge-p104';
                                 const profLabel = `P${profVal}`;
                                 const profClick = `filterBadge('dovi', '${profVal}')`;
                                 profileBadge = `<span class="badge ${profCls}" onclick="${profClick}" title="Filter: DV ${profLabel}" style="cursor:pointer">${profLabel}</span>`;
@@ -5450,6 +5900,18 @@
                             <td class="td-center col-rotten-id hide-col-rotten-id" title="${rottenIdTxt}">${rottenIdTxt}</td>
                             <td class="td-center col-metacritic-id hide-col-metacritic-id" title="${metaIdTxt}">${metaIdTxt}</td>
                             <td class="td-center col-trakt-id hide-col-trakt-id" title="${traktIdTxt}">${traktIdTxt}</td>
+                            <td class="td-center col-tvdb-series-id hide-col-tvdb-series-id" title="${tvdbSeriesTxt}">${tvdbSeriesTxt}</td>
+                            <td class="td-center col-tvdb-episode-id hide-col-tvdb-episode-id" title="${tvdbEpisodeTxt}">${tvdbEpisodeTxt}</td>
+                            <td class="td-center col-imdb-series-id hide-col-imdb-series-id" title="${imdbSeriesTxt}">${imdbSeriesTxt}</td>
+                            <td class="td-center col-imdb-episode-id hide-col-imdb-episode-id" title="${imdbEpisodeTxt}">${imdbEpisodeTxt}</td>
+                            <td class="td-center col-tmdb-series-id hide-col-tmdb-series-id" title="${tmdbSeriesTxt}">${tmdbSeriesTxt}</td>
+                            <td class="td-center col-tmdb-episode-id hide-col-tmdb-episode-id" title="${tmdbEpisodeTxt}">${tmdbEpisodeTxt}</td>
+                            <td class="td-center col-trakt-series-id hide-col-trakt-series-id" title="${traktSeriesTxt}">${traktSeriesTxt}</td>
+                            <td class="td-center col-trakt-episode-id hide-col-trakt-episode-id" title="${traktEpisodeTxt}">${traktEpisodeTxt}</td>
+                            <td class="td-center col-rotten-series-id hide-col-rotten-series-id" title="${rottenSeriesTxt}">${rottenSeriesTxt}</td>
+                            <td class="td-center col-rotten-episode-id hide-col-rotten-episode-id" title="${rottenEpisodeTxt}">${rottenEpisodeTxt}</td>
+                            <td class="td-center col-metacritic-series-id hide-col-metacritic-series-id" title="${metaSeriesTxt}">${metaSeriesTxt}</td>
+                            <td class="td-center col-metacritic-episode-id hide-col-metacritic-episode-id" title="${metaEpisodeTxt}">${metaEpisodeTxt}</td>
                             <td class="td-center col-imdb-rating hide-col-imdb-rating">${imdbRtTxt}</td>
                             <td class="td-center col-tvdb-rating hide-col-tvdb-rating">${tvdbRtTxt}</td>
                             <td class="td-center col-tmdb-rating hide-col-tmdb-rating">${tmdbRtTxt}</td>
@@ -5699,7 +6161,7 @@
             loadData();
         } catch (e) {
             console.error('Failed to update media type:', e);
-            showToast('Failed to update type');
+            showToast('Failed to update type', {isError: true});
         }
     }
     async function saveDetailsMetadata() {
@@ -5754,7 +6216,7 @@
             loadData();
         } catch (e) {
             console.error('Failed to update details:', e);
-            showToast('Failed to update details');
+            showToast('Failed to update details', {isError: true});
         }
     }
 
@@ -5924,7 +6386,7 @@
         closeBulkEdit();
         loadData();
         if (failed > 0) {
-            showToast(`Bulk edit completed with ${failed} failures`);
+            showToast(`Bulk edit completed with ${failed} failures`, {isError: true});
         } else {
             showToast('Bulk edit applied');
         }
@@ -5970,7 +6432,7 @@
         finishInlineRescanProgress();
         loadData();
         if (failed > 0) {
-            showToast(`Rescan completed with ${failed} failures`);
+            showToast(`Rescan completed with ${failed} failures`, {isError: true});
         } else {
             showToast('Rescan completed');
         }
@@ -6080,7 +6542,7 @@
             await browseFolders(folderBrowser.path || '');
         } catch (e) {
             console.error('Failed to load volumes', e);
-            showToast('Failed to load volumes');
+            showToast('Failed to load volumes', {isError: true});
         }
     }
 
@@ -6121,7 +6583,7 @@
             }
         } catch (e) {
             console.error('Browse failed', e);
-            showToast('Browse failed');
+            showToast('Browse failed', {isError: true});
         }
     }
 
@@ -6204,7 +6666,7 @@
             closeFoldersModal();
         } catch (e) {
             console.error('Failed to save scan folders', e);
-            showToast('Failed to save scan folders');
+            showToast('Failed to save scan folders', {isError: true});
         }
     }
     async function closeDetails() { 
@@ -6236,7 +6698,7 @@
             closeDetails();
             loadData();
         } catch (e) {
-            showToast("Rescan failed");
+            showToast("Rescan failed", {isError: true});
             console.error("Rescan failed:", e);
         }
     }
@@ -6270,7 +6732,7 @@
                     document.execCommand('copy');
                     showToast("Copied to clipboard!");
                 } catch (e) {
-                    showToast("Failed to copy");
+                    showToast("Failed to copy", {isError: true});
                 }
                 document.body.removeChild(textArea);
             });
@@ -6286,18 +6748,26 @@
                 document.execCommand('copy');
                 showToast("Copied to clipboard!");
             } catch (e) {
-                showToast("Failed to copy");
+                showToast("Failed to copy", {isError: true});
             }
             document.body.removeChild(textArea);
         }
     }
 
     // --- TOAST LOGIC ---
-    function showToast(msg) {
+    let toastTimer = null;
+    function showToast(msg, options = {}) {
         const t = document.getElementById('toast-notif');
+        const isError = options.isError === true;
+        const duration = options.duration ?? (isError ? 10000 : 4000);
         t.innerText = msg;
+        t.classList.toggle('toast-error', isError);
         t.classList.add('show');
-        setTimeout(() => t.classList.remove('show'), 3000);
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => { t.classList.remove('show'); toastTimer = null; }, duration);
+        if (isError) {
+            fetch('/api/log_client_error', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: msg}) }).catch(() => {});
+        }
     }
 
     // --- WARNING POPUP FOR MISSING VOLUMES ---
@@ -6726,7 +7196,7 @@
             loadData();
         } catch (e) {
             console.error('Cleanup failed', e);
-            showToast('Cleanup failed');
+            showToast('Cleanup failed', {isError: true});
         } finally {
             const modal = document.getElementById('clean-db-modal');
             if (modal) modal.style.display = 'none';
@@ -6903,7 +7373,7 @@
         try {
             const res = await fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             if (res.ok) {
-                if (animateButton) animateSuccess('btn-save', 'Save Settings', 'Saved');
+                if (animateButton) animateSuccess('btn-save', 'Save', 'Saved');
                 showToast("Settings saved successfully!");
                 updateLogs();
                 return true;
@@ -6912,7 +7382,7 @@
             }
         } catch (e) {
             console.error("Save failed:", e);
-            if (animateButton) animateFailure('btn-save', 'Save Settings');
+            if (animateButton) animateFailure('btn-save', 'Save');
             setTimeout(updateLogs, 500);
             return false;
         }
@@ -6920,19 +7390,34 @@
 
     async function updateLogs() {
         try {
+            const consoleElem = document.getElementById('debug-console');
+            if (!consoleElem) return;
+            const selection = window.getSelection();
+            const hasSelection = selection && !selection.isCollapsed && (
+                consoleElem.contains(selection.anchorNode) || consoleElem.contains(selection.focusNode)
+            );
+            if (hasSelection) return; // Don't disrupt text selection
+            const wasAtBottom = (consoleElem.scrollTop + consoleElem.clientHeight) >= (consoleElem.scrollHeight - 8);
+
             const res = await fetch('/api/logs');
             const logs = await res.json();
-            const consoleElem = document.getElementById('debug-console');
             consoleElem.innerHTML = logs.map(l => {
-                let cls = 'log-default'; 
-                // Check for [SUCCESS] first (before error), since success messages might contain words like "Errors:" or "failed_count"
-                if (/\[SUCCESS\]/i.test(l)) cls = 'log-success';
-                else if (/\[WARNING\]/i.test(l)) cls = 'log-warn';
-                else if (/\[ERROR\]|\[CRITICAL\]|error|fail|critical|abort/i.test(l)) cls = 'log-err'; 
-                else if (/finished|complete|analyzed|found|started|success/i.test(l)) cls = 'log-success';
-                return `<span class="${cls}">${l}</span>`;
+                // Color based ONLY on the script's own log level tags and markers,
+                // never on loose words that could appear in filenames/episode titles/NFO data
+                let cls = 'log-default';
+                if (/\[SUCCESS\]/.test(l)) cls = 'log-success';
+                else if (/\(error:\s*none\b/i.test(l)) cls = 'log-success';
+                else if (/\] \[WARNING\]/.test(l)) cls = 'log-warn';
+                else if (/\] \[ERROR\]|\] \[CRITICAL\]|\[FAILURE\]/.test(l)) cls = 'log-err';
+                else if (/scanned successfully|saved to db|finished scanning/i.test(l)) cls = 'log-success';
+                // If line has failed=N where N > 0, highlight just that part red
+                let text = l;
+                if (cls !== 'log-err') {
+                    text = text.replace(/failed=([1-9]\d*)/gi, '<span class="log-err">failed=$1</span>');
+                }
+                return `<span class="${cls}">${text}</span>`;
             }).join('<br>');
-            consoleElem.scrollTop = consoleElem.scrollHeight;
+            if (wasAtBottom) consoleElem.scrollTop = consoleElem.scrollHeight;
         } catch (e) {}
     }
 
@@ -7192,12 +7677,12 @@
             if (response.ok) {
                 showToast('Database maintenance completed!');
             } else {
-                showToast('Database maintenance failed');
+                showToast('Database maintenance failed', {isError: true});
                 console.error('Maintenance failed:', result.message || 'Unknown error');
             }
         } catch (e) {
             console.error('Maintenance error:', e);
-            showToast('Database maintenance failed');
+            showToast('Database maintenance failed', {isError: true});
         } finally {
             btn.disabled = false;
             btn.innerText = originalText;
@@ -7220,12 +7705,12 @@
                 showToast(`Backfill complete (${result.updated || 0} updated)`);
                 loadData();
             } else {
-                showToast('Backfill failed');
+                showToast('Backfill failed', {isError: true});
                 console.error('Backfill failed:', result.message || 'Unknown error');
             }
         } catch (e) {
             console.error('Backfill error:', e);
-            showToast('Backfill failed');
+            showToast('Backfill failed', {isError: true});
         }
     }
     
@@ -7247,12 +7732,12 @@
                 showToast('Backup downloaded');
             } else {
                 const error = await response.json();
-                showToast('Backup failed');
+                showToast('Backup failed', {isError: true});
                 console.error('Backup failed:', error.message || 'Unknown error');
             }
         } catch (e) {
             console.error('Backup error:', e);
-            showToast('Backup failed');
+            showToast('Backup failed', {isError: true});
         }
     }
     
@@ -7287,13 +7772,13 @@
                 fileInput.value = '';
                 setTimeout(() => window.location.reload(), 1500);
             } else {
-                showToast('Restore failed');
+                showToast('Restore failed', {isError: true});
                 console.error('Restore failed:', result.message || 'Unknown error');
                 fileInput.value = '';
             }
         } catch (e) {
             console.error('Restore error:', e);
-            showToast('Restore failed');
+            showToast('Restore failed', {isError: true});
             fileInput.value = '';
         }
     }
