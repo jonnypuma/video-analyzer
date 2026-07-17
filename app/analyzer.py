@@ -11,6 +11,7 @@ import io
 import time
 import sys
 import glob
+import hashlib
 import signal
 import tempfile
 import zipfile
@@ -19,6 +20,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
+import copy
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
@@ -43,6 +45,7 @@ LOCAL_OUTPUT_FALLBACK = os.path.join(BASE_DIR, 'results')
 if not os.path.exists(OUTPUT_DIR) and os.path.exists(LOCAL_OUTPUT_FALLBACK):
     OUTPUT_DIR = LOCAL_OUTPUT_FALLBACK
 DB_PATH = os.path.join(OUTPUT_DIR, 'processed_videos.db')
+CHANGELOG_PATH = os.path.join(BASE_DIR, 'CHANGELOG.md')
 VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mpeg', '.mpg', '.mov', '.ts', '.m2ts', '.webm', '.wmv'}
 SYSTEM_DIRS = {'bin', 'boot', 'dev', 'etc', 'home', 'lib', 'lib64', 'media', 'mnt', 'opt', 'proc', 'root', 'run', 'sbin', 'srv', 'sys', 'tmp', 'usr', 'var', 'app', 'defaults', 'config', 'output'}
 
@@ -60,12 +63,16 @@ MEDIAINFO_TIMEOUT = 120  # MediaInfo can be slower on large REMUX files
 
 # --- GLOBAL STATE ---
 APP_START_TIME = time.time()
-APP_VERSION = os.environ.get("APP_VERSION", "dev")
+APP_VERSION_FALLBACK = os.environ.get("APP_VERSION", "dev")
 RADARR_URL = (os.environ.get("RADARR_URL") or "").strip().rstrip("/")
 RADARR_API_KEY = (os.environ.get("RADARR_API_KEY") or "").strip()
 SONARR_URL = (os.environ.get("SONARR_URL") or "").strip().rstrip("/")
 SONARR_API_KEY = (os.environ.get("SONARR_API_KEY") or "").strip()
 ARR_STATUS_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": None}
+TOOL_VERSION_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": None}
+# Unfiltered library stats for /api/videos/meta (invalidated on any DB write via get_db).
+LIBRARY_STATS_CACHE: Dict[str, Any] = {"bundle": None}
+library_stats_cache_lock = threading.Lock()
 PROGRESS = {
     "status": "idle", "current": 0, "total": 0, "file": "Waiting...", 
     "last_full_scan": "Never", "last_duration": "--",
@@ -93,6 +100,22 @@ proc_lock = threading.Lock()
 # Using LRU eviction - most recently used items are kept
 RPU_CACHE = OrderedDict()  # OrderedDict for LRU behavior
 rpu_cache_lock = threading.Lock()
+
+def app_version() -> str:
+    """Return the latest semantic version listed in CHANGELOG.md."""
+    try:
+        with open(CHANGELOG_PATH, 'r', encoding='utf-8') as f:
+            for line in f:
+                match = re.match(r"^##\s+v?(\d+\.\d+\.\d+)\s*$", line.strip(), re.IGNORECASE)
+                if match:
+                    return match.group(1)
+    except OSError:
+        pass
+    return (APP_VERSION_FALLBACK or "dev").strip()
+
+def app_version_label() -> str:
+    version = app_version()
+    return version if version.lower().startswith("v") or version == "dev" else f"v{version}"
 
 def clear_rpu_cache() -> None:
     """
@@ -286,12 +309,242 @@ def get_db() -> Any:
         conn.execute("PRAGMA journal_mode=WAL")
         try:
             yield conn
+            # Invalidate only when this connection mutated rows (avoid wiping cache on read-only get_db use).
+            changed = conn.total_changes > 0
             conn.commit()
+            if changed:
+                invalidate_library_stats_cache()
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+
+def invalidate_library_stats_cache() -> None:
+    """Drop cached unfiltered library stats so the next meta request rebuilds them."""
+    with library_stats_cache_lock:
+        LIBRARY_STATS_CACHE["bundle"] = None
+
+def _load_scan_folders(conn: Any) -> list:
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key='scan_folders'").fetchone()
+        folders = json.loads(row[0]) if row and row[0] else []
+    except Exception:
+        folders = []
+    if isinstance(folders, dict):
+        folders = [folders]
+    if not isinstance(folders, list):
+        folders = []
+    return folders
+
+def _path_counts_for_where(conn: Any, where_clause: str, params: list[Any]) -> Tuple[List[str], List[int]]:
+    labels: list[str] = []
+    counts: list[int] = []
+    for f in _load_scan_folders(conn) or []:
+        if not isinstance(f, dict):
+            continue
+        if f.get('muted'):
+            continue
+        vol = (f.get('volume') or '').strip()
+        path = (f.get('path') or '').strip()
+        if not vol:
+            continue
+        label = f"{vol}{'/' + path if path else ''}"
+        labels.append(label)
+        if path:
+            normalized = path.replace('\\', '/').strip('/')
+            prefix = f"/{vol}/{normalized}"
+            like_pattern = f"%{prefix}%"
+            count = conn.execute(
+                f"SELECT COUNT(*) FROM videos WHERE {where_clause} AND source_vol = ? AND (full_path LIKE ? OR REPLACE(full_path, '\\\\', '/') LIKE ?)",
+                params + [vol, like_pattern, like_pattern],
+            ).fetchone()[0]
+        else:
+            count = conn.execute(
+                f"SELECT COUNT(*) FROM videos WHERE {where_clause} AND source_vol = ?",
+                params + [vol],
+            ).fetchone()[0]
+        counts.append(count)
+    return labels, counts
+
+def _group_col_counts(conn: Any, col: str, where_clause: Optional[str] = None, params: Optional[list[Any]] = None) -> Dict[Any, int]:
+    clause = f"{col} != '' AND {col} IS NOT NULL"
+    query_params: list[Any] = list(params or [])
+    if where_clause:
+        clause = f"{clause} AND {where_clause}"
+    return {
+        r[0]: r[1]
+        for r in conn.execute(
+            f"SELECT {col}, COUNT(*) FROM videos WHERE {clause} GROUP BY {col}",
+            query_params,
+        ).fetchall()
+    }
+
+def _secondary_hdr_counts(conn: Any, where_clause: str, params: list[Any]) -> Dict[str, int]:
+    clause = where_clause or "1=1"
+    result: Dict[str, int] = {}
+    for key, val in conn.execute(
+        f"SELECT secondary_hdr, COUNT(*) FROM videos WHERE {clause} GROUP BY secondary_hdr",
+        params,
+    ).fetchall():
+        result[key if key else 'none'] = val
+    return result
+
+def _audio_codec_counts_sql(conn: Any, where_sql: str, params: list[Any]) -> Dict[str, int]:
+    """
+    Count individual codecs from comma-separated audio_codecs using a recursive CTE.
+    Avoids fetching every matching row into Python for splitting.
+    """
+    clause = where_sql or "1=1"
+    rows = conn.execute(
+        f"""
+        WITH RECURSIVE
+        filtered AS (
+            SELECT audio_codecs AS raw
+            FROM videos
+            WHERE audio_codecs IS NOT NULL AND audio_codecs != '' AND ({clause})
+        ),
+        split(codec, rest) AS (
+            SELECT
+                TRIM(
+                    CASE
+                        WHEN INSTR(raw, ',') > 0 THEN SUBSTR(raw, 1, INSTR(raw, ',') - 1)
+                        ELSE raw
+                    END
+                ),
+                CASE
+                    WHEN INSTR(raw, ',') > 0 THEN SUBSTR(raw, INSTR(raw, ',') + 1)
+                    ELSE ''
+                END
+            FROM filtered
+            UNION ALL
+            SELECT
+                TRIM(
+                    CASE
+                        WHEN INSTR(rest, ',') > 0 THEN SUBSTR(rest, 1, INSTR(rest, ',') - 1)
+                        ELSE rest
+                    END
+                ),
+                CASE
+                    WHEN INSTR(rest, ',') > 0 THEN SUBSTR(rest, INSTR(rest, ',') + 1)
+                    ELSE ''
+                END
+            FROM split
+            WHERE rest != ''
+        )
+        SELECT codec, COUNT(*) AS cnt
+        FROM split
+        WHERE codec IS NOT NULL AND codec != ''
+        GROUP BY codec
+        """,
+        params,
+    ).fetchall()
+    return {str(r[0]): int(r[1]) for r in rows if r[0]}
+
+def _compute_enriched_stats(conn: Any, where_sql: str, params: list[Any], include_sizes: bool = False) -> Dict[str, Any]:
+    """Build ribbon/chart stats for a WHERE scope via SQL aggregations (no full-row Python scan)."""
+    stats = _build_stats_sql(conn, where_sql, params)
+    if where_sql == "1=1":
+        vol = _group_col_counts(conn, 'source_vol', None, [])
+        res = _group_col_counts(conn, 'resolution', None, [])
+    else:
+        vol = _group_col_counts(conn, 'source_vol', where_sql, params)
+        res = _group_col_counts(conn, 'resolution', where_sql, params)
+    stats['vol_labels'] = list(vol.keys())
+    stats['vol_data'] = list(vol.values())
+    stats['res_labels'] = list(res.keys())
+    stats['res_data'] = list(res.values())
+    stats['secondary_hdrs'] = _secondary_hdr_counts(conn, where_sql, params)
+    stats['path_labels'], stats['path_data'] = _path_counts_for_where(conn, where_sql, params)
+    stats['last_scan_time'] = PROGRESS["last_duration"]
+    if include_sizes:
+        stats['total_size_all'] = conn.execute("SELECT COALESCE(SUM(file_size), 0) FROM videos").fetchone()[0]
+        stats['total_size_movie'] = conn.execute(
+            "SELECT COALESCE(SUM(file_size), 0) FROM videos WHERE LOWER(media_type) = 'movie'"
+        ).fetchone()[0]
+        stats['total_size_tv'] = conn.execute(
+            "SELECT COALESCE(SUM(file_size), 0) FROM videos WHERE LOWER(media_type) = 'tv'"
+        ).fetchone()[0]
+    return stats
+
+def _build_stats_sql(conn: Any, where_sql: str, params: list[Any]) -> Dict[str, Any]:
+    """
+    Ribbon badge counts using SQL aggregates.
+    Matches prior Python semantics: failed rows count toward total/failed only;
+    category/hybrid badges ignore failed rows.
+    """
+    ok = "(scan_error IS NULL OR scan_error = '')"
+    row = conn.execute(
+        f"""
+        SELECT
+          COUNT(*) AS total,
+          COALESCE(SUM(CASE WHEN scan_error IS NOT NULL AND scan_error != '' THEN 1 ELSE 0 END), 0) AS failed,
+          COALESCE(SUM(CASE WHEN {ok} AND is_hybrid = 1 THEN 1 ELSE 0 END), 0) AS hybrid,
+          COALESCE(SUM(CASE WHEN {ok} AND COALESCE(is_source_hybrid, 0) = 1 THEN 1 ELSE 0 END), 0) AS source_hybrid,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' THEN 1 ELSE 0 END), 0) AS dovi,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '7' AND el_type = 'FEL' THEN 1 ELSE 0 END), 0) AS dovi_p7_fel,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '7' AND IFNULL(el_type, '') != 'FEL' THEN 1 ELSE 0 END), 0) AS dovi_p7_mel,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '5' THEN 1 ELSE 0 END), 0) AS dovi_p5,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '8.1' THEN 1 ELSE 0 END), 0) AS dovi_p81,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '8.4' THEN 1 ELSE 0 END), 0) AS dovi_p84,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '8' THEN 1 ELSE 0 END), 0) AS dovi_p8,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '10.1' THEN 1 ELSE 0 END), 0) AS dovi_p101,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '10.4' THEN 1 ELSE 0 END), 0) AS dovi_p104,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '10' THEN 1 ELSE 0 END), 0) AS dovi_p10,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'hdr10plus' THEN 1 ELSE 0 END), 0) AS hdr10plus,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'hdr10' THEN 1 ELSE 0 END), 0) AS hdr10,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'hlg' THEN 1 ELSE 0 END), 0) AS hlg,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'sdr_only' THEN 1 ELSE 0 END), 0) AS sdr
+        FROM videos
+        WHERE {where_sql}
+        """,
+        params,
+    ).fetchone()
+    return {
+        "total": int(row["total"] or 0),
+        "failed": int(row["failed"] or 0),
+        "hybrid": int(row["hybrid"] or 0),
+        "source_hybrid": int(row["source_hybrid"] or 0),
+        "dovi": int(row["dovi"] or 0),
+        "dovi_p7_fel": int(row["dovi_p7_fel"] or 0),
+        "dovi_p7_mel": int(row["dovi_p7_mel"] or 0),
+        "dovi_p81": int(row["dovi_p81"] or 0),
+        "dovi_p84": int(row["dovi_p84"] or 0),
+        "dovi_p8": int(row["dovi_p8"] or 0),
+        "dovi_p5": int(row["dovi_p5"] or 0),
+        "dovi_p101": int(row["dovi_p101"] or 0),
+        "dovi_p104": int(row["dovi_p104"] or 0),
+        "dovi_p10": int(row["dovi_p10"] or 0),
+        "hdr10plus": int(row["hdr10plus"] or 0),
+        "hdr10": int(row["hdr10"] or 0),
+        "hlg": int(row["hlg"] or 0),
+        "sdr": int(row["sdr"] or 0),
+        "vol_labels": [],
+        "vol_data": [],
+        "res_labels": [],
+        "res_data": [],
+        "secondary_hdrs": {},
+    }
+
+def get_or_build_library_stats_bundle(conn: Any) -> Dict[str, Any]:
+    """
+    Cached unfiltered library stats (all / movie / tv) + library_total.
+    Safe across filter clicks; rebuilt after any write transaction.
+    """
+    with library_stats_cache_lock:
+        cached = LIBRARY_STATS_CACHE.get("bundle")
+        if cached is not None:
+            return copy.deepcopy(cached)
+
+    bundle = {
+        "library_total": conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0],
+        "stats": _compute_enriched_stats(conn, "1=1", [], include_sizes=True),
+        "stats_movie": _compute_enriched_stats(conn, "LOWER(media_type) = 'movie'", []),
+        "stats_tv": _compute_enriched_stats(conn, "LOWER(media_type) = 'tv'", []),
+    }
+    with library_stats_cache_lock:
+        LIBRARY_STATS_CACHE["bundle"] = bundle
+        return copy.deepcopy(bundle)
 
 @contextmanager
 def get_db_readonly() -> Any:
@@ -639,6 +892,69 @@ def _arr_service_status(name: str, base_url: str, api_key: str) -> Dict[str, Any
             "configured": True,
             "message": str(e)
         }
+
+def _extract_tool_version(tool: str, output: str) -> str:
+    """Extract a concise version string from common media tool output."""
+    text = (output or "").strip()
+    first_line = text.splitlines()[0] if text else ""
+    if not first_line:
+        return "unknown"
+
+    patterns = {
+        "ffmpeg": r"ffmpeg version\s+([^\s]+)",
+        "ffprobe": r"ffprobe version\s+([^\s]+)",
+        "mediainfo": r"MediaInfo(?:Lib)?(?:\s+Command line)?\s*(?:-|,|v|version)?\s*v?([0-9]+(?:\.[0-9]+)+)",
+        "dovi_tool": r"dovi_tool\s+([^\s]+)",
+    }
+    search_text = text if tool == "mediainfo" else first_line
+    match = re.search(patterns.get(tool, r"([0-9][^\s]*)"), search_text, re.IGNORECASE)
+    return match.group(1) if match else first_line
+
+def _tool_version(tool: str, command: list[str]) -> Dict[str, Any]:
+    """Return installation and version details for an external tool."""
+    if shutil.which(command[0]) is None:
+        return {"installed": False, "version": None, "message": "Not found"}
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        version = _extract_tool_version(tool, output)
+        return {
+            "installed": result.returncode == 0,
+            "version": version,
+            "message": version if result.returncode == 0 else (output.splitlines()[0] if output else "Error")
+        }
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"installed": False, "version": None, "message": str(e)}
+
+def get_tool_versions() -> Dict[str, Any]:
+    """Return cached external tool versions for the health modal."""
+    now = time.time()
+    cached = TOOL_VERSION_CACHE.get("payload")
+    if cached and now - float(TOOL_VERSION_CACHE.get("ts") or 0) < 300:
+        return cached
+
+    python_version = sys.version.split()[0]
+    payload = {
+        "python": {
+            "installed": True,
+            "version": python_version,
+            "message": python_version
+        },
+        "ffmpeg": _tool_version("ffmpeg", ["ffmpeg", "-version"]),
+        "ffprobe": _tool_version("ffprobe", ["ffprobe", "-version"]),
+        "mediainfo": _tool_version("mediainfo", ["mediainfo", "--Version"]),
+        "dovi_tool": _tool_version("dovi_tool", ["dovi_tool", "--version"]),
+    }
+    TOOL_VERSION_CACHE["ts"] = now
+    TOOL_VERSION_CACHE["payload"] = payload
+    return payload
+
 def init_db() -> None:
     """
     Initialize the database with required tables and migrations.
@@ -646,7 +962,7 @@ def init_db() -> None:
     log_debug("Initializing Database...")
     if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    with get_db_readonly() as conn:
+    with get_db() as conn:
         conn.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
         conn.execute('CREATE TABLE IF NOT EXISTS scan_history (id INTEGER PRIMARY KEY AUTOINCREMENT, entry TEXT, created_at TEXT)')
         conn.execute('''CREATE TABLE IF NOT EXISTS videos 
@@ -662,7 +978,8 @@ def init_db() -> None:
                          scan_attempts INTEGER DEFAULT 0,
                          video_source TEXT, source_format TEXT, video_codec TEXT, is_3d INTEGER DEFAULT 0, edition TEXT, year INTEGER,
                          media_type TEXT, show_title TEXT, season INTEGER, episode INTEGER, movie_title TEXT, episode_title TEXT,
-                         nfo_missing INTEGER DEFAULT 0, validation_flag TEXT)''')
+                         nfo_missing INTEGER DEFAULT 0, missing INTEGER DEFAULT 0, validation_flag TEXT,
+                         dup_group_key TEXT, dup_exact_key TEXT, dup_count INTEGER DEFAULT 0)''')
         
         try:
             existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()}
@@ -674,8 +991,10 @@ def init_db() -> None:
                 'imdb_rating': 'REAL', 'tvdb_rating': 'REAL', 'tmdb_rating': 'REAL', 'rotten_rating': 'REAL', 'metacritic_rating': 'REAL', 'trakt_rating': 'REAL',
                 'video_source': 'TEXT', 'source_format': 'TEXT', 'video_codec': 'TEXT', 
                 'is_3d': 'INTEGER DEFAULT 0', 'edition': 'TEXT', 'year': 'INTEGER',
+                'is_source_hybrid': 'INTEGER DEFAULT 0',
                 'media_type': 'TEXT', 'show_title': 'TEXT', 'season': 'INTEGER', 'episode': 'INTEGER',
-                'movie_title': 'TEXT', 'episode_title': 'TEXT', 'nfo_missing': 'INTEGER DEFAULT 0', 'validation_flag': 'TEXT',
+                'movie_title': 'TEXT', 'episode_title': 'TEXT', 'nfo_missing': 'INTEGER DEFAULT 0', 'missing': 'INTEGER DEFAULT 0', 'validation_flag': 'TEXT',
+                'dup_group_key': 'TEXT', 'dup_exact_key': 'TEXT', 'dup_count': 'INTEGER DEFAULT 0',
                 'tvdb_series_id': 'TEXT', 'tvdb_episode_id': 'TEXT', 'imdb_series_id': 'TEXT', 'imdb_episode_id': 'TEXT',
                 'tmdb_series_id': 'TEXT', 'tmdb_episode_id': 'TEXT', 'trakt_series_id': 'TEXT', 'trakt_episode_id': 'TEXT',
                 'rotten_series_id': 'TEXT', 'rotten_episode_id': 'TEXT', 'metacritic_series_id': 'TEXT', 'metacritic_episode_id': 'TEXT'
@@ -701,8 +1020,34 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_is_3d ON videos (is_3d)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_year ON videos (year)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_media_type ON videos (media_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dup_group_key ON videos (dup_group_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dup_exact_key ON videos (dup_exact_key)")
+        # Additional filter / sort helpers (safe IF NOT EXISTS for existing DBs)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_el_type ON videos (el_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_secondary_hdr ON videos (secondary_hdr)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_edition ON videos (edition)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_missing ON videos (missing)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_nfo_missing ON videos (nfo_missing)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_is_source_hybrid ON videos (is_source_hybrid)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON videos (file_size)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bitrate_mbps ON videos (bitrate_mbps)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dup_count ON videos (dup_count)")
+        # Expression indexes match LOWER(...) filter predicates used by build_filter_query
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_category_lower ON videos (LOWER(category))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_media_type_lower ON videos (LOWER(media_type))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_vol_lower ON videos (LOWER(source_vol))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_resolution_lower ON videos (LOWER(resolution))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_secondary_hdr_lower ON videos (LOWER(secondary_hdr))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_lower ON videos (LOWER(profile))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_el_type_lower ON videos (LOWER(el_type))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_container_lower ON videos (LOWER(container))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_edition_lower ON videos (LOWER(edition))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_video_source_lower ON videos (LOWER(video_source))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_source_format_lower ON videos (LOWER(source_format))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_video_codec_lower ON videos (LOWER(video_codec))")
+        recompute_duplicate_counts(conn)
         
-        defaults = {'threads': '4', 'skip_words': 'trailer,sample', 'min_size_mb': '50', 'refresh_interval': '60', 'notif_style': 'modal', 'force_rescan': 'false', 'column_order': '', 'scan_folders': '[]', 'scan_extras': 'false', 'debug_mode': 'false'}
+        defaults = {'threads': '4', 'skip_words': 'trailer,sample', 'min_size_mb': '50', 'refresh_interval': '60', 'notif_style': 'modal', 'force_rescan': 'false', 'column_order': '', 'scan_folders': '[]', 'scan_extras': 'false', 'debug_mode': 'false', 'remove_missing_from_db': 'true', 'duplicate_check_on_scan': 'false'}
         for k, v in defaults.items(): conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
     log_debug("Database ready.")
@@ -1143,6 +1488,116 @@ def guess_episode_title_from_filename(filename: str) -> str | None:
     name = re.sub(r'\s+', ' ', name).strip()
     return name or None
 
+def normalize_dup_text(value: str | None) -> str:
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    text = re.sub(r"[._-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+def build_duplicate_group_key(meta: dict) -> str | None:
+    media_type = (meta.get('media_type') or '').strip().lower()
+    if media_type == 'movie':
+        tmdb_id = (meta.get('tmdb_id') or '').strip()
+        imdb_id = (meta.get('imdb_id') or '').strip()
+        movie_title = normalize_dup_text(meta.get('movie_title') or meta.get('title') or meta.get('filename'))
+        year = meta.get('year')
+        if tmdb_id:
+            return f"movie:tmdb:{tmdb_id}"
+        if imdb_id:
+            return f"movie:imdb:{imdb_id}"
+        if movie_title and year:
+            return f"movie:title_year:{movie_title}:{year}"
+        if movie_title:
+            return f"movie:title:{movie_title}"
+        return None
+
+    if media_type == 'tv':
+        season = meta.get('season')
+        episode = meta.get('episode')
+        tvdb_series_id = (meta.get('tvdb_series_id') or '').strip()
+        imdb_series_id = (meta.get('imdb_series_id') or '').strip()
+        show_title = normalize_dup_text(meta.get('show_title'))
+        se = None
+        try:
+            if season is not None and episode is not None:
+                se = f"s{int(season):02}e{int(episode):02}"
+        except (TypeError, ValueError):
+            se = None
+        if se and tvdb_series_id:
+            return f"tv:tvdb_series_se:{tvdb_series_id}:{se}"
+        if se and imdb_series_id:
+            return f"tv:imdb_series_se:{imdb_series_id}:{se}"
+        if se and show_title:
+            return f"tv:show_se:{show_title}:{se}"
+        if tvdb_series_id:
+            return f"tv:series:{tvdb_series_id}"
+        if show_title:
+            return f"tv:series_title:{show_title}"
+        return None
+    return None
+
+def build_duplicate_exact_key(full_path: str | None, file_size: int | None, sample_bytes: int = 4 * 1024 * 1024) -> str | None:
+    if not full_path or not isinstance(file_size, int) or file_size <= 0:
+        return None
+    try:
+        hasher = hashlib.sha1()
+        with open(full_path, 'rb') as f:
+            head = f.read(sample_bytes)
+            hasher.update(head)
+            if file_size > sample_bytes:
+                tail_size = min(sample_bytes, file_size)
+                f.seek(max(0, file_size - tail_size))
+                tail = f.read(tail_size)
+                hasher.update(tail)
+        return f"{file_size}:{hasher.hexdigest()}"
+    except Exception:
+        return None
+
+def recompute_duplicate_group_keys_for_paths(conn: sqlite3.Connection, paths: list[str]) -> None:
+    if not paths:
+        return
+    unique_paths = [p for p in dict.fromkeys(paths) if p]
+    if not unique_paths:
+        return
+    placeholders = ','.join('?' for _ in unique_paths)
+    rows = conn.execute(
+        f"""SELECT full_path, filename, media_type, movie_title, show_title, season, episode, year,
+                    tmdb_id, imdb_id, tvdb_series_id, imdb_series_id
+             FROM videos
+             WHERE full_path IN ({placeholders})""",
+        unique_paths
+    ).fetchall()
+    updates = []
+    for row in rows:
+        meta = {
+            'filename': row['filename'],
+            'media_type': row['media_type'],
+            'movie_title': row['movie_title'],
+            'show_title': row['show_title'],
+            'season': row['season'],
+            'episode': row['episode'],
+            'year': row['year'],
+            'tmdb_id': row['tmdb_id'],
+            'imdb_id': row['imdb_id'],
+            'tvdb_series_id': row['tvdb_series_id'],
+            'imdb_series_id': row['imdb_series_id']
+        }
+        dup_group_key = build_duplicate_group_key(meta)
+        updates.append((dup_group_key, row['full_path']))
+    if updates:
+        conn.executemany("UPDATE videos SET dup_group_key=? WHERE full_path=?", updates)
+
+def recompute_duplicate_counts(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """UPDATE videos
+           SET dup_count = COALESCE((
+               SELECT COUNT(*) FROM videos v2
+               WHERE v2.dup_group_key = videos.dup_group_key
+           ), 0)"""
+    )
+
 def find_kodi_nfo_candidates(file_path: str, media_type_hint: str | None) -> list[str]:
     candidates: list[str] = []
     try:
@@ -1251,12 +1706,6 @@ def _enrich_from_nfo_and_filename(path: str, result: dict) -> None:
     filename_lower = filename_base.lower()
     filename_meta = parse_filename_metadata(filename_base)
     media_type_guess, season_guess, episode_guess = parse_tv_from_filename(filename_lower)
-    if media_type_guess and not result.get('media_type'):
-        result['media_type'] = media_type_guess
-    if season_guess is not None and result.get('season') is None:
-        result['season'] = season_guess
-    if episode_guess is not None and result.get('episode') is None:
-        result['episode'] = episode_guess
     if not result.get('year') and filename_meta.get('year'):
         result['year'] = filename_meta['year']
     if not result.get('video_source') and filename_meta.get('video_source'):
@@ -1276,8 +1725,18 @@ def _enrich_from_nfo_and_filename(path: str, result: dict) -> None:
         is_tvshow_nfo = pathlib.Path(nfo_path).name.lower() == 'tvshow.nfo'
         if not result.get('year') and nfo_data.get('year'):
             result['year'] = nfo_data['year']
-        if not result.get('media_type') and nfo_data.get('media_type'):
-            result['media_type'] = nfo_data['media_type']
+        nfo_media_type = (nfo_data.get('media_type') or '').strip().lower()
+        if nfo_media_type == 'movie' and not is_tvshow_nfo:
+            # A concrete movie NFO must win over stale/guessed TV typing.
+            result['media_type'] = 'movie'
+            result['show_title'] = None
+            result['season'] = None
+            result['episode'] = None
+            result['episode_title'] = None
+        elif not result.get('media_type') and nfo_media_type:
+            # Never let series-level tvshow.nfo classify non-TV files by itself.
+            if not (is_tvshow_nfo and media_type_guess != 'tv'):
+                result['media_type'] = nfo_media_type
         if not result.get('show_title') and nfo_data.get('show_title'):
             result['show_title'] = nfo_data['show_title']
         if result.get('season') is None and nfo_data.get('season') is not None:
@@ -1313,6 +1772,22 @@ def _enrich_from_nfo_and_filename(path: str, result: dict) -> None:
         if not result.get('movie_title') and nfo_data.get('title') and (nfo_data.get('media_type') == 'movie' or result.get('media_type') != 'tv'):
             result['movie_title'] = nfo_data['title']
     coerce_tv_nfo_to_movie(result, filename_base, media_type_guess, path)
+
+    # Filename is fallback only when NFO/current metadata did not identify type.
+    media_type_now = (result.get('media_type') or '').strip().lower()
+    if not media_type_now and media_type_guess:
+        result['media_type'] = media_type_guess
+        media_type_now = media_type_guess
+    if media_type_now == 'tv':
+        if season_guess is not None and result.get('season') is None:
+            result['season'] = season_guess
+        if episode_guess is not None and result.get('episode') is None:
+            result['episode'] = episode_guess
+    elif media_type_now == 'movie':
+        # Keep movie rows clean from filename episode guesses.
+        result['season'] = None
+        result['episode'] = None
+        result['episode_title'] = None
     if result.get('media_type') == 'tv' and not result.get('show_title'):
         result['show_title'] = guess_show_title_from_path(path)
 
@@ -1326,7 +1801,7 @@ def extract_video_codec(filename: str, probe_data: dict) -> str | None:
         probe_data: ffprobe JSON data
         
     Returns:
-        Video codec string (HEVC, H.264, AV1, etc.) or None
+        Video codec string (HEVC, H.264, AV1, VVC, etc.) or None
     """
     codec_from_probe = None
     codec_from_filename = None
@@ -1339,6 +1814,7 @@ def extract_video_codec(filename: str, probe_data: dict) -> str | None:
             
             codec_map = {
                 'hevc': 'HEVC', 'h265': 'HEVC', 'h.265': 'HEVC', 'x265': 'HEVC',
+                'vvc': 'VVC', 'h266': 'VVC', 'h.266': 'VVC', 'x266': 'VVC',
                 'av1': 'AV1', 'av01': 'AV1',
                 'h264': 'H.264', 'h.264': 'H.264', 'x264': 'H.264', 'avc': 'H.264',
                 'mpeg4': 'MPEG-4', 'mpeg2video': 'MPEG-2', 'mpeg1video': 'MPEG-1',
@@ -1359,6 +1835,7 @@ def extract_video_codec(filename: str, probe_data: dict) -> str | None:
     filename_lower = filename.lower()
     filename_codec_patterns = [
         (r'\b(hevc|h265|h\.265|x265)\b', 'HEVC'),
+        (r'\b(vvc|h266|h\.266|x266)\b', 'VVC'),
         (r'\b(av1|av01)\b', 'AV1'),
         (r'\b(h264|h\.264|x264|avc)\b', 'H.264'),
         (r'\b(mpeg[-\s]?4|mpeg4)\b', 'MPEG-4'),
@@ -1516,10 +1993,6 @@ def analyze_file_deep(path: str) -> dict:
         result['is_3d'] = filename_meta['is_3d']
 
         media_type_guess, season_guess, episode_guess = parse_tv_from_filename(filename_lower)
-        if media_type_guess:
-            result['media_type'] = media_type_guess
-            result['season'] = season_guess
-            result['episode'] = episode_guess
 
         nfo_candidates = find_kodi_nfo_candidates(path, result['media_type'])
         episode_nfo_candidates = [c for c in nfo_candidates if pathlib.Path(c).name.lower() != 'tvshow.nfo']
@@ -1532,8 +2005,18 @@ def analyze_file_deep(path: str) -> dict:
                 is_tvshow_nfo = pathlib.Path(nfo_path).name.lower() == 'tvshow.nfo'
                 if not result['year'] and nfo_data.get('year'):
                     result['year'] = nfo_data['year']
-                if not result['media_type'] and nfo_data.get('media_type'):
-                    result['media_type'] = nfo_data['media_type']
+                nfo_media_type = (nfo_data.get('media_type') or '').strip().lower()
+                if nfo_media_type == 'movie' and not is_tvshow_nfo:
+                    # A concrete movie NFO must win over stale/guessed TV typing.
+                    result['media_type'] = 'movie'
+                    result['show_title'] = None
+                    result['season'] = None
+                    result['episode'] = None
+                    result['episode_title'] = None
+                elif not result['media_type'] and nfo_media_type:
+                    # Never let series-level tvshow.nfo classify non-TV files by itself.
+                    if not (is_tvshow_nfo and media_type_guess != 'tv'):
+                        result['media_type'] = nfo_media_type
                 if not result['show_title'] and nfo_data.get('show_title'):
                     result['show_title'] = nfo_data['show_title']
                 if result['season'] is None and nfo_data.get('season') is not None:
@@ -1584,6 +2067,22 @@ def analyze_file_deep(path: str) -> dict:
                 if not result['movie_title'] and nfo_data.get('title') and (nfo_data.get('media_type') == 'movie' or result['media_type'] != 'tv'):
                     result['movie_title'] = nfo_data['title']
         coerce_tv_nfo_to_movie(result, filename_base, media_type_guess, path)
+
+        # Filename is fallback only when NFO/current metadata did not identify type.
+        media_type_now = (result.get('media_type') or '').strip().lower()
+        if not media_type_now and media_type_guess:
+            result['media_type'] = media_type_guess
+            media_type_now = media_type_guess
+        if media_type_now == 'tv':
+            if season_guess is not None and result.get('season') is None:
+                result['season'] = season_guess
+            if episode_guess is not None and result.get('episode') is None:
+                result['episode'] = episode_guess
+        elif media_type_now == 'movie':
+            # Keep movie rows clean from filename episode guesses.
+            result['season'] = None
+            result['episode'] = None
+            result['episode_title'] = None
 
         if result['media_type'] == 'tv':
             if not result['show_title']:
@@ -2335,6 +2834,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
         "season": meta.get('season'), "episode": meta.get('episode'),
         "movie_title": meta.get('movie_title'), "episode_title": meta.get('episode_title'),
         "nfo_missing": meta.get('nfo_missing', 1),
+        "missing": 0,
         "validation_flag": validation_flag
     }
 
@@ -2345,12 +2845,6 @@ def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dic
 
     filename_meta = parse_filename_metadata(filename_base)
     media_type_guess, season_guess, episode_guess = parse_tv_from_filename(filename_lower)
-    if media_type_guess and not current.get('media_type'):
-        result['media_type'] = media_type_guess
-    if season_guess is not None and current.get('season') is None:
-        result['season'] = season_guess
-    if episode_guess is not None and current.get('episode') is None:
-        result['episode'] = episode_guess
     if not current.get('year') and filename_meta.get('year'):
         result['year'] = filename_meta['year']
 
@@ -2362,8 +2856,19 @@ def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dic
         is_tvshow_nfo = pathlib.Path(nfo_path).name.lower() == 'tvshow.nfo'
         if not current.get('year') and nfo_data.get('year'):
             result['year'] = nfo_data['year']
-        if not current.get('media_type') and nfo_data.get('media_type'):
-            result['media_type'] = nfo_data['media_type']
+        nfo_media_type = (nfo_data.get('media_type') or '').strip().lower()
+        current_media_type = (current.get('media_type') or '').strip().lower()
+        if nfo_media_type == 'movie' and not is_tvshow_nfo and current_media_type != 'movie':
+            # Backfill correction: flip stale TV rows to movie when movie NFO is present.
+            result['media_type'] = 'movie'
+            result['show_title'] = None
+            result['season'] = None
+            result['episode'] = None
+            result['episode_title'] = None
+        elif not current.get('media_type') and nfo_media_type:
+            # Never let series-level tvshow.nfo classify non-TV files by itself.
+            if not (is_tvshow_nfo and media_type_guess != 'tv'):
+                result['media_type'] = nfo_media_type
         if not current.get('show_title') and nfo_data.get('show_title'):
             result['show_title'] = nfo_data['show_title']
         if not current.get('episode_title') and nfo_data.get('episode_title'):
@@ -2414,6 +2919,21 @@ def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dic
             result['season'] = None
             result['episode'] = None
             result['episode_title'] = None
+
+    # Filename is fallback only when NFO/current metadata did not identify type.
+    media_type_now = (current.get('media_type') or result.get('media_type') or '').strip().lower()
+    if not media_type_now and media_type_guess:
+        result['media_type'] = media_type_guess
+        media_type_now = media_type_guess
+    if media_type_now == 'tv':
+        if season_guess is not None and current.get('season') is None and result.get('season') is None:
+            result['season'] = season_guess
+        if episode_guess is not None and current.get('episode') is None and result.get('episode') is None:
+            result['episode'] = episode_guess
+    elif media_type_now == 'movie':
+        result['season'] = None
+        result['episode'] = None
+        result['episode_title'] = None
 
     if not current.get('show_title') and (current.get('media_type') or result.get('media_type')) == 'tv':
         result['show_title'] = result.get('show_title') or guess_show_title_from_path(file_path)
@@ -2479,7 +2999,7 @@ def sanitize_dict_for_db(data: dict) -> dict:
             sanitized[key] = value
     return sanitized
 
-def save_batch_to_db(data_list: list) -> None:
+def save_batch_to_db(data_list: list, duplicate_check_on_scan: Optional[bool] = None) -> None:
     """
     Save a batch of video metadata to the database.
     
@@ -2487,6 +3007,27 @@ def save_batch_to_db(data_list: list) -> None:
         data_list: List of dictionaries containing video metadata
     """
     if not data_list: return
+    
+    # Resolve duplicate-check behavior (default off unless setting enabled).
+    if duplicate_check_on_scan is None:
+        try:
+            with get_db_readonly() as conn:
+                row = conn.execute("SELECT value FROM settings WHERE key='duplicate_check_on_scan'").fetchone()
+                duplicate_check_on_scan = str((row[0] if row else 'false')).lower() == 'true'
+        except Exception:
+            duplicate_check_on_scan = False
+
+    # Ensure missing=0 for all saved files (they exist on disk)
+    for item in data_list:
+        item.setdefault('missing', 0)
+        if duplicate_check_on_scan:
+            item['dup_group_key'] = build_duplicate_group_key(item)
+            if not item.get('dup_exact_key'):
+                item['dup_exact_key'] = build_duplicate_exact_key(item.get('full_path'), item.get('file_size'))
+        else:
+            item.setdefault('dup_group_key', None)
+            item.setdefault('dup_exact_key', None)
+        item.setdefault('dup_count', 0)
     
     # Sanitize all string values in the data before insertion
     sanitized_list = [sanitize_dict_for_db(item) for item in data_list]
@@ -2501,7 +3042,7 @@ def save_batch_to_db(data_list: list) -> None:
                  tvdb_series_id, tvdb_episode_id, imdb_series_id, imdb_episode_id, tmdb_series_id, tmdb_episode_id,
                  trakt_series_id, trakt_episode_id, rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id,
                  imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating,
-                 scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, validation_flag) 
+                 scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, missing, validation_flag, dup_group_key, dup_exact_key, dup_count) 
                 VALUES (:filename, :category, :profile, :el_type, :container, :source_vol, :full_path, :last_scanned, 
                  :resolution, :bitrate_mbps, :scan_error, :is_hybrid, :is_source_hybrid, :secondary_hdr, :width, :height, 
                  :file_size, :bl_compatibility_id, :audio_codecs, :audio_langs, :audio_channels, :subtitles, :max_cll, :max_fall, :fps, :aspect_ratio,
@@ -2509,7 +3050,9 @@ def save_batch_to_db(data_list: list) -> None:
                  :tvdb_series_id, :tvdb_episode_id, :imdb_series_id, :imdb_episode_id, :tmdb_series_id, :tmdb_episode_id,
                  :trakt_series_id, :trakt_episode_id, :rotten_series_id, :rotten_episode_id, :metacritic_series_id, :metacritic_episode_id,
                  :imdb_rating, :tvdb_rating, :tmdb_rating, :rotten_rating, :metacritic_rating, :trakt_rating,
-                 :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :nfo_missing, :validation_flag)""", sanitized_list)
+                 :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :nfo_missing, :missing, :validation_flag, :dup_group_key, :dup_exact_key, :dup_count)""", sanitized_list)
+            if duplicate_check_on_scan:
+                recompute_duplicate_counts(conn)
             if DEBUG_MODE:
                 for item in sanitized_list:
                     log_debug(f"Saved to DB: {item['filename']} -> {item['category']} {item['profile']} (error: {item.get('scan_error', 'None')})", "DEBUG")
@@ -2648,6 +3191,7 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
     all_found_files = set() 
     total_seen = 0
     last_vol_started = None
+    vol_start_time = 0.0
     
     with progress_lock:
         PROGRESS["file"] = "Scanning directories..."
@@ -2663,9 +3207,9 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
             log_debug(f"[CRAWL] Volume path does not exist: {path}", "WARNING")
             continue
         
-        # Only show "Starting..." when we begin a new volume, not a new path on same volume
         if current_vol != last_vol_started:
             last_vol_started = current_vol
+            vol_start_time = time.time()
             with progress_lock:
                 PROGRESS["file"] = f"Scanning [{current_vol}]: Starting..."
         log_debug(f"[CRAWL] Starting scan of volume: {current_vol}", "INFO")
@@ -2680,6 +3224,16 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
                 dir_count += 1
                 if dir_count <= 10 or dir_count % 100 == 0:
                     log_debug(f"[CRAWL] [{current_vol}] Traversing directory {dir_count}: {root}", "INFO")
+                # After 3s per volume or when we find files, switch from "Starting" to "Found..."
+                # Throttle: every 50 dirs when no files yet; every 1 or 500 when we have files
+                elapsed_vol = time.time() - vol_start_time
+                show_found = elapsed_vol >= 3.0 or total_seen >= 1
+                throttle = (total_seen == 0 and dir_count % 50 == 0) or (total_seen == 1) or (total_seen > 1 and total_seen % 500 == 0)
+                if show_found and throttle:
+                    elapsed = int(time.time() - start_time)
+                    with progress_lock:
+                        PROGRESS["file"] = f"Scanning [{current_vol}]: Found {total_seen} files ({len(files_to_scan)} new)"
+                        PROGRESS["last_duration"] = f"{elapsed}s"
                 if os.path.isfile(os.path.join(root, '.scanignore')):
                     dirs[:] = []
                     continue
@@ -2796,6 +3350,7 @@ def analyze_files(files_to_scan: list, processed_map: dict, settings: dict,
     metrics_sum = {"bitrate": 0.0, "width": 0, "height": 0, "file_size": 0}
     metrics_count = {"bitrate": 0, "width": 0, "height": 0, "file_size": 0}
     progress_updates = {"current": 0, "failed_count": 0, "new_found": 0}
+    duplicate_check_on_scan = str(settings.get('duplicate_check_on_scan', 'false')).lower() == 'true'
             
     with ThreadPoolExecutor(max_workers=final_threads) as executor:
         futures = [executor.submit(scan_file_worker, m) for m in files_to_scan]
@@ -2854,7 +3409,7 @@ def analyze_files(files_to_scan: list, processed_map: dict, settings: dict,
                     pass
                         
                 if len(batch_buffer) >= batch_size:
-                    save_batch_to_db(batch_buffer)
+                    save_batch_to_db(batch_buffer, duplicate_check_on_scan=duplicate_check_on_scan)
                     batch_buffer = []
                             
                 if progress_updates["current"] >= PROGRESS_UPDATE_INTERVAL:
@@ -2892,7 +3447,7 @@ def analyze_files(files_to_scan: list, processed_map: dict, settings: dict,
                 progress_updates["current"] += 1
     
     if batch_buffer:
-        save_batch_to_db(batch_buffer)
+        save_batch_to_db(batch_buffer, duplicate_check_on_scan=duplicate_check_on_scan)
 
     if progress_updates["current"] > 0:
         with progress_lock:
@@ -2902,14 +3457,35 @@ def analyze_files(files_to_scan: list, processed_map: dict, settings: dict,
     
     return {"metrics_sum": metrics_sum, "metrics_count": metrics_count}
 
-def cleanup_deleted_files(target_vols: list | None, scan_paths: list, all_found_files: set) -> None:
+def count_removed_files(target_vols: list | None, scan_paths: list, all_found_files: set) -> int:
     """
-    Remove files from database that no longer exist on disk.
+    Count files in DB that would be removed (no longer on disk).
+    Does not modify the database.
+    """
+    with get_db() as conn:
+        if target_vols and len(target_vols) > 0:
+            placeholders = ','.join('?' * len(target_vols))
+            sql = f"SELECT full_path FROM videos WHERE source_vol IN ({placeholders})"
+            existing_db_files = {row[0] for row in conn.execute(sql, tuple(target_vols)).fetchall()}
+        else:
+            online_prefixes = tuple(scan_paths)
+            all_rows = conn.execute("SELECT full_path FROM videos").fetchall()
+            existing_db_files = {r[0] for r in all_rows if r[0].startswith(online_prefixes)}
+    return sum(1 for f in existing_db_files if f not in all_found_files)
+
+
+def cleanup_deleted_files(target_vols: list | None, scan_paths: list, all_found_files: set, remove_from_db: bool = True) -> int:
+    """
+    Remove or mark files from database that no longer exist on disk.
     
     Args:
         target_vols: List of target volume names, or None
         scan_paths: List of scan paths
         all_found_files: Set of all files found during scan
+        remove_from_db: If True, delete rows; if False, set missing=1
+    
+    Returns:
+        Number of files removed or marked missing
     """
     log_debug("🧹 Running cleanup...", "INFO")
     to_del = []
@@ -2927,14 +3503,20 @@ def cleanup_deleted_files(target_vols: list | None, scan_paths: list, all_found_
         if f not in all_found_files:
             to_del.append(f)
     
+    removed = len(to_del)
     if to_del:
-        log_debug(f"Cleaning up {len(to_del)} missing files from DB...", "INFO")
         with get_db() as conn:
-            conn.executemany("DELETE FROM videos WHERE full_path=?", [(f,) for f in to_del])
+            if remove_from_db:
+                log_debug(f"Removing {removed} missing files from DB...", "INFO")
+                conn.executemany("DELETE FROM videos WHERE full_path=?", [(f,) for f in to_del])
+            else:
+                log_debug(f"Marking {removed} missing files in DB...", "INFO")
+                conn.executemany("UPDATE videos SET missing = 1 WHERE full_path = ?", [(f,) for f in to_del])
+    return removed
 
 def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
                   scan_mode: str, target_vols: Optional[List[str]],
-                  scan_folder: dict | None) -> None:
+                  scan_folder: dict | None, removed: int = 0, remove_missing_from_db: bool = True) -> None:
     """
     Finalize scan by updating database settings and PROGRESS state.
     
@@ -2945,9 +3527,15 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
     """
     dur = f"{int(time.time() - start_time)}s"
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    dup_files = 0
+    dup_groups = 0
     with get_db() as conn:
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_full_scan', ?)", (now,))
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_duration', ?)", (dur,))
+        dup_files = conn.execute("SELECT COUNT(*) FROM videos WHERE COALESCE(dup_count, 0) > 1").fetchone()[0]
+        dup_groups = conn.execute(
+            "SELECT COUNT(DISTINCT dup_group_key) FROM videos WHERE COALESCE(dup_count, 0) > 1 AND dup_group_key IS NOT NULL AND dup_group_key != ''"
+        ).fetchone()[0]
             
     avg_bitrate = round(metrics_sum["bitrate"] / metrics_count["bitrate"], 2) if metrics_count["bitrate"] > 0 else 0
     avg_width = round(metrics_sum["width"] / metrics_count["width"]) if metrics_count["width"] > 0 else 0
@@ -2959,6 +3547,7 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
         PROGRESS["last_report"] = {
             "scanned": PROGRESS["total"],
             "new": PROGRESS["new_found"],
+            "removed": removed,
             "failed": PROGRESS["failed_count"],
             "warnings": PROGRESS.get("warning_count", 0),
             "duration": dur,
@@ -2966,18 +3555,25 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
             "avg_bitrate": avg_bitrate,
             "avg_width": avg_width,
             "avg_height": avg_height,
-            "avg_file_size_mb": avg_file_size_mb
+            "avg_file_size_mb": avg_file_size_mb,
+            "remove_missing_from_db": remove_missing_from_db,
+            "duplicates": dup_files,
+            "duplicate_groups": dup_groups
         }
         history_entry = {
             "status": "complete",
             "duration": dur,
             "scanned": PROGRESS["total"],
             "new": PROGRESS["new_found"],
+            "removed": removed,
             "failed": PROGRESS["failed_count"],
             "warnings": PROGRESS.get("warning_count", 0),
             "scan_mode": scan_mode,
             "target_vols": target_vols or [],
-            "scan_folder": scan_folder.get("path") if isinstance(scan_folder, dict) else None
+            "scan_folder": scan_folder.get("path") if isinstance(scan_folder, dict) else None,
+            "remove_missing_from_db": remove_missing_from_db,
+            "duplicates": dup_files,
+            "duplicate_groups": dup_groups
         }
     record_scan_history(history_entry)
             
@@ -3011,7 +3607,7 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
             log_debug(f"[WARNING] Attempted to start scan while already scanning! Current progress: {PROGRESS.get('current', 0)}/{PROGRESS.get('total', 0)}", "WARNING")
             return
         # Atomically set status to scanning before releasing lock
-        PROGRESS.update({"status": "scanning", "current": 0, "total": 0, "file": "Initializing...", "scan_completed": False, "new_found": 0, "failed_count": 0, "warning_count": 0, "last_duration": "0s", "start_time": start_time})
+        PROGRESS.update({"status": "scanning", "current": 0, "total": 0, "file": "Initializing...", "scan_completed": False, "new_found": 0, "removed": 0, "failed_count": 0, "warning_count": 0, "last_duration": "0s", "start_time": start_time})
     
     ABORT_SCAN = False
     PAUSE_EVENT.set()
@@ -3077,6 +3673,14 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
         files_to_scan, all_found_files = collect_files_to_scan(scan_paths, path_to_vol, processed_map, 
                                                                skip_words, min_size, force_rescan, start_time, scan_extras)
         
+        # Removed count only known after crawl completes (all_found_files is complete)
+        removed = count_removed_files(target_vols, scan_paths, all_found_files) if not ABORT_SCAN else 0
+        total_found = len(all_found_files)
+        with progress_lock:
+            PROGRESS["removed"] = removed
+            PROGRESS["total_found"] = total_found
+            PROGRESS["file"] = f"Found {total_found} ({len(files_to_scan)} new / {removed} removed)"
+        
         metrics = {"metrics_sum": {"bitrate": 0.0, "width": 0, "height": 0, "file_size": 0},
                    "metrics_count": {"bitrate": 0, "width": 0, "height": 0, "file_size": 0}}
         
@@ -3084,8 +3688,16 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
             metrics = analyze_files(files_to_scan, processed_map, settings, final_threads, start_time)
         
         if not ABORT_SCAN:
-            cleanup_deleted_files(target_vols, scan_paths, all_found_files)
-            finalize_scan(metrics["metrics_sum"], metrics["metrics_count"], start_time, scan_mode, target_vols, scan_folder)
+            remove_missing_from_db = str(settings.get('remove_missing_from_db', 'true')).lower() == 'true'
+            removed = cleanup_deleted_files(target_vols, scan_paths, all_found_files, remove_from_db=remove_missing_from_db)
+            with progress_lock:
+                PROGRESS["removed"] = removed
+                total_found = PROGRESS.get("total_found", PROGRESS.get("total", 0))
+                if total_found > 0:
+                    PROGRESS["file"] = f"Found {total_found} ({PROGRESS['new_found']} new / {removed} removed)"
+                elif removed > 0:
+                    PROGRESS["file"] = f"Cleanup: {removed} removed"
+            finalize_scan(metrics["metrics_sum"], metrics["metrics_count"], start_time, scan_mode, target_vols, scan_folder, removed, remove_missing_from_db)
         else:
             log_debug("[ABORT] Killing active subprocesses...")
             with proc_lock:
@@ -3108,7 +3720,9 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
                     "warnings": PROGRESS.get("warning_count", 0),
                     "duration": dur,
                     "date": _now,
-                    "aborted": True
+                    "aborted": True,
+                    "duplicates": 0,
+                    "duplicate_groups": 0
                 }
             record_scan_history({
                 "status": "aborted",
@@ -3119,7 +3733,9 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
                 "warnings": PROGRESS.get("warning_count", 0),
                 "scan_mode": scan_mode,
                 "target_vols": target_vols or [],
-                "scan_folder": scan_folder.get("path") if isinstance(scan_folder, dict) else None
+                "scan_folder": scan_folder.get("path") if isinstance(scan_folder, dict) else None,
+                "duplicates": 0,
+                "duplicate_groups": 0
             })
 
     except Exception as e:
@@ -3129,7 +3745,8 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
 
 # --- ROUTES ---
 @app.route('/')
-def index(): return render_template('index.html')
+def index():
+    return render_template('index.html', app_version_label=app_version_label())
 
 @app.route('/health')
 @app.route('/api/health')
@@ -3152,12 +3769,17 @@ def health_check() -> Response:
         db_status = "error"
     
     status = "healthy" if db_status == "ok" else "degraded"
+    sonarr = _arr_service_status("sonarr", SONARR_URL, SONARR_API_KEY)
+    radarr = _arr_service_status("radarr", RADARR_URL, RADARR_API_KEY)
     payload = {
         "status": status,
         "database": db_status,
         "scan_status": PROGRESS.get("status", "unknown"),
         "uptime_seconds": int(time.time() - APP_START_TIME),
-        "version": APP_VERSION,
+        "version": app_version_label(),
+        "tools": get_tool_versions(),
+        "sonarr": sonarr,
+        "radarr": radarr,
     }
     return jsonify(payload), (200 if status == "healthy" else 503)
 
@@ -3393,6 +4015,7 @@ def parse_advanced_search(search_query: str) -> Tuple[str, Dict[str, Any]]:
         '3d': 'is_3d',
         'nfo': 'nfo_missing',
         'nfo_missing': 'nfo_missing',
+        'missing': 'missing',
     }
     
     # Collect all matches with their positions
@@ -3507,7 +4130,7 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
         args['search'] = remaining_search
     
     blank_token = '__blank__'
-    mappings = [('search', 'filename'), ('category', 'category'), ('volume', 'source_vol'), ('profile', 'profile'), ('el', 'el_type'), ('container', 'container'), ('resolution', 'resolution'), ('status', 'scan_error'), ('audio', 'audio_codecs'), ('video_codec', 'video_codec'), ('video_source', 'video_source'), ('source_format', 'source_format'), ('edition', 'edition'), ('media_type', 'media_type'), ('nfo_missing', 'nfo_missing')]
+    mappings = [('search', 'filename'), ('category', 'category'), ('volume', 'source_vol'), ('profile', 'profile'), ('el', 'el_type'), ('container', 'container'), ('resolution', 'resolution'), ('status', 'scan_error'), ('audio', 'audio_codecs'), ('video_codec', 'video_codec'), ('video_source', 'video_source'), ('source_format', 'source_format'), ('edition', 'edition'), ('media_type', 'media_type'), ('nfo_missing', 'nfo_missing'), ('missing', 'missing')]
     for key, col in mappings:
         if key == exclude_key: continue
         val = args.get(key, '').strip()
@@ -3553,6 +4176,12 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
                 if val_lower in ('missing', 'none', '1', 'true', 'yes'):
                     conditions.append(f"{col} = 1")
                 elif val_lower in ('found', '0', 'false', 'no'):
+                    conditions.append(f"{col} = 0")
+            elif key == 'missing':
+                val_lower = val.lower()
+                if val_lower in ('yes', '1', 'true', 'y'):
+                    conditions.append(f"{col} = 1")
+                elif val_lower in ('no', '0', 'false', 'n'):
                     conditions.append(f"{col} = 0")
             elif ',' in val or val == blank_token:
                 # Handle multiple values (comma-separated) for any filter type, including blanks
@@ -3696,54 +4325,18 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
     
     return " AND ".join(conditions), params
 
-def _build_stats_from_rows(rows: list) -> dict:
-    stats = {
-        "total": len(rows), "failed": 0, "hybrid": 0, "source_hybrid": 0,
-        "dovi": 0, "dovi_p7_fel": 0, "dovi_p7_mel": 0, "dovi_p81": 0, "dovi_p84": 0, "dovi_p8": 0, "dovi_p5": 0,
-        "dovi_p101": 0, "dovi_p104": 0, "dovi_p10": 0,
-        "hdr10plus": 0, "hdr10": 0, "hlg": 0, "sdr": 0,
-        "vol_labels": [], "vol_data": [], "res_labels": [], "res_data": [],
-        "secondary_hdrs": {}
-    }
-    for r in rows:
-        if r['scan_error']:
-            stats['failed'] += 1
-            continue
-        if r['is_hybrid']:
-            stats['hybrid'] += 1
-        try:
-            if r['is_source_hybrid']:
-                stats['source_hybrid'] += 1
-        except (KeyError, IndexError, TypeError):
-            pass
-        cat, prof, el = r['category'], r['profile'], r['el_type']
-        if cat == 'dovi':
-            stats['dovi'] += 1
-            if prof == '7':
-                stats['dovi_p7_fel' if el == 'FEL' else 'dovi_p7_mel'] += 1
-            elif prof == '5':
-                stats['dovi_p5'] += 1
-            elif prof == '8.1':
-                stats['dovi_p81'] += 1
-            elif prof == '8.4':
-                stats['dovi_p84'] += 1
-            elif prof == '8':
-                stats['dovi_p8'] += 1
-            elif prof == '10.1':
-                stats['dovi_p101'] += 1
-            elif prof == '10.4':
-                stats['dovi_p104'] += 1
-            elif prof == '10':
-                stats['dovi_p10'] += 1
-        elif cat == 'hdr10plus':
-            stats['hdr10plus'] += 1
-        elif cat == 'hdr10':
-            stats['hdr10'] += 1
-        elif cat == 'hlg':
-            stats['hlg'] += 1
-        elif cat == 'sdr_only':
-            stats['sdr'] += 1
-    return stats
+def parse_sort_order(value: Any, default: str = "desc") -> str:
+    """Return a safe SQL sort direction."""
+    order = str(value or default).strip().lower()
+    return "ASC" if order == "asc" else "DESC"
+
+def parse_positive_int(value: Any, default: int, max_value: int) -> int:
+    """Parse a positive integer request value and clamp it."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return min(max(1, parsed), max_value)
 
 @app.route('/download_csv')
 def download_csv() -> Response:
@@ -3758,15 +4351,15 @@ def download_csv() -> Response:
     """
     where_clause, params = build_filter_query(request.args)
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'source_hybrid': 'is_source_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size'}
-    db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
+    db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = parse_sort_order(request.args.get('order'))
     page = request.args.get('page')
     per_page = request.args.get('per_page')
     limit_clause = ""
     limit_params: list[Any] = []
     try:
         if page is not None and per_page is not None:
-            page_val = max(1, int(page))
-            per_page_val = max(1, int(per_page))
+            page_val = parse_positive_int(page, 1, 1000000)
+            per_page_val = parse_positive_int(per_page, 50, 10000)
             offset = (page_val - 1) * per_page_val
             limit_clause = " LIMIT ? OFFSET ?"
             limit_params = [per_page_val, offset]
@@ -3795,15 +4388,15 @@ def download_json() -> Response:
     """
     where_clause, params = build_filter_query(request.args)
     sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'source_hybrid': 'is_source_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size'}
-    db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
+    db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = parse_sort_order(request.args.get('order'))
     page = request.args.get('page')
     per_page = request.args.get('per_page')
     limit_clause = ""
     limit_params: list[Any] = []
     try:
         if page is not None and per_page is not None:
-            page_val = max(1, int(page))
-            per_page_val = max(1, int(per_page))
+            page_val = parse_positive_int(page, 1, 1000000)
+            per_page_val = parse_positive_int(per_page, 50, 10000)
             offset = (page_val - 1) * per_page_val
             limit_clause = " LIMIT ? OFFSET ?"
             limit_params = [per_page_val, offset]
@@ -3925,6 +4518,7 @@ def restore_database() -> Response:
                     if os.path.exists(extracted_db) and extracted_db != DB_PATH:
                         shutil.move(extracted_db, DB_PATH)
                     db_restored = True
+                    invalidate_library_stats_cache()
                 
                 # Restore settings
                 if 'settings.json' in file_list:
@@ -4073,191 +4667,143 @@ def delete_filter_preset(preset_name: str) -> Response:
         log_debug(f"Failed to delete filter preset: {e}", "ERROR")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/api/videos')
-def get_videos() -> Response:
-    """
-    Get paginated video records with filtering, sorting, and statistics.
-    
-    Supports pagination, multiple filter types, sorting, and returns
-    comprehensive statistics and filter options for the UI.
-    
-    Query Parameters:
-        page: Page number (default: 1)
-        per_page: Items per page (default: 100)
-        sort: Sort column key (default: 'last_scanned')
-        order: Sort order 'asc' or 'desc' (default: 'desc')
-        Various filter parameters (category, profile, volume, etc.)
-        
-    Returns:
-        JSON response with rows, stats, pagination info, and filter options
-    """
-    ensure_video_column('is_source_hybrid', 'INTEGER DEFAULT 0')
-    main_where, main_params = build_filter_query(request.args)
-    page = int(request.args.get('page', 1)); per_page = int(request.args.get('per_page', 100))
-    sort_map = {'file': 'filename', 'hybrid': 'is_hybrid', 'source_hybrid': 'is_source_hybrid', 'main': 'category', 'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution', 'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned', 'stat': 'scan_error', 'size': 'file_size', 'video_source': 'video_source', 'source_format': 'source_format', 'video_codec': 'video_codec', 'is_3d': 'is_3d', 'edition': 'edition', 'year': 'year', 'media_type': 'media_type', 'show_title': 'show_title', 'season': 'season', 'episode': 'episode', 'movie_title': 'movie_title', 'episode_title': 'episode_title', 'cll': 'max_cll', 'fall': 'max_fall'}
-    db_sort = sort_map.get(request.args.get('sort'), 'last_scanned'); order = request.args.get('order', 'desc')
+_VIDEOS_ROW_COLUMNS = (
+    "filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, "
+    "bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, "
+    "bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, "
+    "video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, "
+    "episode, movie_title, episode_title, nfo_missing, missing, fps, aspect_ratio, imdb_id, tvdb_id, "
+    "tmdb_id, rotten_id, metacritic_id, trakt_id, tvdb_series_id, tvdb_episode_id, imdb_series_id, "
+    "imdb_episode_id, tmdb_series_id, tmdb_episode_id, trakt_series_id, trakt_episode_id, "
+    "rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id, imdb_rating, "
+    "tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating, dup_group_key, "
+    "dup_exact_key, dup_count"
+)
 
-    # Media-type scope for ribbons/charts: only single 'movie' or 'tv' gets scoped stats
-    media_type_arg = (request.args.get('media_type') or '').strip().lower()
+_VIDEOS_SORT_MAP = {
+    'file': 'filename', 'hybrid': 'is_hybrid', 'source_hybrid': 'is_source_hybrid', 'main': 'category',
+    'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution',
+    'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned',
+    'stat': 'scan_error', 'size': 'file_size', 'dup': 'dup_count', 'video_source': 'video_source',
+    'source_format': 'source_format', 'video_codec': 'video_codec', 'is_3d': 'is_3d',
+    'edition': 'edition', 'year': 'year', 'media_type': 'media_type', 'show_title': 'show_title',
+    'season': 'season', 'episode': 'episode', 'movie_title': 'movie_title',
+    'episode_title': 'episode_title', 'cll': 'max_cll', 'fall': 'max_fall',
+}
+
+def _build_videos_meta_payload(args: Dict[str, Any], include_filter_options: bool = True) -> Dict[str, Any]:
+    """Build heavy stats (+ optional filter_options) payload for the current filter args."""
+    main_where, main_params = build_filter_query(args)
+    media_type_arg = (args.get('media_type') or '').strip().lower()
     if media_type_arg == 'movie':
-        media_where, media_params = "LOWER(media_type) = 'movie'", []
+        media_scope_key = "stats_movie"
     elif media_type_arg == 'tv':
-        media_where, media_params = "LOWER(media_type) = 'tv'", []
+        media_scope_key = "stats_tv"
     else:
-        media_where, media_params = "1=1", []
+        media_scope_key = "stats"
 
     with get_db_readonly() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
-        rows = conn.execute(f"SELECT filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, fps, aspect_ratio, imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id, tvdb_series_id, tvdb_episode_id, imdb_series_id, imdb_episode_id, tmdb_series_id, tmdb_episode_id, trakt_series_id, trakt_episode_id, rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id, imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?", main_params + [per_page, (page-1)*per_page]).fetchall()
-        global API_LOG_TS
-        now = time.time()
-        if PROGRESS.get("status") == "scanning" and now - API_LOG_TS >= 5:
-            log_debug(
-                f"[API_VIDEOS] total={total} rows={len(rows)} page={page} per_page={per_page}",
-                "INFO"
-            )
-            API_LOG_TS = now
-        
-        stats_total_raw = conn.execute("SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, is_source_hybrid, secondary_hdr FROM videos").fetchall()
-        stats_filtered_raw = conn.execute(f"SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, is_source_hybrid, secondary_hdr FROM videos WHERE {main_where}", main_params).fetchall()
-        stats = _build_stats_from_rows(stats_total_raw)
-        stats_filtered = _build_stats_from_rows(stats_filtered_raw)
+
+        # Unfiltered totals come from cache (rebuilt only after DB writes).
+        lib_bundle = get_or_build_library_stats_bundle(conn)
+        stats = lib_bundle["stats"]
+        stats["last_scan_time"] = PROGRESS["last_duration"]
+        stats_media_scoped = lib_bundle[media_scope_key]
+        stats_media_scoped["last_scan_time"] = PROGRESS["last_duration"]
+
+        stats_filtered = _compute_enriched_stats(conn, main_where, main_params, include_sizes=False)
+
+        payload = {
+            "stats": stats,
+            "stats_filtered": stats_filtered,
+            "stats_media_scoped": stats_media_scoped,
+            "total_items": total,
+        }
+        if not include_filter_options:
+            return payload
 
         where_cache: dict[str | None, tuple[str, list[Any]]] = {}
 
         def get_where(exclude_key: str | None):
             if exclude_key in where_cache:
                 return where_cache[exclude_key]
-            w, p = build_filter_query(request.args, exclude_key=exclude_key)
+            w, p = build_filter_query(args, exclude_key=exclude_key)
             where_cache[exclude_key] = (w, p)
             return w, p
 
         def get_cnt(col, key):
             w, p = get_where(key)
-            return {r[0]: r[1] for r in conn.execute(f"SELECT {col}, COUNT(*) FROM videos WHERE {col} != '' AND {col} IS NOT NULL AND {w} GROUP BY {col}", p).fetchall()}
-
-        def get_cnt_with_where(col, where_clause, params):
-            clause = f"{col} != '' AND {col} IS NOT NULL"
-            if where_clause:
-                clause = f"{clause} AND {where_clause}"
-            return {r[0]: r[1] for r in conn.execute(f"SELECT {col}, COUNT(*) FROM videos WHERE {clause} GROUP BY {col}", params).fetchall()}
-
-        def get_secondary_counts(where_clause, params):
-            clause = where_clause or "1=1"
-            result = {}
-            for key, val in conn.execute(f"SELECT secondary_hdr, COUNT(*) FROM videos WHERE {clause} GROUP BY secondary_hdr", params).fetchall():
-                label = key if key else 'none'
-                result[label] = val
-            return result
+            return {
+                r[0]: r[1]
+                for r in conn.execute(
+                    f"SELECT {col}, COUNT(*) FROM videos WHERE {col} != '' AND {col} IS NOT NULL AND {w} GROUP BY {col}",
+                    p,
+                ).fetchall()
+            }
 
         def get_blank_cnt(col, key):
             w, p = get_where(key)
-            return conn.execute(f"SELECT COUNT(*) FROM videos WHERE ({col} IS NULL OR {col} = '') AND {w}", p).fetchone()[0]
-        
+            return conn.execute(
+                f"SELECT COUNT(*) FROM videos WHERE ({col} IS NULL OR {col} = '') AND {w}",
+                p,
+            ).fetchone()[0]
+
         def get_audio_codecs(key):
-            """Get unique audio codecs, splitting comma-separated values"""
+            """Count codecs from comma-separated audio_codecs via SQL (no Python row scan)."""
             w, p = get_where(key)
-            rows = conn.execute(f"SELECT audio_codecs FROM videos WHERE audio_codecs != '' AND audio_codecs IS NOT NULL AND {w}", p).fetchall()
-            codec_counts = {}
-            for row in rows:
-                if row[0]:
-                    # Split by comma and process each codec
-                    codecs = [c.strip() for c in row[0].split(',')]
-                    for codec in codecs:
-                        if codec:
-                            codec_counts[codec] = codec_counts.get(codec, 0) + 1
-            return codec_counts
-
-        def get_path_counts(where_clause: str, params: list[Any]) -> tuple[list[str], list[int]]:
-            try:
-                row = conn.execute("SELECT value FROM settings WHERE key='scan_folders'").fetchone()
-                folders = json.loads(row[0]) if row and row[0] else []
-            except Exception:
-                folders = []
-            if isinstance(folders, dict):
-                folders = [folders]
-            if not isinstance(folders, list):
-                folders = []
-            labels: list[str] = []
-            counts: list[int] = []
-            for f in folders or []:
-                if not isinstance(f, dict):
-                    continue
-                if f.get('muted'):
-                    continue
-                vol = (f.get('volume') or '').strip()
-                path = (f.get('path') or '').strip()
-                if not vol:
-                    continue
-                label = f"{vol}{'/' + path if path else ''}"
-                labels.append(label)
-                if path:
-                    normalized = path.replace('\\', '/').strip('/')
-                    prefix = f"/{vol}/{normalized}"
-                    like_pattern = f"%{prefix}%"
-                    count = conn.execute(
-                        f"SELECT COUNT(*) FROM videos WHERE {where_clause} AND source_vol = ? AND (full_path LIKE ? OR REPLACE(full_path, '\\\\', '/') LIKE ?)",
-                        params + [vol, like_pattern, like_pattern]
-                    ).fetchone()[0]
-                else:
-                    count = conn.execute(
-                        f"SELECT COUNT(*) FROM videos WHERE {where_clause} AND source_vol = ?",
-                        params + [vol]
-                    ).fetchone()[0]
-                counts.append(count)
-            return labels, counts
-        
-        cnt_vol_total = get_cnt_with_where('source_vol', None, [])
-        cnt_res_total = get_cnt_with_where('resolution', None, [])
-        stats['vol_labels'] = list(cnt_vol_total.keys()); stats['vol_data'] = list(cnt_vol_total.values())
-        stats['res_labels'] = list(cnt_res_total.keys()); stats['res_data'] = list(cnt_res_total.values())
-        stats['secondary_hdrs'] = get_secondary_counts(None, [])
-        stats['last_scan_time'] = PROGRESS["last_duration"]
-        stats['path_labels'], stats['path_data'] = get_path_counts("1=1", [])
-
-        cnt_vol_filtered = get_cnt_with_where('source_vol', main_where, main_params)
-        cnt_res_filtered = get_cnt_with_where('resolution', main_where, main_params)
-        stats_filtered['vol_labels'] = list(cnt_vol_filtered.keys()); stats_filtered['vol_data'] = list(cnt_vol_filtered.values())
-        stats_filtered['res_labels'] = list(cnt_res_filtered.keys()); stats_filtered['res_data'] = list(cnt_res_filtered.values())
-        stats_filtered['secondary_hdrs'] = get_secondary_counts(main_where, main_params)
-        stats_filtered['path_labels'], stats_filtered['path_data'] = get_path_counts(main_where, main_params)
-
-        # Stats scoped by media type only (for ribbons/charts when filtering on Movies or TV)
-        stats_media_scoped_raw = conn.execute(
-            "SELECT category, profile, el_type, resolution, source_vol, scan_error, is_hybrid, is_source_hybrid, secondary_hdr FROM videos WHERE " + media_where,
-            media_params
-        ).fetchall()
-        stats_media_scoped = _build_stats_from_rows(stats_media_scoped_raw)
-        cnt_vol_media = get_cnt_with_where('source_vol', media_where, media_params)
-        cnt_res_media = get_cnt_with_where('resolution', media_where, media_params)
-        stats_media_scoped['vol_labels'] = list(cnt_vol_media.keys())
-        stats_media_scoped['vol_data'] = list(cnt_vol_media.values())
-        stats_media_scoped['res_labels'] = list(cnt_res_media.keys())
-        stats_media_scoped['res_data'] = list(cnt_res_media.values())
-        stats_media_scoped['secondary_hdrs'] = get_secondary_counts(media_where, media_params)
-        stats_media_scoped['last_scan_time'] = PROGRESS["last_duration"]
-        stats_media_scoped['path_labels'], stats_media_scoped['path_data'] = get_path_counts(media_where, media_params)
+            return _audio_codec_counts_sql(conn, w, p)
 
         cnt_vol = get_cnt('source_vol', 'volume')
         cnt_res = get_cnt('resolution', 'resolution')
 
-        w_status, p_status = build_filter_query(request.args, exclude_key='status')
-        failed_cnt = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {w_status} AND scan_error IS NOT NULL AND scan_error != ''", p_status).fetchone()[0]
-        ok_cnt = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {w_status} AND (scan_error IS NULL OR scan_error = '')", p_status).fetchone()[0]
-        w_hyb, p_hyb = build_filter_query(request.args, exclude_key='is_hybrid')
-        hyb_yes = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {w_hyb} AND is_hybrid = 1", p_hyb).fetchone()[0]
-        hyb_no = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {w_hyb} AND is_hybrid = 0 AND category != 'sdr_only'", p_hyb).fetchone()[0]
-        w_src_hyb, p_src_hyb = build_filter_query(request.args, exclude_key='source_hybrid')
-        src_hyb_yes = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {w_src_hyb} AND is_source_hybrid = 1", p_src_hyb).fetchone()[0]
-        src_hyb_no = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {w_src_hyb} AND is_source_hybrid = 0", p_src_hyb).fetchone()[0]
-        w_3d, p_3d = build_filter_query(request.args, exclude_key='is_3d')
-        d3d_yes = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {w_3d} AND is_3d = 1", p_3d).fetchone()[0]
-        d3d_no = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {w_3d} AND is_3d = 0", p_3d).fetchone()[0]
+        w_status, p_status = build_filter_query(args, exclude_key='status')
+        failed_cnt = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_status} AND scan_error IS NOT NULL AND scan_error != ''",
+            p_status,
+        ).fetchone()[0]
+        ok_cnt = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_status} AND (scan_error IS NULL OR scan_error = '')",
+            p_status,
+        ).fetchone()[0]
+        w_hyb, p_hyb = build_filter_query(args, exclude_key='is_hybrid')
+        hyb_yes = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_hyb} AND is_hybrid = 1", p_hyb
+        ).fetchone()[0]
+        hyb_no = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_hyb} AND is_hybrid = 0 AND category != 'sdr_only'",
+            p_hyb,
+        ).fetchone()[0]
+        w_src_hyb, p_src_hyb = build_filter_query(args, exclude_key='source_hybrid')
+        src_hyb_yes = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_src_hyb} AND is_source_hybrid = 1", p_src_hyb
+        ).fetchone()[0]
+        src_hyb_no = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_src_hyb} AND is_source_hybrid = 0", p_src_hyb
+        ).fetchone()[0]
+        w_3d, p_3d = build_filter_query(args, exclude_key='is_3d')
+        d3d_yes = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_3d} AND is_3d = 1", p_3d
+        ).fetchone()[0]
+        d3d_no = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_3d} AND is_3d = 0", p_3d
+        ).fetchone()[0]
+        w_missing, p_missing = build_filter_query(args, exclude_key='missing')
+        missing_yes = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_missing} AND missing = 1", p_missing
+        ).fetchone()[0]
+        missing_no = conn.execute(
+            f"SELECT COUNT(*) FROM videos WHERE {w_missing} AND (missing = 0 OR missing IS NULL)",
+            p_missing,
+        ).fetchone()[0]
 
-        opts = {
-            'categories': get_cnt('category', 'category'), 'profiles': get_cnt('profile', 'profile'),
-            'el_types': get_cnt('el_type', 'el'), 'containers': get_cnt('container', 'container'),
-            'volumes': cnt_vol, 'resolutions': cnt_res,
+        payload["filter_options"] = {
+            'categories': get_cnt('category', 'category'),
+            'profiles': get_cnt('profile', 'profile'),
+            'el_types': get_cnt('el_type', 'el'),
+            'containers': get_cnt('container', 'container'),
+            'volumes': cnt_vol,
+            'resolutions': cnt_res,
             'secondary_hdrs': get_cnt('secondary_hdr', 'secondary_hdr'),
             'audio_codecs': get_audio_codecs('audio'),
             'video_sources': get_cnt('video_source', 'video_source'),
@@ -4278,14 +4824,74 @@ def get_videos() -> Response:
                 'source_format': get_blank_cnt('source_format', 'source_format'),
                 'video_codec': get_blank_cnt('video_codec', 'video_codec'),
                 'edition': get_blank_cnt('edition', 'edition'),
-                'media_type': get_blank_cnt('media_type', 'media_type')
+                'media_type': get_blank_cnt('media_type', 'media_type'),
             },
-            'special_hybrid': {'1': hyb_yes, '0': hyb_no}, 
+            'special_hybrid': {'1': hyb_yes, '0': hyb_no},
             'special_source_hybrid': {'1': src_hyb_yes, '0': src_hyb_no},
             'special_status': {'ok': ok_cnt, 'failed': failed_cnt},
-            'special_is_3d': {'1': d3d_yes, '0': d3d_no}
+            'special_is_3d': {'1': d3d_yes, '0': d3d_no},
+            'special_missing': {'1': missing_yes, '0': missing_no},
         }
-        return jsonify({"rows": [list(r) for r in rows], "stats": stats, "stats_filtered": stats_filtered, "stats_media_scoped": stats_media_scoped, "page": page, "total_items": total, "total_pages": (total + per_page - 1) // per_page, "filter_options": opts})
+        return payload
+
+
+@app.route('/api/videos')
+def get_videos() -> Response:
+    """
+    Fast paginated video rows for the table.
+
+    Returns rows + pagination only. Ribbons/charts/filter facet counts come from
+    GET /api/videos/meta so the table can render without waiting on aggregations.
+    """
+    ensure_video_column('is_source_hybrid', 'INTEGER DEFAULT 0')
+    main_where, main_params = build_filter_query(request.args)
+    page = parse_positive_int(request.args.get('page'), 1, 1000000)
+    per_page = parse_positive_int(request.args.get('per_page'), 50, 500)
+    db_sort = _VIDEOS_SORT_MAP.get(request.args.get('sort'), 'last_scanned')
+    order = parse_sort_order(request.args.get('order'))
+
+    with get_db_readonly() as conn:
+        total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
+        library_total = None
+        with library_stats_cache_lock:
+            cached_bundle = LIBRARY_STATS_CACHE.get("bundle")
+            if cached_bundle is not None:
+                library_total = cached_bundle.get("library_total")
+        if library_total is None:
+            library_total = conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
+        rows = conn.execute(
+            f"SELECT {_VIDEOS_ROW_COLUMNS} FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?",
+            main_params + [per_page, (page - 1) * per_page],
+        ).fetchall()
+        global API_LOG_TS
+        now = time.time()
+        if PROGRESS.get("status") == "scanning" and now - API_LOG_TS >= 5:
+            log_debug(
+                f"[API_VIDEOS] total={total} rows={len(rows)} page={page} per_page={per_page}",
+                "INFO",
+            )
+            API_LOG_TS = now
+        return jsonify({
+            "rows": [list(r) for r in rows],
+            "page": page,
+            "total_items": total,
+            "total_pages": (total + per_page - 1) // per_page,
+            "library_total": library_total,
+        })
+
+
+@app.route('/api/videos/meta')
+def get_videos_meta() -> Response:
+    """
+    Heavy dashboard metadata for current filters: stats, charts data, optional filter options.
+
+    Query:
+      include_options=0|1 (default 1). Set 0 to skip expensive facet/dropdown count queries.
+    """
+    ensure_video_column('is_source_hybrid', 'INTEGER DEFAULT 0')
+    include_raw = str(request.args.get('include_options', '1')).strip().lower()
+    include_filter_options = include_raw not in ('0', 'false', 'no', 'off')
+    return jsonify(_build_videos_meta_payload(request.args, include_filter_options=include_filter_options))
 
 
 @app.route('/api/filter_paths', methods=['POST'])
@@ -4480,6 +5086,8 @@ def update_media_type() -> Response:
         with get_db() as conn:
             conn.execute("UPDATE videos SET media_type=? WHERE full_path=?", (media_type, full_path))
             update_validation_flag_for_path(conn, full_path)
+            recompute_duplicate_group_keys_for_paths(conn, [full_path])
+            recompute_duplicate_counts(conn)
         return jsonify({"status": "ok"})
     except Exception as e:
         log_debug(f"Update media_type failed for {payload.get('full_path')}: {e}", "ERROR")
@@ -4537,6 +5145,8 @@ def update_metadata() -> Response:
                 params + [full_path]
             )
             update_validation_flag_for_path(conn, full_path)
+            recompute_duplicate_group_keys_for_paths(conn, [full_path])
+            recompute_duplicate_counts(conn)
         return jsonify({"status": "ok"})
     except Exception as e:
         log_debug(f"Update metadata failed for {payload.get('full_path')}: {e}", "ERROR")
@@ -4609,6 +5219,8 @@ def bulk_update_metadata() -> Response:
                 )
                 update_validation_flag_for_path(conn, full_path)
                 updated += 1
+            recompute_duplicate_group_keys_for_paths(conn, paths)
+            recompute_duplicate_counts(conn)
         return jsonify({"status": "ok", "updated": updated})
     except Exception as e:
         log_debug(f"Bulk update metadata failed: {e}", "ERROR")
@@ -4790,6 +5402,9 @@ def backfill_metadata() -> Response:
                         eta_seconds = int(remaining / rate) if rate > 0 else 0
                         PROGRESS["eta"] = f"{eta_seconds}s" if eta_seconds > 0 else "calculating..."
             log_debug(f"[BACKFILL] Completed. Updated {updated} files.", "INFO")
+            if updated > 0:
+                recompute_duplicate_group_keys_for_paths(conn, [row['full_path'] for row in rows])
+                recompute_duplicate_counts(conn)
             with progress_lock:
                 PROGRESS.update({"status": "idle", "current": 0, "total": 0, "file": "Waiting...", "eta": ""})
         return jsonify({"status": "ok", "updated": updated})
@@ -4797,6 +5412,177 @@ def backfill_metadata() -> Response:
         log_debug(f"Backfill metadata failed: {e}", "ERROR")
         with progress_lock:
             PROGRESS.update({"status": "idle", "current": 0, "total": 0, "file": "Waiting...", "eta": ""})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+def parse_duplicate_group_info(group_key: str | None) -> dict:
+    key = (group_key or '').strip()
+    if not key:
+        return {"basis": "unknown", "media_type": None}
+    parts = key.split(':')
+    if len(parts) >= 2:
+        media_type = parts[0]
+        basis = parts[1]
+        return {"basis": basis, "media_type": media_type}
+    return {"basis": "unknown", "media_type": None}
+
+@app.route('/api/duplicates/rebuild', methods=['POST'])
+def rebuild_duplicates() -> Response:
+    """
+    Rebuild persistent duplicate keys/counters.
+    Optionally includes exact fingerprint refresh.
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        filters = payload.get('filters') or {}
+        include_exact = bool(payload.get('include_exact', False))
+        where, params = build_filter_query(filters)
+        updated = 0
+        with get_db() as conn:
+            rows = conn.execute(
+                f"""SELECT full_path, filename, media_type, movie_title, show_title, season, episode, year,
+                            tmdb_id, imdb_id, tvdb_series_id, imdb_series_id, file_size, dup_exact_key
+                     FROM videos WHERE {where}""",
+                params
+            ).fetchall()
+            updates: list[tuple[str | None, str | None, str]] = []
+            for row in rows:
+                row_dict = dict(row)
+                group_key = build_duplicate_group_key(row_dict)
+                exact_key = row['dup_exact_key']
+                if include_exact:
+                    exact_key = build_duplicate_exact_key(row['full_path'], row['file_size'])
+                updates.append((group_key, exact_key, row['full_path']))
+            if updates:
+                conn.executemany(
+                    "UPDATE videos SET dup_group_key=?, dup_exact_key=? WHERE full_path=?",
+                    updates
+                )
+                updated = len(updates)
+            recompute_duplicate_counts(conn)
+        return jsonify({"status": "ok", "updated": updated, "include_exact": include_exact})
+    except Exception as e:
+        log_debug(f"Rebuild duplicates failed: {e}", "ERROR")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/duplicates/groups', methods=['POST'])
+def list_duplicate_groups() -> Response:
+    """
+    Return duplicate groups (logical + exact) for current filters.
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        filters = payload.get('filters') or {}
+        where, params = build_filter_query(filters)
+        groups: list[dict[str, Any]] = []
+        with get_db() as conn:
+            logical_rows = conn.execute(
+                f"""SELECT dup_group_key, COUNT(*) AS file_count, SUM(COALESCE(file_size,0)) AS total_size,
+                            MAX(media_type) AS media_type, MAX(COALESCE(movie_title, show_title, filename)) AS title_sample,
+                            MAX(year) AS year_sample, MAX(season) AS season_sample, MAX(episode) AS episode_sample
+                     FROM videos
+                     WHERE {where} AND dup_group_key IS NOT NULL AND dup_group_key != ''
+                     GROUP BY dup_group_key
+                     HAVING COUNT(*) > 1""",
+                params
+            ).fetchall()
+            for row in logical_rows:
+                info = parse_duplicate_group_info(row['dup_group_key'])
+                label = row['title_sample'] or 'Unknown title'
+                if (row['media_type'] or info.get('media_type')) == 'tv' and row['season_sample'] is not None and row['episode_sample'] is not None:
+                    label = f"{label} S{int(row['season_sample']):02}E{int(row['episode_sample']):02}"
+                elif row['year_sample']:
+                    label = f"{label} ({int(row['year_sample'])})"
+                groups.append({
+                    "group_id": f"logical|{row['dup_group_key']}",
+                    "group_key": row['dup_group_key'],
+                    "group_type": "logical",
+                    "match_basis": info.get('basis') or 'logical',
+                    "media_type": row['media_type'] or info.get('media_type'),
+                    "title": label,
+                    "file_count": int(row['file_count'] or 0),
+                    "total_size": int(row['total_size'] or 0)
+                })
+
+            exact_rows = conn.execute(
+                f"""SELECT dup_exact_key, COUNT(*) AS file_count, SUM(COALESCE(file_size,0)) AS total_size,
+                            MAX(COALESCE(movie_title, show_title, filename)) AS title_sample,
+                            MAX(media_type) AS media_type
+                     FROM videos
+                     WHERE {where} AND dup_exact_key IS NOT NULL AND dup_exact_key != ''
+                     GROUP BY dup_exact_key
+                     HAVING COUNT(*) > 1""",
+                params
+            ).fetchall()
+            for row in exact_rows:
+                groups.append({
+                    "group_id": f"exact|{row['dup_exact_key']}",
+                    "group_key": row['dup_exact_key'],
+                    "group_type": "exact",
+                    "match_basis": "size+fingerprint",
+                    "media_type": row['media_type'],
+                    "title": row['title_sample'] or 'Exact duplicate set',
+                    "file_count": int(row['file_count'] or 0),
+                    "total_size": int(row['total_size'] or 0)
+                })
+        groups.sort(key=lambda g: (g.get('file_count', 0), g.get('total_size', 0)), reverse=True)
+        return jsonify({"status": "ok", "groups": groups, "group_count": len(groups)})
+    except Exception as e:
+        log_debug(f"List duplicate groups failed: {e}", "ERROR")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/duplicates/members', methods=['POST'])
+def list_duplicate_members() -> Response:
+    """
+    Return files belonging to a duplicate group.
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        group_id = (payload.get('group_id') or '').strip()
+        if not group_id or '|' not in group_id:
+            return jsonify({"status": "error", "message": "Missing/invalid group_id"}), 400
+        group_type, group_key = group_id.split('|', 1)
+        if group_type not in ('logical', 'exact'):
+            return jsonify({"status": "error", "message": "Invalid group type"}), 400
+        key_col = 'dup_group_key' if group_type == 'logical' else 'dup_exact_key'
+        with get_db() as conn:
+            rows = conn.execute(
+                f"""SELECT filename, full_path, source_vol, file_size, resolution, bitrate_mbps, video_codec, source_format,
+                            category, media_type, movie_title, show_title, season, episode, year, scan_error, last_scanned
+                     FROM videos
+                     WHERE {key_col}=?
+                     ORDER BY
+                       CASE LOWER(COALESCE(source_format,'')) WHEN 'remux' THEN 4 WHEN 'bluray' THEN 3 WHEN 'web-dl' THEN 2 WHEN 'webrip' THEN 1 ELSE 0 END DESC,
+                       CASE LOWER(COALESCE(resolution,'')) WHEN '8k' THEN 5 WHEN '4k' THEN 4 WHEN '2160p' THEN 4 WHEN '1080p' THEN 3 WHEN '720p' THEN 2 ELSE 0 END DESC,
+                       COALESCE(bitrate_mbps, 0) DESC,
+                       COALESCE(file_size, 0) DESC,
+                       COALESCE(last_scanned, '') DESC""",
+                (group_key,)
+            ).fetchall()
+            members: list[dict[str, Any]] = []
+            for idx, row in enumerate(rows):
+                members.append({
+                    "filename": row['filename'],
+                    "full_path": row['full_path'],
+                    "source_vol": row['source_vol'],
+                    "file_size": int(row['file_size'] or 0),
+                    "resolution": row['resolution'],
+                    "bitrate_mbps": row['bitrate_mbps'],
+                    "video_codec": row['video_codec'],
+                    "source_format": row['source_format'],
+                    "category": row['category'],
+                    "media_type": row['media_type'],
+                    "movie_title": row['movie_title'],
+                    "show_title": row['show_title'],
+                    "season": row['season'],
+                    "episode": row['episode'],
+                    "year": row['year'],
+                    "scan_error": row['scan_error'],
+                    "last_scanned": row['last_scanned'],
+                    "keep_recommended": idx == 0
+                })
+        return jsonify({"status": "ok", "group_id": group_id, "members": members, "member_count": len(members)})
+    except Exception as e:
+        log_debug(f"List duplicate members failed: {e}", "ERROR")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/delete', methods=['POST'])
@@ -4823,6 +5609,7 @@ def delete_files() -> Response:
             count = conn.execute(f"DELETE FROM videos WHERE {w}", p).rowcount
         else:
             for p in paths: conn.execute("DELETE FROM videos WHERE full_path = ?", (p,)); count += 1
+        recompute_duplicate_counts(conn)
     return jsonify({"status": "deleted", "count": count})
 
 @app.route('/api/settings', methods=['GET', 'POST'])
@@ -4874,6 +5661,8 @@ def handle_settings() -> Response:
                         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
                 if 'scan_folders' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_folders', ?)", (d['scan_folders'],))
                 if 'scan_extras' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_extras', ?)", (str(d['scan_extras']).lower(),))
+                if 'remove_missing_from_db' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('remove_missing_from_db', ?)", (str(d['remove_missing_from_db']).lower(),))
+                if 'duplicate_check_on_scan' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('duplicate_check_on_scan', ?)", (str(d['duplicate_check_on_scan']).lower(),))
             return jsonify({"status": "success"})
         except Exception as e:
             import traceback
