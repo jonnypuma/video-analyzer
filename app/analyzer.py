@@ -134,6 +134,95 @@ if HAS_SCHEDULER:
     except (OSError, ValueError) as e:
         print(f"Error starting scheduler: {e}")
 
+_WEEKDAY_CRON = {'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'}
+
+def _parse_schedule_time(raw: str, default_hour: int = 3, default_minute: int = 0) -> tuple[int, int]:
+    """Parse HH:MM; fall back to default when missing/invalid."""
+    text = (raw or '').strip()
+    if not text or ':' not in text:
+        return default_hour, default_minute
+    try:
+        h_str, m_str = text.split(':', 1)
+        hour, minute = int(h_str), int(m_str)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+    except (TypeError, ValueError):
+        pass
+    return default_hour, default_minute
+
+def apply_scan_schedule(mode: str, value: str) -> None:
+    """
+    Configure APScheduler for scan_mode/scan_value.
+
+    Modes:
+      - manual: no jobs
+      - daily: value = HH:MM
+      - interval: value = hours (int)
+      - weekly: value = dow  or  dow|HH:MM  (dow = mon..sun; default time 03:00)
+      - monthly: value = day or day|HH:MM  (day = 1..31; default time 03:00)
+    """
+    if not scheduler:
+        return
+    try:
+        scheduler.remove_all_jobs()
+    except Exception as e:
+        log_debug(f"Scheduler remove_all_jobs failed: {e}", "WARNING")
+
+    mode_l = (mode or 'manual').strip().lower()
+    val = (value or '').strip()
+    if mode_l in ('', 'manual') or (mode_l != 'manual' and not val and mode_l != 'interval'):
+        return
+    if mode_l == 'manual':
+        return
+
+    try:
+        if mode_l == 'daily':
+            hour, minute = _parse_schedule_time(val)
+            scheduler.add_job(run_scan, 'cron', hour=hour, minute=minute, id='scheduled_scan', replace_existing=True)
+        elif mode_l == 'interval':
+            hours = max(1, int(val))
+            scheduler.add_job(run_scan, 'interval', hours=hours, id='scheduled_scan', replace_existing=True)
+        elif mode_l == 'weekly':
+            parts = val.split('|', 1)
+            dow = parts[0].strip().lower()
+            if dow not in _WEEKDAY_CRON:
+                raise ValueError(f"Invalid weekday '{dow}' (expected mon..sun)")
+            hour, minute = _parse_schedule_time(parts[1] if len(parts) > 1 else '')
+            scheduler.add_job(
+                run_scan, 'cron', day_of_week=dow, hour=hour, minute=minute,
+                id='scheduled_scan', replace_existing=True,
+            )
+        elif mode_l == 'monthly':
+            parts = val.split('|', 1)
+            day = int(parts[0].strip())
+            if day < 1 or day > 31:
+                raise ValueError(f"Invalid day of month '{day}' (expected 1..31)")
+            hour, minute = _parse_schedule_time(parts[1] if len(parts) > 1 else '')
+            scheduler.add_job(
+                run_scan, 'cron', day=day, hour=hour, minute=minute,
+                id='scheduled_scan', replace_existing=True,
+            )
+        else:
+            log_debug(f"Unknown scan schedule mode '{mode_l}' — no job registered", "WARNING")
+            return
+        log_debug(f"Scan schedule applied: mode={mode_l} value={val}", "INFO")
+    except Exception as e:
+        log_debug(f"Failed to apply scan schedule mode={mode_l} value={val}: {e}", "ERROR")
+        raise
+
+def restore_scan_schedule_from_settings() -> None:
+    """Re-register scheduled scan jobs from persisted settings (survives restart)."""
+    if not scheduler:
+        return
+    try:
+        with get_db() as conn:
+            rows = dict(conn.execute(
+                "SELECT key, value FROM settings WHERE key IN ('scan_mode', 'scan_value')"
+            ).fetchall())
+        apply_scan_schedule(rows.get('scan_mode', 'manual'), rows.get('scan_value', ''))
+    except Exception as e:
+        log_debug(f"Could not restore scan schedule from settings: {e}", "WARNING")
+
 # --- HELPERS ---
 def setup_new_log_files() -> None:
     """Initialize new log files for the current scan session."""
@@ -5621,8 +5710,9 @@ def handle_settings() -> Response:
     POST: Updates specified settings and optionally configures scheduled scans
     
     Request Body (POST):
-        mode: Scan schedule mode ('daily', 'interval', or 'manual')
-        value: Schedule value (time for daily, hours for interval)
+        mode: Scan schedule mode ('manual', 'daily', 'interval', 'weekly', or 'monthly')
+        value: Schedule value (HH:MM for daily; hours for interval;
+               dow or dow|HH:MM for weekly; day or day|HH:MM for monthly)
         threads: Number of worker threads
         skip_words: Comma-separated words to skip in filenames
         min_size_mb: Minimum file size in MB
@@ -5639,9 +5729,7 @@ def handle_settings() -> Response:
                 if 'mode' in d:
                     conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_mode', ?)", (d['mode'],))
                     conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_value', ?)", (d['value'],))
-                    if scheduler: scheduler.remove_all_jobs()
-                    if scheduler and d['mode'] == 'daily': h, m = d['value'].split(':'); scheduler.add_job(run_scan, 'cron', hour=h, minute=m)
-                    elif scheduler and d['mode'] == 'interval': scheduler.add_job(run_scan, 'interval', hours=int(d['value']))
+                    apply_scan_schedule(d.get('mode', 'manual'), d.get('value', ''))
                 if 'threads' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('threads', ?)", (str(d['threads']),))
                 if 'skip_words' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('skip_words', ?)", (d['skip_words'],))
                 if 'min_size_mb' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('min_size_mb', ?)", (str(d['min_size_mb']),))
@@ -5952,6 +6040,9 @@ def clear_completed():
 
 # Init DB on load
 init_db()
+
+# Re-apply persisted scan schedule after restart
+restore_scan_schedule_from_settings()
 
 # Cleanup leftover temp files on startup
 cleanup_old_rpu_files()

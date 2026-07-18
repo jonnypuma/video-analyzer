@@ -2995,10 +2995,24 @@
         const valContainer = document.getElementById('sched-val-container');
         Array.from(valContainer.children).forEach(el => el.style.display = 'none');
         
-        if (mode === 'daily') document.getElementById('sched-val-time').style.display = 'block';
-        else if (mode === 'interval') document.getElementById('sched-val-hours').style.display = 'block';
-        else if (mode === 'weekly') document.getElementById('sched-val-week').style.display = 'block';
-        else if (mode === 'monthly') document.getElementById('sched-val-day').style.display = 'block';
+        if (mode === 'daily') {
+            document.getElementById('sched-val-time').style.display = 'block';
+        } else if (mode === 'interval') {
+            document.getElementById('sched-val-hours').style.display = 'block';
+        } else if (mode === 'weekly') {
+            document.getElementById('sched-val-week').style.display = 'inline-block';
+            document.getElementById('sched-val-time').style.display = 'block';
+        } else if (mode === 'monthly') {
+            document.getElementById('sched-val-day').style.display = 'inline-block';
+            document.getElementById('sched-val-time').style.display = 'block';
+        }
+    }
+
+    function parseSchedValueParts(raw) {
+        const text = String(raw || '');
+        const idx = text.indexOf('|');
+        if (idx < 0) return { primary: text, time: '' };
+        return { primary: text.slice(0, idx), time: text.slice(idx + 1) };
     }
 
     // --- MULTISELECT FORMAT FILTER ---
@@ -8233,10 +8247,18 @@
             const data = await res.json();
             if(document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
                 document.getElementById('sched-mode').value = data.scan_mode || 'manual';
-                if(data.scan_mode === 'daily') document.getElementById('sched-val-time').value = data.scan_value;
-                if(data.scan_mode === 'interval') document.getElementById('sched-val-hours').value = data.scan_value;
-                if(data.scan_mode === 'weekly') document.getElementById('sched-val-week').value = data.scan_value;
-                if(data.scan_mode === 'monthly') document.getElementById('sched-val-day').value = data.scan_value;
+                if(data.scan_mode === 'daily') document.getElementById('sched-val-time').value = data.scan_value || '';
+                if(data.scan_mode === 'interval') document.getElementById('sched-val-hours').value = data.scan_value || '';
+                if(data.scan_mode === 'weekly') {
+                    const parts = parseSchedValueParts(data.scan_value);
+                    document.getElementById('sched-val-week').value = parts.primary || 'mon';
+                    document.getElementById('sched-val-time').value = parts.time || '03:00';
+                }
+                if(data.scan_mode === 'monthly') {
+                    const parts = parseSchedValueParts(data.scan_value);
+                    document.getElementById('sched-val-day').value = parts.primary || '1';
+                    document.getElementById('sched-val-time').value = parts.time || '03:00';
+                }
 
                 document.getElementById('skip-words').value = data.skip_words || '';
                 document.getElementById('min-size').value = data.min_size_mb || '50';
@@ -8312,8 +8334,15 @@
         const mode = document.getElementById('sched-mode').value;
         if (mode === 'daily') val = document.getElementById('sched-val-time').value;
         else if (mode === 'interval') val = document.getElementById('sched-val-hours').value;
-        else if (mode === 'weekly') val = document.getElementById('sched-val-week').value;
-        else if (mode === 'monthly') val = document.getElementById('sched-val-day').value;
+        else if (mode === 'weekly') {
+            const dow = document.getElementById('sched-val-week').value || 'mon';
+            const t = document.getElementById('sched-val-time').value || '03:00';
+            val = `${dow}|${t}`;
+        } else if (mode === 'monthly') {
+            const day = document.getElementById('sched-val-day').value || '1';
+            const t = document.getElementById('sched-val-time').value || '03:00';
+            val = `${day}|${t}`;
+        }
 
         const mediaTypeVal = (() => {
             try { return getMultiselectValue('media-type-filter'); } catch (e) { return ''; }
