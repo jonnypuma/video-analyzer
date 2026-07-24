@@ -1,0 +1,1 @@
+from video_analyzer.core import analyze_file_deep

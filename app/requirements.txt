@@ -1,0 +1,5 @@
+# Pinned for reproducible Docker builds (bump intentionally).
+Flask==3.0.3
+gunicorn==22.0.0
+APScheduler==3.10.4
+pymediainfo==6.1.0

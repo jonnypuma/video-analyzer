@@ -1,29 +1,32 @@
+---
+
 services:
 
   video-analyzer:
     build: ./app
     container_name: video-analyzer
     image: video-analyzer
-    user: "1000:1000"
+    restart: unless-stopped
     ports:
       - "6002:6002"
     volumes:
-      - /yourmount/Movies:/Movies:ro
-      - /yourmount2/Movies:/Movies2:ro
-      - /yourmount/TV:ro
-      - NFSMOUNT:/media #if you have remote NFS shares, needs to be mounted as external volumes (See below)
+#      - /your/share1:/server1/movies:ro
+#      - /your/share2:/server2/tv:ro
+#      - /your/share3:/server3/movies:ro
       - ./app/results:/output
     environment:
       - PYTHONUNBUFFERED=1
-      - TZ=${TZ}
-      - RADARR_API_KEY=${RADARR_API_KEY}
-      - RADARR_URL=${RADARR_URL}
-      - SONARR_API_KEY=${SONARR_API_KEY}
-      - SONARR_URL=${SONARR_URL}
-volumes: #if you have remote NFS server mounts, add them here
-  NFSMOUNT:
-    driver: local
-    driver_opts:
-      type: nfs
-      o: addr=192.168.2.9,rw,nfsvers=3 #NFS mount server IP
-      device: :/Media #shared folder on NFS mount server     
+      - TZ=${TZ:-UTC}
+      - RADARR_API_KEY=${RADARR_API_KEY:-}
+      - RADARR_URL=${RADARR_URL:-}
+      - SONARR_API_KEY=${SONARR_API_KEY:-}
+      - SONARR_URL=${SONARR_URL:-}
+      # When set (comma-separated container paths), disables auto-discovery of top-level mounts
+      - SCAN_PATHS=${SCAN_PATHS:-}
+      - APP_VERSION=${APP_VERSION:-}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6002/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
