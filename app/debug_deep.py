@@ -121,12 +121,10 @@ def _el_from_mi_fields(fields: dict[str, Any]) -> str | None:
     settings = str(fields.get("HDR_Format_Settings") or "").upper()
     if not settings.strip():
         return None
-    if "FEL" in settings or "BL+EL" in settings:
+    if "FEL" in settings or "BL+EL" in settings or "EL+RPU" in settings or re.search(r"(?<![A-Z])EL(?![A-Z])", settings):
         return "FEL"
-    if "MEL" in settings or "BL+RPU" in settings:
-        # BL+RPU without EL is MEL-style single-layer P7
-        if "BL+EL" not in settings:
-            return "MEL"
+    if "MEL" in settings or ("BL+RPU" in settings and "EL" not in settings):
+        return "MEL"
     return None
 
 

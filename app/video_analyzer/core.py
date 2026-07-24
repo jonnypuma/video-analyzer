@@ -2476,10 +2476,16 @@ def analyze_file_deep(path: str) -> dict:
         # If not in cache, extract RPU — try default then each video stream (DT-DL EL may not be v:0)
         if not dovi_data:
             try:
-                map_indexes: list[int | None] = [None]
-                for idx in range(len(video_streams)):
-                    if idx not in map_indexes:
-                        map_indexes.append(idx)
+                map_indexes: list[int | None]
+                n_vid = len(video_streams)
+                if n_vid > 1:
+                    # DT-DL: RPU is usually on the EL track (not v:0 / ffmpeg default).
+                    # Try secondary video maps first, then BL, then default.
+                    map_indexes = list(range(1, n_vid)) + [0, None]
+                else:
+                    map_indexes = [None]
+                    if n_vid == 1:
+                        map_indexes.append(0)
                 best_data = None
                 best_size = 0
                 best_rank = (-1, -1, -1)
@@ -2690,14 +2696,19 @@ def analyze_file_deep(path: str) -> dict:
                                             "DEBUG"
                                         )
 
-                            # FEL/MEL from MediaInfo settings (e.g. "BL+EL+RPU", "FEL", "MEL")
+                            # FEL/MEL from MediaInfo settings (e.g. "BL+EL+RPU", "EL+RPU", "FEL", "MEL")
                             settings_u = str(hdr_settings or '').upper()
                             if settings_u:
-                                if 'FEL' in settings_u or 'BL+EL' in settings_u:
+                                if (
+                                    'FEL' in settings_u
+                                    or 'BL+EL' in settings_u
+                                    or 'EL+RPU' in settings_u
+                                    or re.search(r'(?<![A-Z])EL(?![A-Z])', settings_u)
+                                ):
                                     mi_el_hint = 'FEL'
                                 elif mi_el_hint is None and (
                                     'MEL' in settings_u
-                                    or ('BL+RPU' in settings_u and 'BL+EL' not in settings_u)
+                                    or ('BL+RPU' in settings_u and 'EL' not in settings_u)
                                 ):
                                     mi_el_hint = 'MEL'
 

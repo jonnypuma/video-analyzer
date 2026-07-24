@@ -2,6 +2,10 @@
 
 All notable changes to Video Analyzer are documented here.
 
+## 3.0.13
+
+- DT-DL FEL: when multiple video streams exist, try RPU extract on secondary maps first (EL is usually not `v:0`); treat MediaInfo `EL+RPU` as FEL.
+
 ## 3.0.12
 
 - DV FEL: try RPU extract on each video stream (real DT-DL EL may not be `v:0`); use MediaInfo `HDR_Format_Settings` (`BL+EL`/`FEL`/`MEL`) as EL fallback.
