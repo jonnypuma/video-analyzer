@@ -4,8 +4,7 @@ Video analyzer and library for HDR content with deep metadata extraction, flexib
 
 See `CHANGELOG.md` for release notes and notable changes.
 
-<img width="2673" height="1354" alt="image" src="https://github.com/user-attachments/assets/e6c87cd7-3298-446d-8b69-a38c0f06bdc8" />
-
+<img width="2518" height="1029" alt="image" src="https://github.com/user-attachments/assets/f928c301-6533-4e12-ac81-cd9a968dd44d" />
 
 ---
 
