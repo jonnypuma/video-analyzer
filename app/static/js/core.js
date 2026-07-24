@@ -70,6 +70,10 @@ let duplicateGroups = [];
 let duplicateActiveGroupId = '';
 let duplicateMembers = [];
 let duplicateSelectedPaths = new Set();
+let dupGroupSortCol = 'file_count';
+let dupGroupSortOrder = 'desc';
+let dupMemberSortCol = '';
+let dupMemberSortOrder = 'desc';
 
 // Color generation function - generates distinct colors using HSL color space
 function generateColors(count, paletteStyle = 'vibrant') {

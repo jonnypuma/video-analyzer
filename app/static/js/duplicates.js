@@ -122,20 +122,21 @@ function renderDuplicateGroups() {
         container.innerHTML = '<div style="color:#888; font-size:0.9em; padding:8px 0;">No duplicate groups found for current filters.</div>';
         return;
     }
+    const sortedGroups = getSortedDuplicateGroups();
     container.innerHTML = `
         <table class="duplicates-table">
             <thead>
                 <tr>
-                    <th>Type</th>
-                    <th>Match Basis</th>
-                    <th>Title</th>
-                    <th>Count</th>
-                    <th>Total Size</th>
+                    <th class="dup-sortable" onclick="sortDuplicateGroups('group_type')">Type${dupSortMark('group', 'group_type')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateGroups('match_basis')">Match Basis${dupSortMark('group', 'match_basis')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateGroups('title')">Title${dupSortMark('group', 'title')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateGroups('file_count')">Count${dupSortMark('group', 'file_count')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateGroups('total_size')">Total Size${dupSortMark('group', 'total_size')}</th>
                     <th>Action</th>
                 </tr>
             </thead>
             <tbody>
-                ${duplicateGroups.map(group => {
+                ${sortedGroups.map(group => {
                     const groupId = group.group_id || '';
                     const isOpen = groupId === duplicateActiveGroupId;
                     const action = isOpen ? 'Hide Files' : 'View Files';
@@ -156,11 +157,112 @@ function renderDuplicateGroups() {
     `;
 }
 
+function dupSortMark(which, col) {
+    const cur = which === 'group' ? dupGroupSortCol : dupMemberSortCol;
+    const ord = which === 'group' ? dupGroupSortOrder : dupMemberSortOrder;
+    if (cur !== col) return '<span class="dup-sort-ind">⇅</span>';
+    return `<span class="dup-sort-ind active">${ord === 'asc' ? '▲' : '▼'}</span>`;
+}
+
+function sortDuplicateGroups(col) {
+    if (!col) return;
+    if (dupGroupSortCol === col) {
+        dupGroupSortOrder = dupGroupSortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+        dupGroupSortCol = col;
+        dupGroupSortOrder = (col === 'title' || col === 'group_type' || col === 'match_basis') ? 'asc' : 'desc';
+    }
+    renderDuplicateGroups();
+}
+
+function sortDuplicateMembers(col) {
+    if (!col) return;
+    if (dupMemberSortCol === col) {
+        dupMemberSortOrder = dupMemberSortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+        dupMemberSortCol = col;
+        const textFirst = ['filename', 'full_path', 'source_vol', 'category', 'secondary_hdr', 'audio_codecs', 'video_codec', 'source_format', 'resolution', 'primary_hdr', 'last_scanned'];
+        dupMemberSortOrder = textFirst.includes(col) ? 'asc' : 'desc';
+    }
+    renderDuplicateGroups();
+}
+
+function getSortedDuplicateGroups() {
+    const list = Array.isArray(duplicateGroups) ? duplicateGroups.slice() : [];
+    const col = dupGroupSortCol || 'file_count';
+    const dir = dupGroupSortOrder === 'asc' ? 1 : -1;
+    list.sort((a, b) => {
+        let va = a ? a[col] : '';
+        let vb = b ? b[col] : '';
+        if (col === 'file_count' || col === 'total_size') {
+            va = Number(va) || 0;
+            vb = Number(vb) || 0;
+            return (va - vb) * dir;
+        }
+        va = String(va || '').toLowerCase();
+        vb = String(vb || '').toLowerCase();
+        if (va < vb) return -1 * dir;
+        if (va > vb) return 1 * dir;
+        return 0;
+    });
+    return list;
+}
+
+function formatDupBitrate(mbps) {
+    if (mbps === null || mbps === undefined || mbps === '') return '—';
+    const n = Number(mbps);
+    if (!Number.isFinite(n)) return escHtml(String(mbps));
+    return `${n % 1 === 0 ? n.toFixed(0) : n.toFixed(1)} Mbps`;
+}
+
+function formatDupPrimaryHdr(member) {
+    const cat = (member && member.category) || '';
+    if (!cat) return '—';
+    let label = cat;
+    if (cat === 'dovi' || cat === 'dolby_vision') {
+        const parts = ['DoVi'];
+        if (member.profile) parts.push(`P${member.profile}`);
+        if (member.el_type) parts.push(member.el_type);
+        label = parts.join(' ');
+    } else if (cat === 'hdr10plus') label = 'HDR10+';
+    else if (cat === 'hdr10') label = 'HDR10';
+    else if (cat === 'hlg') label = 'HLG';
+    else if (cat === 'sdr_only') label = 'SDR';
+    return label;
+}
+
+function getSortedDuplicateMembers() {
+    const list = Array.isArray(duplicateMembers) ? duplicateMembers.slice() : [];
+    if (!dupMemberSortCol) return list;
+    const col = dupMemberSortCol;
+    const dir = dupMemberSortOrder === 'asc' ? 1 : -1;
+    list.sort((a, b) => {
+        let va;
+        let vb;
+        if (col === 'primary_hdr') {
+            va = formatDupPrimaryHdr(a).toLowerCase();
+            vb = formatDupPrimaryHdr(b).toLowerCase();
+        } else if (col === 'file_size' || col === 'bitrate_mbps') {
+            va = Number(a && a[col]) || 0;
+            vb = Number(b && b[col]) || 0;
+            return (va - vb) * dir;
+        } else {
+            va = String((a && a[col]) || '').toLowerCase();
+            vb = String((b && b[col]) || '').toLowerCase();
+        }
+        if (va < vb) return -1 * dir;
+        if (va > vb) return 1 * dir;
+        return 0;
+    });
+    return list;
+}
+
 async function toggleDuplicateMembers(groupId) {
     if (duplicateActiveGroupId && duplicateActiveGroupId === groupId) {
         duplicateActiveGroupId = '';
         duplicateMembers = [];
         duplicateSelectedPaths = new Set();
+        dupMemberSortCol = '';
         renderDuplicateGroups();
         setDuplicatesStatus(`${duplicateGroups.length} duplicate groups`);
         return;
@@ -172,6 +274,7 @@ async function loadDuplicateMembers(groupId) {
     duplicateActiveGroupId = groupId || '';
     duplicateSelectedPaths = new Set();
     duplicateMembers = [];
+    dupMemberSortCol = '';
     renderDuplicateGroups();
     setDuplicatesStatus('Loading duplicate members...');
     try {
@@ -413,10 +516,11 @@ function renderDuplicateMembersInline() {
     if (!duplicateMembers.length) {
         return '<div style="color:#888; font-size:0.9em; padding:8px 0;">Loading files...</div>';
     }
-    const allChecked = duplicateMembers.length > 0 && duplicateMembers.every(member => duplicateSelectedPaths.has(member.full_path));
+    const members = getSortedDuplicateMembers();
+    const allChecked = members.length > 0 && members.every(member => duplicateSelectedPaths.has(member.full_path));
     return `
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-            <div style="color:#9aa; font-size:0.82em;">${duplicateMembers.length} file(s) in group</div>
+            <div style="color:#9aa; font-size:0.82em;">${members.length} file(s) in group</div>
             <div>
                 <button class="btn-grey dup-action-btn" onclick="copySelectedDuplicatePaths()">Copy Selected Paths</button>
                 <button class="btn-orange dup-action-btn" onclick="rescanSelectedDuplicates()">Rescan Selected</button>
@@ -424,32 +528,41 @@ function renderDuplicateMembersInline() {
             </div>
         </div>
         <p class="dup-delete-hint">Tick row checkboxes, then Delete Selected… — a confirm dialog offers optional delete-on-disk / delete-folder.</p>
-        <table class="duplicates-table">
+        <div class="duplicates-members-scroll">
+        <table class="duplicates-table duplicates-members-table">
             <thead>
                 <tr>
                     <th><input type="checkbox" ${allChecked ? 'checked' : ''} onchange="toggleDuplicateAll(this.checked)"></th>
                     <th>Keep</th>
-                    <th>Filename</th>
-                    <th>Path</th>
-                    <th>Volume</th>
-                    <th>Size</th>
-                    <th>Res</th>
-                    <th>Codec</th>
-                    <th>Format</th>
-                    <th>Last Scanned</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('filename')">Filename${dupSortMark('member', 'filename')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('full_path')">Path${dupSortMark('member', 'full_path')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('source_vol')">Volume${dupSortMark('member', 'source_vol')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('file_size')">Size${dupSortMark('member', 'file_size')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('resolution')">Res${dupSortMark('member', 'resolution')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('bitrate_mbps')">Bitrate${dupSortMark('member', 'bitrate_mbps')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('primary_hdr')">Primary HDR${dupSortMark('member', 'primary_hdr')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('secondary_hdr')">Secondary HDR${dupSortMark('member', 'secondary_hdr')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('audio_codecs')">Audio${dupSortMark('member', 'audio_codecs')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('video_codec')">Codec${dupSortMark('member', 'video_codec')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('source_format')">Format${dupSortMark('member', 'source_format')}</th>
+                    <th class="dup-sortable" onclick="sortDuplicateMembers('last_scanned')">Last Scanned${dupSortMark('member', 'last_scanned')}</th>
                     <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
-                ${duplicateMembers.map(member => `
+                ${members.map(member => `
                     <tr>
                         <td><input type="checkbox" ${duplicateSelectedPaths.has(member.full_path) ? 'checked' : ''} onchange="toggleDuplicatePath(decodeURIComponent('${escAttr(encodeURIComponent(member.full_path || ''))}'), this.checked)"></td>
                         <td>${member.keep_recommended ? '<span class="dup-recommended">KEEP</span>' : ''}</td>
                         <td>${escHtml(member.filename || '')}</td>
-                        <td title="${escAttr(member.full_path || '')}" style="max-width:380px; word-break:break-all;">${escHtml(member.full_path || '')}</td>
+                        <td title="${escAttr(member.full_path || '')}" style="max-width:280px; word-break:break-all;">${escHtml(member.full_path || '')}</td>
                         <td>${escHtml(member.source_vol || '')}</td>
                         <td>${formatBytes(member.file_size || 0)}</td>
                         <td>${escHtml(member.resolution || '')}</td>
+                        <td>${formatDupBitrate(member.bitrate_mbps)}</td>
+                        <td>${escHtml(formatDupPrimaryHdr(member))}</td>
+                        <td>${escHtml(member.secondary_hdr || '—')}</td>
+                        <td title="${escAttr(member.audio_codecs || '')}" style="max-width:160px; word-break:break-word;">${escHtml(member.audio_codecs || '—')}</td>
                         <td>${escHtml(member.video_codec || '')}</td>
                         <td>${escHtml(member.source_format || '')}</td>
                         <td>${escHtml(member.last_scanned || '')}</td>
@@ -462,5 +575,6 @@ function renderDuplicateMembersInline() {
                 `).join('')}
             </tbody>
         </table>
+        </div>
     `;
 }

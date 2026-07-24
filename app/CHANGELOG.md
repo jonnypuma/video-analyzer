@@ -2,6 +2,20 @@
 
 All notable changes to Video Analyzer are documented here.
 
+## 3.0.12
+
+- DV FEL: try RPU extract on each video stream (real DT-DL EL may not be `v:0`); use MediaInfo `HDR_Format_Settings` (`BL+EL`/`FEL`/`MEL`) as EL fallback.
+- `debug_deep.py`: list all video streams/tracks and per-map RPU attempts so mislabeled “DT-DL FEL” HDR10-only files are obvious.
+
+## 3.0.11
+
+- NFO Rotten Tomatoes: accept `tomatometerallcritics` / audience / critic variants (not only `rottentomatoes`), prefer All → users/audience → critics, and normalize max=10 scores to 0–100.
+
+## 3.0.10
+
+- Duplicates modal: sortable group and member column headers (asc/desc).
+- Duplicate member rows now show bitrate, primary HDR (with DoVi profile/EL), secondary HDR, and audio codecs.
+
 ## 3.0.9
 
 - Duplicates modal: remove scroll-area top padding so sticky Type/Match Basis headers sit flush under the toolbar (no gap with rows showing through).

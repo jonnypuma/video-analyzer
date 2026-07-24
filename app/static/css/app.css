@@ -1088,6 +1088,11 @@
     .dup-action-btn { padding: 3px 8px; font-size: 0.78em; margin-right: 6px; }
     .dup-recommended { color: #2ecc71; font-weight: bold; }
     .dup-delete-hint { color: #888; font-size: 0.78em; margin: 0 0 8px; }
+    .dup-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+    .dup-sortable:hover { color: #ddd; }
+    .dup-sort-ind { margin-left: 4px; color: #555; font-size: 0.85em; }
+    .dup-sort-ind.active { color: #3498db; }
+    .duplicates-members-scroll { overflow-x: auto; max-width: 100%; }
 
     .health-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .health-item { background: #0f0f0f; border: 1px solid #222; border-radius: 10px; padding: 10px 12px; }

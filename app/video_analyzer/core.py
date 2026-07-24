@@ -1521,7 +1521,51 @@ def parse_kodi_nfo(nfo_path: str) -> dict:
                 return node.text.strip()
         return None
 
+    def normalize_rating_name(name: str) -> str:
+        return re.sub(r'[^a-z0-9]+', '', (name or '').lower())
+
+    def is_rotten_rating_name(name: str) -> bool:
+        n = normalize_rating_name(name)
+        return any(token in n for token in ('rottentomatoes', 'rottentomato', 'tomatometer', 'tomatometre')) or n in ('rotten', 'tomato')
+
+    def rotten_rating_priority(name: str) -> int:
+        """
+        Lower is better.
+        Prefer All (e.g. tomatometerallcritics), then users/audience, then critics, then generic.
+        """
+        n = normalize_rating_name(name)
+        has_all = 'all' in n
+        has_users = ('audience' in n) or ('user' in n)
+        has_critics = 'critic' in n
+        if has_all and has_critics:
+            return 0  # tomatometerallcritics (canonical Tomatometer)
+        if has_all and has_users:
+            return 1  # tomatometerallaudience
+        if has_all:
+            return 2
+        if has_users:
+            return 3
+        if has_critics:
+            return 4
+        return 5  # rottentomatoes / tomatometer / etc.
+
+    def normalize_rotten_value(rating_val: float, max_attr: str | None) -> float:
+        """Store RT as 0–100 when NFO uses max=10 style values (e.g. 8.2 → 82)."""
+        max_val = None
+        if max_attr:
+            try:
+                max_val = float(max_attr)
+            except ValueError:
+                max_val = None
+        if max_val and max_val > 0 and max_val <= 10 and rating_val <= max_val:
+            return round(rating_val * (100.0 / max_val), 1)
+        if max_val is None and rating_val <= 10:
+            # Common scraper quirk: percentage written on a 0–10 scale without max=
+            return round(rating_val * 10.0, 1)
+        return rating_val
+
     def apply_ratings_block(data: dict) -> None:
+        best_rotten: tuple[int, float] | None = None  # (priority, value)
         for node in root.iter():
             if node.tag.split('}')[-1].lower() != 'rating':
                 continue
@@ -1542,10 +1586,15 @@ def parse_kodi_nfo(nfo_path: str) -> dict:
                 data['tvdb_rating'] = rating_val
             elif name == 'trakt':
                 data['trakt_rating'] = rating_val
-            elif name in ('rottentomatoes', 'rotten'):
-                data['rotten_rating'] = rating_val
+            elif is_rotten_rating_name(name):
+                score = normalize_rotten_value(rating_val, node.attrib.get('max'))
+                prio = rotten_rating_priority(name)
+                if best_rotten is None or prio < best_rotten[0]:
+                    best_rotten = (prio, score)
             elif name == 'metacritic':
                 data['metacritic_rating'] = rating_val
+        if best_rotten is not None:
+            data['rotten_rating'] = best_rotten[1]
 
     tag = (root.tag or '').lower()
     data: dict[str, Any] = {}
@@ -2323,13 +2372,21 @@ def analyze_file_deep(path: str) -> dict:
                 bl_compatibility_id = str(bl_compatibility_id)
         
         # Check for enhancement layer streams (for FEL/MEL detection)
-        for stream in probe_data.get('streams', []):
-            if stream.get('codec_type') == 'video':
-                codec_name = stream.get('codec_name', '').lower()
-                # Check for enhancement layer indicators
-                if 'enhancement' in codec_name or stream.get('tags', {}).get('enhancement', ''):
-                    enhancement_layer_found = True
-                    break
+        video_streams = [s for s in probe_data.get('streams', []) if s.get('codec_type') == 'video']
+        for stream in video_streams:
+            codec_name = stream.get('codec_name', '').lower()
+            tags = stream.get('tags', {}) or {}
+            tag_blob = " ".join(str(v) for v in tags.values()).lower()
+            # Check for enhancement layer indicators (name/tags); dual HEVC alone is not enough
+            if (
+                'enhancement' in codec_name
+                or 'enhancement' in tag_blob
+                or str(tags.get('enhancement', '')).strip()
+                or 'el' == str(tags.get('title', '')).strip().lower()
+                or 'enhancement' in str(tags.get('title', '')).lower()
+            ):
+                enhancement_layer_found = True
+                break
 
         # 2. DOVI_TOOL (with caching)
         # Check cache first - use file path + size + modified time as key
@@ -2356,77 +2413,110 @@ def analyze_file_deep(path: str) -> dict:
                 rpu_size = cached.get('rpu_size', 0)
                 if DEBUG_MODE: log_debug(f"Using cached RPU data for {path}", "DEBUG")
         
-        # If not in cache, extract RPU
-        if not dovi_data:
-            # Use tempfile for safe temporary file creation
-            rpu_fd, rpu_file = tempfile.mkstemp(suffix='_rpu.bin', prefix='dovi_')
+        def _rank_dovi_info(info: dict | None, size: int) -> tuple:
+            """Prefer FEL, then any profile, then larger RPU."""
+            if not info:
+                return (0, 0, size)
+            el = str(info.get('el_type') or '').upper()
+            has_prof = 1 if info.get('dovi_profile') is not None else 0
+            fel = 2 if 'FEL' in el or el in ('F', 'FULL') else (1 if el else 0)
+            return (fel, has_prof, size)
+
+        def _extract_rpu_via_ffmpeg(video_map_index: int | None) -> tuple[dict | None, int]:
+            """Extract RPU from one video map (None = ffmpeg default video)."""
+            rpu_fd, rpu_path = tempfile.mkstemp(suffix='_rpu.bin', prefix='dovi_')
+            local_data = None
+            local_size = 0
+            p1 = None
+            p2 = None
             try:
-                os.close(rpu_fd)  # Close file descriptor, we only need the path
-                if ABORT_SCAN: raise RuntimeError("Scan Aborted")
-                # Match old version exactly: use string path with text=True
-                # Path is already normalized via os.fsencode/fsdecode in scan_file_worker
-                ffmpeg_cmd = ['ffmpeg', '-i', path, '-c:v', 'copy', '-to', '2', '-f', 'hevc', '-y', '-']
-                dovi_extract = ['dovi_tool', 'extract-rpu', '-', '-o', rpu_file]
-                
+                os.close(rpu_fd)
+                if ABORT_SCAN:
+                    raise RuntimeError("Scan Aborted")
+                ffmpeg_cmd = ['ffmpeg', '-i', path]
+                if video_map_index is not None:
+                    ffmpeg_cmd += ['-map', f'0:v:{video_map_index}']
+                ffmpeg_cmd += ['-c:v', 'copy', '-to', '2', '-f', 'hevc', '-y', '-']
+                dovi_extract = ['dovi_tool', 'extract-rpu', '-', '-o', rpu_path]
+
                 p1 = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True)
-                with proc_lock: ACTIVE_PROCS.add(p1)
-                
+                with proc_lock:
+                    ACTIVE_PROCS.add(p1)
                 p2 = subprocess.Popen(dovi_extract, stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True)
-                with proc_lock: ACTIVE_PROCS.add(p2)
-                
+                with proc_lock:
+                    ACTIVE_PROCS.add(p2)
                 p1.stdout.close()
-                # Match old version exactly - no timeout on communicate, just let it run
-                # The subprocess timeouts in run_command() handle other commands
-                # Check for abort before blocking
-                if ABORT_SCAN: raise RuntimeError("Scan Aborted")
+                if ABORT_SCAN:
+                    raise RuntimeError("Scan Aborted")
                 p2.communicate()
-                
-                with proc_lock: 
+                with proc_lock:
                     ACTIVE_PROCS.discard(p1)
                     ACTIVE_PROCS.discard(p2)
-
-                if p2.returncode == 0 and os.path.exists(rpu_file):
-                    rpu_size = os.path.getsize(rpu_file)
-                    if rpu_size > 0:
-                        rc_info, out_info, _ = run_command(['dovi_tool', 'info', '-i', rpu_file, '-f', '0'])
+                if p2.returncode == 0 and os.path.exists(rpu_path):
+                    local_size = os.path.getsize(rpu_path)
+                    if local_size > 0:
+                        rc_info, out_info, _ = run_command(['dovi_tool', 'info', '-i', rpu_path, '-f', '0'])
                         json_start = out_info.find('{')
                         if json_start != -1:
-                            dovi_data = json.loads(out_info[json_start:])
-                            
-                            # Cache the result (LRU - add to end, remove from front if needed)
-                            with rpu_cache_lock:
-                                # Limit cache size using LRU eviction
-                                if len(RPU_CACHE) >= RPU_CACHE_MAX_SIZE:
-                                    # Remove oldest entry (least recently used - first item)
-                                    oldest_key = next(iter(RPU_CACHE))
-                                    del RPU_CACHE[oldest_key]
-                                    if DEBUG_MODE: log_debug(f"RPU cache full, evicted oldest entry. Cache size: {len(RPU_CACHE)}", "DEBUG")
-                                # Add new entry at end (most recently used)
-                                RPU_CACHE[cache_key] = {'dovi_data': dovi_data, 'rpu_size': rpu_size}
-                                if DEBUG_MODE: log_debug(f"Cached RPU data for {path} (cache size: {len(RPU_CACHE)})", "DEBUG")
-            except RuntimeError as e:
-                # Don't catch RuntimeError (abort) - let it propagate
-                # Also cleanup processes if abort happens
-                with proc_lock:
-                    try:
-                        if 'p1' in locals(): ACTIVE_PROCS.discard(p1)
-                        if 'p2' in locals(): ACTIVE_PROCS.discard(p2)
-                    except:
-                        pass
-                raise
-            except (OSError, subprocess.SubprocessError) as e:
-                if DEBUG_MODE: log_debug(f"RPU extraction error for {path}: {e}", "ERROR")
+                            local_data = json.loads(out_info[json_start:])
             finally:
-                # Always cleanup RPU file, even if there was an error
-                if 'rpu_file' in locals() and os.path.exists(rpu_file):
+                with proc_lock:
+                    if p1 is not None:
+                        ACTIVE_PROCS.discard(p1)
+                    if p2 is not None:
+                        ACTIVE_PROCS.discard(p2)
+                if os.path.exists(rpu_path):
                     try:
-                        os.remove(rpu_file)
+                        os.remove(rpu_path)
                     except OSError as e:
-                        if DEBUG_MODE: log_debug(f"Failed to remove RPU file {rpu_file}: {e}", "WARNING")
+                        if DEBUG_MODE:
+                            log_debug(f"Failed to remove RPU file {rpu_path}: {e}", "WARNING")
+            return local_data, local_size
+
+        # If not in cache, extract RPU — try default then each video stream (DT-DL EL may not be v:0)
+        if not dovi_data:
+            try:
+                map_indexes: list[int | None] = [None]
+                for idx in range(len(video_streams)):
+                    if idx not in map_indexes:
+                        map_indexes.append(idx)
+                best_data = None
+                best_size = 0
+                best_rank = (-1, -1, -1)
+                for map_idx in map_indexes:
+                    if ABORT_SCAN:
+                        raise RuntimeError("Scan Aborted")
+                    cand_data, cand_size = _extract_rpu_via_ffmpeg(map_idx)
+                    rank = _rank_dovi_info(cand_data, cand_size)
+                    if rank > best_rank:
+                        best_rank = rank
+                        best_data = cand_data
+                        best_size = cand_size
+                    # Stop early on clear FEL
+                    if cand_data and 'FEL' in str(cand_data.get('el_type') or '').upper():
+                        break
+                dovi_data = best_data
+                rpu_size = best_size
+                if dovi_data:
+                    with rpu_cache_lock:
+                        if len(RPU_CACHE) >= RPU_CACHE_MAX_SIZE:
+                            oldest_key = next(iter(RPU_CACHE))
+                            del RPU_CACHE[oldest_key]
+                            if DEBUG_MODE:
+                                log_debug(f"RPU cache full, evicted oldest entry. Cache size: {len(RPU_CACHE)}", "DEBUG")
+                        RPU_CACHE[cache_key] = {'dovi_data': dovi_data, 'rpu_size': rpu_size}
+                        if DEBUG_MODE:
+                            log_debug(f"Cached RPU data for {path} (cache size: {len(RPU_CACHE)})", "DEBUG")
+            except RuntimeError:
+                raise
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as e:
+                if DEBUG_MODE:
+                    log_debug(f"RPU extraction error for {path}: {e}", "ERROR")
         
         # Store dovi_data for processing after all tests are complete
         dovi_profile_raw = None
         dovi_el_type_raw = None
+        mi_el_hint = None
         if dovi_data:
             dovi_profile_raw = str(dovi_data.get('dovi_profile'))
             # Extract EL type (FEL or MEL) - check multiple possible field names and structures
@@ -2599,7 +2689,18 @@ def analyze_file_deep(path: str) -> dict:
                                             f"Dolby Vision detected from MediaInfo fields: profile={mi_dv_profile}",
                                             "DEBUG"
                                         )
-                            
+
+                            # FEL/MEL from MediaInfo settings (e.g. "BL+EL+RPU", "FEL", "MEL")
+                            settings_u = str(hdr_settings or '').upper()
+                            if settings_u:
+                                if 'FEL' in settings_u or 'BL+EL' in settings_u:
+                                    mi_el_hint = 'FEL'
+                                elif mi_el_hint is None and (
+                                    'MEL' in settings_u
+                                    or ('BL+RPU' in settings_u and 'BL+EL' not in settings_u)
+                                ):
+                                    mi_el_hint = 'MEL'
+
                             # Check HDR_Format_Compatibility first (most reliable for hybrids)
                             if hdr_compat:
                                 compat_str = str(hdr_compat).upper()
@@ -2675,7 +2776,11 @@ def analyze_file_deep(path: str) -> dict:
             else:
                 result['dovi_profile'] = dovi_profile_raw
             
-            # Set EL type
+            # Set EL type (RPU first; MediaInfo BL+EL/FEL/MEL as fallback)
+            if not dovi_el_type_raw and mi_el_hint:
+                dovi_el_type_raw = mi_el_hint
+                if DEBUG_MODE:
+                    log_debug(f"EL type from MediaInfo HDR_Format_Settings: {mi_el_hint}", "DEBUG")
             result['dovi_el_type'] = dovi_el_type_raw
             
             if DEBUG_MODE:
@@ -5957,7 +6062,8 @@ def list_duplicate_members() -> Response:
         with get_db() as conn:
             rows = conn.execute(
                 f"""SELECT filename, full_path, source_vol, file_size, resolution, bitrate_mbps, video_codec, source_format,
-                            category, media_type, movie_title, show_title, season, episode, year, scan_error, last_scanned
+                            category, secondary_hdr, audio_codecs, profile, el_type, media_type, movie_title, show_title,
+                            season, episode, year, scan_error, last_scanned
                      FROM videos
                      WHERE {key_col}=?
                      ORDER BY
@@ -5980,6 +6086,10 @@ def list_duplicate_members() -> Response:
                     "video_codec": row['video_codec'],
                     "source_format": row['source_format'],
                     "category": row['category'],
+                    "secondary_hdr": row['secondary_hdr'],
+                    "audio_codecs": row['audio_codecs'],
+                    "profile": row['profile'],
+                    "el_type": row['el_type'],
                     "media_type": row['media_type'],
                     "movie_title": row['movie_title'],
                     "show_title": row['show_title'],
