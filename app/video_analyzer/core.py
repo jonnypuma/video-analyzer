@@ -13,6 +13,7 @@ import io
 import time
 import sys
 import glob
+import fnmatch
 import hashlib
 import signal
 import tempfile
@@ -56,7 +57,14 @@ if not os.path.exists(CHANGELOG_PATH):
     _changelog_alt = os.path.join(os.path.dirname(BASE_DIR), 'CHANGELOG.md')
     if os.path.exists(_changelog_alt):
         CHANGELOG_PATH = _changelog_alt
-VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mpeg', '.mpg', '.mov', '.ts', '.m2ts', '.webm', '.wmv'}
+VIDEO_EXTENSIONS = {
+    '.mkv', '.mp4', '.avi', '.mpeg', '.mpg', '.mov', '.ts', '.m2ts', '.webm', '.wmv',
+    # Raw / bitstream containers
+    '.obu', '.ivf', '.av1',
+    '.hevc', '.h265', '.265',
+    '.h264', '.264', '.avc',
+    '.vvc', '.h266', '.266',
+}
 SYSTEM_DIRS = {'bin', 'boot', 'dev', 'etc', 'home', 'lib', 'lib64', 'media', 'mnt', 'opt', 'proc', 'root', 'run', 'sbin', 'srv', 'sys', 'tmp', 'usr', 'var', 'app', 'defaults', 'config', 'output'}
 
 # --- CONSTANTS ---
@@ -626,6 +634,7 @@ def _compute_enriched_stats(conn: Any, where_sql: str, params: list[Any], includ
     stats['secondary_hdrs'] = _secondary_hdr_counts(conn, where_sql, params)
     stats['path_labels'], stats['path_data'] = _path_counts_for_where(conn, where_sql, params)
     stats['last_scan_time'] = PROGRESS["last_duration"]
+    stats['last_full_scan'] = PROGRESS.get("last_full_scan") or "Never"
     if include_sizes:
         stats['total_size_all'] = conn.execute("SELECT COALESCE(SUM(file_size), 0) FROM videos").fetchone()[0]
         stats['total_size_movie'] = conn.execute(
@@ -660,6 +669,7 @@ def _build_stats_sql(conn: Any, where_sql: str, params: list[Any]) -> Dict[str, 
           COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '10.1' THEN 1 ELSE 0 END), 0) AS dovi_p101,
           COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '10.4' THEN 1 ELSE 0 END), 0) AS dovi_p104,
           COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '10' THEN 1 ELSE 0 END), 0) AS dovi_p10,
+          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '20' THEN 1 ELSE 0 END), 0) AS dovi_p20,
           COALESCE(SUM(CASE WHEN {ok} AND category = 'hdr10plus' THEN 1 ELSE 0 END), 0) AS hdr10plus,
           COALESCE(SUM(CASE WHEN {ok} AND category = 'hdr10' THEN 1 ELSE 0 END), 0) AS hdr10,
           COALESCE(SUM(CASE WHEN {ok} AND category = 'hlg' THEN 1 ELSE 0 END), 0) AS hlg,
@@ -684,6 +694,7 @@ def _build_stats_sql(conn: Any, where_sql: str, params: list[Any]) -> Dict[str, 
         "dovi_p101": int(row["dovi_p101"] or 0),
         "dovi_p104": int(row["dovi_p104"] or 0),
         "dovi_p10": int(row["dovi_p10"] or 0),
+        "dovi_p20": int(row["dovi_p20"] or 0),
         "hdr10plus": int(row["hdr10plus"] or 0),
         "hdr10": int(row["hdr10"] or 0),
         "hlg": int(row["hlg"] or 0),
@@ -1218,6 +1229,19 @@ def init_db() -> None:
         
         defaults = {'threads': '4', 'skip_words': 'trailer,sample', 'min_size_mb': '50', 'refresh_interval': '60', 'notif_style': 'modal', 'force_rescan': 'false', 'column_order': '', 'scan_folders': '[]', 'scan_extras': 'false', 'debug_mode': 'false', 'remove_missing_from_db': 'true', 'duplicate_check_on_scan': 'false'}
         for k, v in defaults.items(): conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
+        # Restore last scan ribbon values so idle UI survives container restarts
+        try:
+            persisted = dict(conn.execute(
+                "SELECT key, value FROM settings WHERE key IN ('last_full_scan', 'last_duration')"
+            ).fetchall())
+            with progress_lock:
+                if persisted.get("last_full_scan"):
+                    PROGRESS["last_full_scan"] = persisted["last_full_scan"]
+                if persisted.get("last_duration"):
+                    PROGRESS["last_duration"] = persisted["last_duration"]
+        except Exception as e:
+            log_debug(f"Could not restore last scan settings: {e}", "WARNING")
 
     log_debug("Database ready.")
     
@@ -2077,6 +2101,151 @@ def extract_video_codec(filename: str, probe_data: dict) -> str | None:
         return codec_from_probe
     return codec_from_filename
 
+_DOVI_CONFIG_BOXES = {b"dvcC", b"dvvC", b"dvwC"}
+_ISOM_CONTAINER_BOXES = {
+    b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd",
+    b"udta", b"meta", b"iprp", b"ipco", b"moof", b"traf",
+    b"vexu", b"eyes",
+}
+_ISOM_CONTAINER_EXTS = {".mp4", ".mov", ".m4v", ".cmfv", ".qt"}
+
+
+def _decode_dovi_config_payload(payload: bytes) -> dict | None:
+    """Decode dvcC/dvvC/dvwC payload into profile / level / compatibility id."""
+    if len(payload) < 4:
+        return None
+    tmp = (payload[2] << 8) | payload[3]
+    profile = (tmp >> 9) & 0x7F
+    level = (tmp >> 3) & 0x3F
+    rpu = (tmp >> 2) & 0x01
+    el = (tmp >> 1) & 0x01
+    bl = tmp & 0x01
+    compat = None
+    if len(payload) >= 5:
+        compat = (payload[4] >> 4) & 0x0F
+    return {
+        "dovi_profile": str(profile),
+        "dovi_level": str(level),
+        "rpu_present": bool(rpu),
+        "el_present": bool(el),
+        "bl_present": bool(bl),
+        "bl_compatibility_id": str(compat) if compat is not None else None,
+        "dv_version_major": payload[0],
+        "dv_version_minor": payload[1],
+    }
+
+
+def _scan_buffer_for_dovi_config(buf: bytes) -> dict | None:
+    """Find and decode the first dvcC/dvvC/dvwC box inside a byte buffer."""
+    for box in _DOVI_CONFIG_BOXES:
+        idx = buf.find(box)
+        if idx < 4:
+            continue
+        size_off = idx - 4
+        nsize = int.from_bytes(buf[size_off:size_off + 4], "big")
+        if 8 <= nsize <= 64 and size_off + nsize <= len(buf):
+            payload = buf[idx + 4:size_off + nsize]
+        else:
+            payload = buf[idx + 4:idx + 4 + 24]
+        decoded = _decode_dovi_config_payload(payload)
+        if decoded:
+            decoded["box_type"] = box.decode("ascii", errors="replace")
+            return decoded
+    return None
+
+
+def parse_isom_dovi_config(path: str) -> dict | None:
+    """
+    Parse Dolby Vision config from ISOBMFF (MP4/MOV) without loading the whole file.
+
+    Looks for dvcC / dvvC / dvwC boxes. Profile 20 (MV-HEVC stereo) uses dvwC.
+    Also notes Video Extended Usage stereo signalling (vexu/eyes).
+
+    Returns:
+        Dict with dovi_profile, bl_compatibility_id, is_stereo, box_type — or None.
+    """
+    try:
+        file_size = os.path.getsize(path)
+    except OSError:
+        return None
+    if file_size < 16:
+        return None
+
+    found: dict | None = None
+    is_stereo = False
+
+    def walk(f, end: int, depth: int = 0) -> None:
+        nonlocal found, is_stereo
+        if depth > 24:
+            return
+        while f.tell() + 8 <= end:
+            start = f.tell()
+            header = f.read(8)
+            if len(header) < 8:
+                break
+            size = int.from_bytes(header[:4], "big")
+            typ = header[4:8]
+            hdr_len = 8
+            if size == 1:
+                largesize = f.read(8)
+                if len(largesize) < 8:
+                    break
+                size = int.from_bytes(largesize, "big")
+                hdr_len = 16
+            elif size == 0:
+                size = end - start
+            if size < hdr_len or start + size > end:
+                break
+            payload_start = start + hdr_len
+            payload_end = start + size
+            payload_size = payload_end - payload_start
+
+            if typ in _DOVI_CONFIG_BOXES and found is None and payload_size >= 4:
+                payload = f.read(min(payload_size, 32))
+                decoded = _decode_dovi_config_payload(payload)
+                if decoded:
+                    found = decoded
+                    found["box_type"] = typ.decode("ascii", errors="replace")
+            elif typ in (b"vexu", b"eyes"):
+                is_stereo = True
+                if typ == b"vexu" and payload_size > 0:
+                    f.seek(payload_start)
+                    walk(f, payload_end, depth + 1)
+            elif typ in _ISOM_CONTAINER_BOXES and payload_size > 0:
+                f.seek(payload_start)
+                if typ == b"stsd" and payload_size >= 8:
+                    f.read(8)
+                elif typ == b"meta" and payload_size >= 4:
+                    f.read(4)
+                walk(f, payload_end, depth + 1)
+            elif found is None and 16 < payload_size < 8192 and typ not in (b"mdat", b"free", b"skip", b"wide"):
+                # Sample entries (dvh1/hvc1/…) are not ISO containers — scan nested DOVI boxes
+                f.seek(payload_start)
+                peek = f.read(payload_size)
+                if b"vexu" in peek or b"eyes" in peek:
+                    is_stereo = True
+                decoded = _scan_buffer_for_dovi_config(peek)
+                if decoded:
+                    found = decoded
+
+            f.seek(payload_end)
+            if found is not None and is_stereo:
+                return
+
+    try:
+        with open(path, "rb") as f:
+            walk(f, file_size, 0)
+    except OSError:
+        return None
+
+    if found is None and not is_stereo:
+        return None
+    if found is None:
+        return {"is_stereo": True}
+    found["is_stereo"] = is_stereo or found.get("dovi_profile") == "20"
+    return found
+
+
 def analyze_file_deep(path: str) -> dict:
     """
     Perform deep analysis of a video file to extract metadata.
@@ -2588,7 +2757,7 @@ def analyze_file_deep(path: str) -> dict:
             Handles tokens like:
               - dvhe.08.06
               - dvav.10.01 / dva1.10.04
-              - Profile 10 / Profile 10.1
+              - Profile 10 / Profile 10.1 / Profile 20
             """
             parts = [str(v) for v in values if v]
             if not parts:
@@ -2596,12 +2765,12 @@ def analyze_file_deep(path: str) -> dict:
             text = " ".join(parts)
             lower = text.lower()
 
-            if not any(tok in lower for tok in ("dolby vision", "dovi", "dvhe", "dvh1", "dvav", "dva1")):
+            if not any(tok in lower for tok in ("dolby vision", "dovi", "dvhe", "dvh1", "dvav", "dva1", "dav1")):
                 return None
 
             # Codec/profile token format:
-            #   dvav.10.01, dva1.10.04, dvhe.08.04, dav1.10
-            m = re.search(r'(?:dv(?:he|h1|av|a1)|dav1)\.(\d{2})(?:\.(\d{2}))?', lower)
+            #   dvav.10.01, dva1.10.04, dvhe.08.04, dav1.10, dvh1.20
+            m = re.search(r'(?:dv(?:he|h1|av|a1)|dav1)\.(\d{1,2})(?:\.(\d{2}))?', lower)
             if m:
                 profile_num = str(int(m.group(1)))
                 compat_raw = m.group(2)
@@ -2613,12 +2782,12 @@ def analyze_file_deep(path: str) -> dict:
                         return f"{profile_num}.4"
                 return profile_num
 
-            # Free-form "Profile 10.1" style
+            # Free-form "Profile 10.1" / "Profile 20" style
             m = re.search(r'profile\s*([0-9]{1,2}(?:\.[0-9])?)', lower)
             if m:
                 return m.group(1)
 
-            # Filename-like "DOVI P10.1" style
+            # Filename-like "DOVI P10.1" / "DOVI P20" style
             m = re.search(r'\bdovi?\s*p?([0-9]{1,2}(?:\.[0-9])?)\b', lower)
             if m:
                 return m.group(1)
@@ -2748,6 +2917,32 @@ def analyze_file_deep(path: str) -> dict:
             if DEBUG_MODE: 
                 log_debug(f"[MEDIAINFO] Outer exception for {path}: {e}, continuing without MediaInfo data", "WARNING")
 
+        # ISOBMFF dvcC/dvvC/dvwC — authoritative delivery profile for MP4/MOV.
+        # Profile 20 RPU metadata often looks like Profile 5; trust the container box.
+        isom_dovi = None
+        try:
+            ext = pathlib.Path(path).suffix.lower()
+            if ext in _ISOM_CONTAINER_EXTS:
+                isom_dovi = parse_isom_dovi_config(path)
+        except Exception as e:
+            if DEBUG_MODE:
+                log_debug(f"[ISOM-DOVI] parse failed for {path}: {e}", "WARNING")
+            isom_dovi = None
+        if isom_dovi:
+            if isom_dovi.get("is_stereo"):
+                result["is_3d"] = 1
+            if isom_dovi.get("dovi_profile"):
+                isom_prof = str(isom_dovi["dovi_profile"])
+                if dovi_profile_raw and dovi_profile_raw != isom_prof and DEBUG_MODE:
+                    log_debug(
+                        f"ISOMBF {isom_dovi.get('box_type')} profile {isom_prof} "
+                        f"overrides prior profile {dovi_profile_raw}",
+                        "DEBUG",
+                    )
+                dovi_profile_raw = isom_prof
+            if isom_dovi.get("bl_compatibility_id") is not None:
+                bl_compatibility_id = str(isom_dovi["bl_compatibility_id"])
+
         # NOW DETERMINE FORMATS AFTER ALL TESTS (ffprobe, dovi_tool, mediainfo) ARE COMPLETE
         # Priority: DV > HDR10+ > HDR10 > HLG > SDR
         
@@ -2786,13 +2981,22 @@ def analyze_file_deep(path: str) -> dict:
                         result['dovi_profile'] = profile_prefix
             else:
                 result['dovi_profile'] = dovi_profile_raw
+
+            # Profile 20 is MV-HEVC stereoscopic Dolby Vision
+            if str(result.get('dovi_profile') or '').split('.')[0] == '20':
+                result['is_3d'] = 1
             
-            # Set EL type (RPU first; MediaInfo BL+EL/FEL/MEL as fallback)
+            # Set EL type (RPU first; MediaInfo BL+EL/FEL/MEL as fallback) — P7 only
             if not dovi_el_type_raw and mi_el_hint:
                 dovi_el_type_raw = mi_el_hint
                 if DEBUG_MODE:
                     log_debug(f"EL type from MediaInfo HDR_Format_Settings: {mi_el_hint}", "DEBUG")
-            result['dovi_el_type'] = dovi_el_type_raw
+            prof_base = str(result.get('dovi_profile') or '').split('.')[0]
+            if prof_base == '7':
+                result['dovi_el_type'] = dovi_el_type_raw
+            else:
+                # FEL/MEL are Profile 7 concepts; ignore for P5/P20/etc.
+                result['dovi_el_type'] = None
             
             if DEBUG_MODE:
                 log_debug(f"DV Profile {result['dovi_profile']}, BL_ID: {bl_id}, HLG base: {is_hlg_base}, Sec HDRs: {sec_hdrs}", "DEBUG")
@@ -3454,6 +3658,71 @@ def build_scan_paths_from_folders(scan_folders: list, target_vols: list | None, 
 
     return scan_paths, path_to_vol
 
+def parse_skip_rules(skip_tokens: list) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+    """
+    Parse IGNORE tokens into file and folder skip rules.
+
+    Prefixes:
+      (none)  file only — substring match on filename
+      /       folder only — exact name, or fnmatch if pattern contains *
+      %       file + folder — files: substring (or fnmatch if *); folders: contains (or fnmatch if *)
+
+    Returns:
+        (file_substrings, file_globs, folder_rules) where folder_rules are
+        (mode, pattern) with mode in {'exact', 'contains', 'glob'}.
+    """
+    file_subs: list[str] = []
+    file_globs: list[str] = []
+    folder_rules: list[tuple[str, str]] = []
+    for raw in skip_tokens or []:
+        tok = (raw or "").strip().lower()
+        if not tok or tok in {"/", "%"}:
+            continue
+        if tok.startswith("/"):
+            pat = tok[1:].strip()
+            if not pat:
+                continue
+            folder_rules.append(("glob" if "*" in pat else "exact", pat))
+        elif tok.startswith("%"):
+            pat = tok[1:].strip()
+            if not pat:
+                continue
+            if "*" in pat:
+                file_globs.append(pat)
+                folder_rules.append(("glob", pat))
+            else:
+                file_subs.append(pat)
+                folder_rules.append(("contains", pat))
+        else:
+            if "*" in tok:
+                file_globs.append(tok)
+            else:
+                file_subs.append(tok)
+    return file_subs, file_globs, folder_rules
+
+def folder_matches_skip_rules(dirname: str, folder_rules: list[tuple[str, str]]) -> bool:
+    """Return True if directory name should be pruned from the scan walk."""
+    if not folder_rules:
+        return False
+    name = (dirname or "").lower()
+    for mode, pat in folder_rules:
+        if mode == "exact" and name == pat:
+            return True
+        if mode == "contains" and pat in name:
+            return True
+        if mode == "glob" and fnmatch.fnmatch(name, pat):
+            return True
+    return False
+
+def file_matches_skip_rules(filename: str, file_subs: list[str], file_globs: list[str]) -> bool:
+    """Return True if filename should be skipped (IGNORE file rules)."""
+    fl = (filename or "").lower()
+    if any(s in fl for s in file_subs):
+        return True
+    if any(fnmatch.fnmatch(fl, g) for g in file_globs):
+        return True
+    return False
+
 def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: dict, 
                           skip_words: list, min_size: int, force_rescan: bool, start_time: float,
                           scan_extras: bool) -> tuple[list, set]:
@@ -3464,7 +3733,7 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
         scan_paths: List of paths to scan
         path_to_vol: Mapping of paths to volume names
         processed_map: Dictionary of already processed files
-        skip_words: List of words to skip in filenames
+        skip_words: IGNORE tokens (optional / folder-only or % file+folder prefixes)
         min_size: Minimum file size in bytes
         force_rescan: Whether to force rescan of all files
         start_time: Scan start time for progress updates
@@ -3477,6 +3746,7 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
     total_seen = 0
     last_vol_started = None
     vol_start_time = 0.0
+    file_subs, file_globs, folder_rules = parse_skip_rules(skip_words)
     
     with progress_lock:
         PROGRESS["file"] = "Scanning directories..."
@@ -3542,6 +3812,15 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
                         return False
                     dirs[:] = [d for d in dirs if not (d.lower() == 'extras' and should_skip_extras(root))]
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
+                if folder_rules:
+                    kept = []
+                    for d in dirs:
+                        if folder_matches_skip_rules(d, folder_rules):
+                            if DEBUG_MODE:
+                                log_debug(f"Skipping folder (IGNORE): {os.path.join(root, d)}", "DEBUG")
+                            continue
+                        kept.append(d)
+                    dirs[:] = kept
                 
                 for f in files:
                     wait_if_paused()
@@ -3552,9 +3831,9 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
                     total_seen += 1
                     full_p = os.path.join(root, f)
                     
-                    if any(s in f.lower() for s in skip_words):
+                    if file_matches_skip_rules(f, file_subs, file_globs):
                         if DEBUG_MODE:
-                            log_debug(f"Skipping file (skip_words): {full_p}", "DEBUG")
+                            log_debug(f"Skipping file (IGNORE): {full_p}", "DEBUG")
                         continue
                     
                     try:
@@ -4424,8 +4703,15 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
                 conditions.append(f"(LOWER({col}) LIKE ? OR LOWER(full_path) LIKE ?)")
                 params.extend([f"%{val.lower()}%", f"%{val.lower()}%"])
             elif key == 'status': 
-                if val == 'failed': conditions.append("scan_error IS NOT NULL AND scan_error != ''")
-                elif val == 'ok': conditions.append("(scan_error IS NULL OR scan_error = '')")
+                values = [v.strip().lower() for v in val.split(',') if v.strip()]
+                has_ok = 'ok' in values
+                has_failed = 'failed' in values
+                if has_ok and has_failed:
+                    pass  # both selected = no status filter
+                elif has_failed and not has_ok:
+                    conditions.append("scan_error IS NOT NULL AND scan_error != ''")
+                elif has_ok and not has_failed:
+                    conditions.append("(scan_error IS NULL OR scan_error = '')")
             elif key == 'audio':
                 values = [v.strip() for v in val.split(',') if v.strip()]
                 if blank_token in values:
@@ -4457,16 +4743,24 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
                 else:
                     conditions.append(f"LOWER({col}) = ?"); params.append(val.lower())
             elif key == 'nfo_missing':
-                val_lower = val.lower()
-                if val_lower in ('missing', 'none', '1', 'true', 'yes'):
+                values = [v.strip().lower() for v in val.split(',') if v.strip()]
+                want_missing = any(v in ('missing', 'none', '1', 'true', 'yes') for v in values)
+                want_found = any(v in ('found', '0', 'false', 'no') for v in values)
+                if want_missing and want_found:
+                    pass
+                elif want_missing:
                     conditions.append(f"{col} = 1")
-                elif val_lower in ('found', '0', 'false', 'no'):
+                elif want_found:
                     conditions.append(f"{col} = 0")
             elif key == 'missing':
-                val_lower = val.lower()
-                if val_lower in ('yes', '1', 'true', 'y'):
+                values = [v.strip().lower() for v in val.split(',') if v.strip()]
+                want_yes = any(v in ('yes', '1', 'true', 'y') for v in values)
+                want_no = any(v in ('no', '0', 'false', 'n') for v in values)
+                if want_yes and want_no:
+                    pass
+                elif want_yes:
                     conditions.append(f"{col} = 1")
-                elif val_lower in ('no', '0', 'false', 'n'):
+                elif want_no:
                     conditions.append(f"{col} = 0")
             elif ',' in val or val == blank_token:
                 # Handle multiple values (comma-separated) for any filter type, including blanks
@@ -4507,13 +4801,17 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
                 conditions.append("LOWER(secondary_hdr) = ?"); params.append(sec.lower())
     if exclude_key != 'is_hybrid':
         hyb = args.get('is_hybrid', '').strip()
-        if hyb == "1": conditions.append("is_hybrid = 1")
-        elif hyb == "0": conditions.append("is_hybrid = 0 AND category != 'sdr_only'")
+        hyb_vals = [v.strip() for v in hyb.split(',') if v.strip()]
+        if hyb_vals == ['1'] or hyb == "1":
+            conditions.append("is_hybrid = 1")
+        elif hyb_vals == ['0'] or hyb == "0":
+            conditions.append("is_hybrid = 0 AND category != 'sdr_only'")
     if exclude_key != 'source_hybrid':
         src_hyb = args.get('source_hybrid', '').strip()
-        if src_hyb == "1":
+        src_vals = [v.strip() for v in src_hyb.split(',') if v.strip()]
+        if src_vals == ['1'] or src_hyb == "1":
             conditions.append("is_source_hybrid = 1")
-        elif src_hyb == "0":
+        elif src_vals == ['0'] or src_hyb == "0":
             conditions.append("is_source_hybrid = 0")
     
     # Handle size filtering with operators
@@ -4603,9 +4901,10 @@ def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) 
     if exclude_key != 'is_3d':
         is_3d_val = args.get('is_3d', '').strip()
         if is_3d_val:
-            if is_3d_val == '1':
+            vals = [v.strip() for v in is_3d_val.split(',') if v.strip()]
+            if vals == ['1'] or is_3d_val == '1':
                 conditions.append("is_3d = 1")
-            elif is_3d_val == '0':
+            elif vals == ['0'] or is_3d_val == '0':
                 conditions.append("is_3d = 0")
     
     return " AND ".join(conditions), params
@@ -5102,8 +5401,10 @@ def _build_videos_meta_payload(args: Dict[str, Any], include_filter_options: boo
         lib_bundle = get_or_build_library_stats_bundle(conn)
         stats = lib_bundle["stats"]
         stats["last_scan_time"] = PROGRESS["last_duration"]
+        stats["last_full_scan"] = PROGRESS.get("last_full_scan") or "Never"
         stats_media_scoped = lib_bundle[media_scope_key]
         stats_media_scoped["last_scan_time"] = PROGRESS["last_duration"]
+        stats_media_scoped["last_full_scan"] = PROGRESS.get("last_full_scan") or "Never"
 
         stats_filtered = _compute_enriched_stats(conn, main_where, main_params, include_sizes=False)
 
@@ -6358,7 +6659,7 @@ def handle_settings() -> Response:
         value: Schedule value (HH:MM for daily; hours for interval;
                dow or dow|HH:MM for weekly; day or day|HH:MM for monthly)
         threads: Number of worker threads
-        skip_words: Comma-separated words to skip in filenames
+        skip_words: Comma-separated IGNORE tokens (optional / folder-only or % file+folder prefixes; * globs ok)
         min_size_mb: Minimum file size in MB
         batch_size: Database batch insert size
         And other settings...

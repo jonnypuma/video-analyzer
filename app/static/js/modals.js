@@ -408,10 +408,10 @@ async function getBulkTargetPaths() {
         try { currentFilters.el = getMultiselectValue('el-filter'); } catch(e) { currentFilters.el = ''; }
         try { currentFilters.container = getMultiselectValue('container-filter'); } catch(e) { currentFilters.container = ''; }
         try { currentFilters.media_type = getMultiselectValue('media-type-filter'); } catch(e) { currentFilters.media_type = ''; }
-        currentFilters.is_hybrid = document.getElementById('hybrid-filter-header') ? document.getElementById('hybrid-filter-header').value : '';
-        currentFilters.source_hybrid = document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '';
+        try { currentFilters.is_hybrid = getMultiselectValue('hybrid-filter'); } catch(e) { currentFilters.is_hybrid = ''; }
+        try { currentFilters.source_hybrid = getMultiselectValue('source-hybrid-filter'); } catch(e) { currentFilters.source_hybrid = ''; }
         try { currentFilters.secondary_hdr = getMultiselectValue('secondary-filter'); } catch(e) { currentFilters.secondary_hdr = ''; }
-        currentFilters.status = document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '';
+        try { currentFilters.status = getMultiselectValue('status-filter'); } catch(e) { currentFilters.status = ''; }
         try { currentFilters.resolution = getMultiselectValue('res-filter'); } catch(e) { currentFilters.resolution = ''; }
         const sizeFilter = document.getElementById('size-filter-header') ? document.getElementById('size-filter-header').value : '';
         const sizeParsed = parseFilterValue(sizeFilter);
@@ -425,7 +425,7 @@ async function getBulkTargetPaths() {
         try { currentFilters.video_source = getMultiselectValue('video-source-filter'); } catch(e) { currentFilters.video_source = ''; }
         try { currentFilters.source_format = getMultiselectValue('source-format-filter'); } catch(e) { currentFilters.source_format = ''; }
         try { currentFilters.video_codec = getMultiselectValue('video-codec-filter'); } catch(e) { currentFilters.video_codec = ''; }
-        currentFilters.is_3d = document.getElementById('is-3d-filter-header') ? document.getElementById('is-3d-filter-header').value : '';
+        try { currentFilters.is_3d = getMultiselectValue('is-3d-filter'); } catch(e) { currentFilters.is_3d = ''; }
         try { currentFilters.edition = getMultiselectValue('edition-filter'); } catch(e) { currentFilters.edition = ''; }
         try {
             const res = await fetch('/api/filter_paths', {

@@ -1014,13 +1014,14 @@ function updateSelectedRowHighlight() {
 }
 
 function selectRowByIndex(index) {
-    selectedRowIndex = index;
+    selectedRowIndex = Number(index);
     updateSelectedRowHighlight();
 }
 
 let contextMenuPath = '';
 
 function handleRowClick(evt, index, path) {
+    const rowIndex = Number(index);
     if (evt && (evt.ctrlKey || evt.metaKey)) {
         const row = evt.currentTarget;
         const chk = row ? row.querySelector('input.row-chk') : null;
@@ -1028,8 +1029,16 @@ function handleRowClick(evt, index, path) {
             chk.checked = !chk.checked;
             toggleRow(chk, path);
         }
+        selectRowByIndex(rowIndex);
+        return;
     }
-    selectRowByIndex(index);
+    // Second click on the same row clears the keyboard highlight
+    if (selectedRowIndex === rowIndex) {
+        selectedRowIndex = -1;
+        updateSelectedRowHighlight();
+        return;
+    }
+    selectRowByIndex(rowIndex);
 }
 
 function openRowContextMenu(evt, index, path) {
@@ -1624,16 +1633,18 @@ function applyStatsToUI(stats, totalItems, fullStats, mediaTypeOverride) {
     document.getElementById('stat-p5').innerText = stats.dovi_p5 || 0;
     document.getElementById('stat-p81').innerText = stats.dovi_p81 || 0;
     document.getElementById('stat-p84').innerText = stats.dovi_p84 || 0;
-    document.getElementById('stat-p10').innerText = stats.dovi_p10 || 0;
-    document.getElementById('stat-p101').innerText = stats.dovi_p101 || 0;
+    // Bare profile "10" (no compat hint) folds into P10.1 — same idea as bare P8 → chart P8.1
+    document.getElementById('stat-p101').innerText = (stats.dovi_p101 || 0) + (stats.dovi_p10 || 0);
     document.getElementById('stat-p104').innerText = stats.dovi_p104 || 0;
+    const p20El = document.getElementById('stat-p20');
+    if (p20El) p20El.innerText = stats.dovi_p20 || 0;
     document.getElementById('res-total-display').innerText = stats.total ?? 0;
     if (typeof totalItems === 'number') {
         document.getElementById('res-filtered').innerText = totalItems;
     }
-    // Only update duration from stats if not currently scanning (to avoid resetting live timer)
+    // Idle: show last scan date. During scan the live timer owns #stat-duration.
     if (!document.body.classList.contains('scanning')) {
-        document.getElementById('stat-duration').innerText = formatDuration(stats.last_scan_time || '0s');
+        setLastScanDisplay(stats.last_full_scan || 'Never');
     }
     // Total size badge: use fullStats (data.stats) which has total_size_all/movie/tv
     const badge = document.getElementById('total-size-badge');
@@ -1896,6 +1907,7 @@ async function loadData() {
                             else if (profVal === '10') profCls = 'badge-p10';
                             else if (profVal === '10.1') profCls = 'badge-p101';
                             else if (profVal === '10.4') profCls = 'badge-p104';
+                            else if (profVal === '20') profCls = 'badge-p20';
                             const profLabel = `P${profVal}`;
                             const profClick = `filterBadge('dovi', '${profVal}')`;
                             profileBadge = `<span class="badge ${profCls}" onclick="${profClick}" title="Filter: DV ${profLabel}" style="cursor:pointer">${profLabel}</span>`;

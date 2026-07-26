@@ -2,6 +2,54 @@
 
 All notable changes to Video Analyzer are documented here.
 
+## 3.0.24
+
+- Prefer ISOBMFF `dvwC`/`dvcC`/`dvvC` profile over RPU/ffprobe (fixes Profile 20 mislabeled as P5); clear FEL/MEL for non-P7.
+
+## 3.0.23
+
+- Detect Dolby Vision Profile 20 (MV-HEVC stereo) via ISOBMFF `dvwC` box; add P20 ribbon/chart; mark P20 as 3D.
+
+## 3.0.22
+
+- Drop bare P10 ribbon; fold unknown-compat profile `10` into P10.1 count, chart, and ribbon filter (like bare P8 → P8.1).
+
+## 3.0.21
+
+- IGNORE supports folder rules: `/name` (folders only), `%name` (files + folders); bare tokens stay file-only. `*` globs supported (e.g. `/*.trickplay`).
+
+## 3.0.20
+
+- Selected row accents use inset shadows so highlighting no longer changes row height.
+
+## 3.0.19
+
+- Ribbon flip: hide inactive face completely so last-scan and duration never overlap.
+
+## 3.0.18
+
+- Fix last-scan / duration ribbon flip (visibility-based, reliable in Firefox).
+- Harden row highlight toggle (numeric index compare) so a second click clears selection.
+
+## 3.0.17
+
+- Table: click a highlighted row again to clear the blue selection bar.
+- Ribbon: idle shows last scan date (`Last scan` / `12 Jul 2026`); flips to live duration while scanning.
+
+## 3.0.16
+
+- Fix filtered column header highlight: beat sticky-thead CSS so tint, bottom bar, and blue dropdown fill actually show.
+
+## 3.0.15
+
+- Table headers: columns with an active filter get a soft blue tint and bottom accent bar (`th.is-filtered`).
+
+## 3.0.14
+
+- Ribbon: active filter cards highlight with their accent color.
+- Convert Dual HDR, Hybrid, Status, NFO, Missing, and 3D column filters to checkbox multiselects (same style as other header filters).
+- Scan support for raw AV1 (`.obu`, `.ivf`, `.av1`), raw HEVC/H.264 (`.hevc`, `.h265`, `.265`, `.h264`, `.264`, `.avc`), and raw H.266/VVC (`.vvc`, `.h266`, `.266`).
+
 ## 3.0.13
 
 - DT-DL FEL: when multiple video streams exist, try RPU extract on secondary maps first (EL is usually not `v:0`); treat MediaInfo `EL+RPU` as FEL.

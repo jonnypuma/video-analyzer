@@ -388,12 +388,12 @@ function buildExportFilters(scope) {
     try { currentFilters.el = getMultiselectValue('el-filter'); } catch (e) { currentFilters.el = ''; }
     try { currentFilters.container = getMultiselectValue('container-filter'); } catch (e) { currentFilters.container = ''; }
     try { currentFilters.media_type = getMultiselectValue('media-type-filter'); } catch (e) { currentFilters.media_type = ''; }
-    currentFilters.is_hybrid = document.getElementById('hybrid-filter-header') ? document.getElementById('hybrid-filter-header').value : '';
-    currentFilters.source_hybrid = document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '';
+    try { currentFilters.is_hybrid = getMultiselectValue('hybrid-filter'); } catch (e) { currentFilters.is_hybrid = ''; }
+    try { currentFilters.source_hybrid = getMultiselectValue('source-hybrid-filter'); } catch (e) { currentFilters.source_hybrid = ''; }
     try { currentFilters.secondary_hdr = getMultiselectValue('secondary-filter'); } catch (e) { currentFilters.secondary_hdr = ''; }
-    currentFilters.status = document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '';
-    currentFilters.nfo_missing = document.getElementById('nfo-filter-header') ? document.getElementById('nfo-filter-header').value : '';
-    currentFilters.missing = document.getElementById('missing-filter-header') ? document.getElementById('missing-filter-header').value : '';
+    try { currentFilters.status = getMultiselectValue('status-filter'); } catch (e) { currentFilters.status = ''; }
+    try { currentFilters.nfo_missing = getMultiselectValue('nfo-filter'); } catch (e) { currentFilters.nfo_missing = ''; }
+    try { currentFilters.missing = getMultiselectValue('missing-filter'); } catch (e) { currentFilters.missing = ''; }
     try { currentFilters.resolution = getMultiselectValue('res-filter'); } catch (e) { currentFilters.resolution = ''; }
     const sizeFilter = document.getElementById('size-filter-header') ? document.getElementById('size-filter-header').value : '';
     const sizeParsed = parseFilterValue(sizeFilter);
@@ -602,10 +602,10 @@ async function saveFilterPreset() {
     try { currentFilters.profile = getMultiselectValue('profile-filter'); } catch(e) { currentFilters.profile = ''; }
     try { currentFilters.el = getMultiselectValue('el-filter'); } catch(e) { currentFilters.el = ''; }
     try { currentFilters.container = getMultiselectValue('container-filter'); } catch(e) { currentFilters.container = ''; }
-    currentFilters.is_hybrid = document.getElementById('hybrid-filter-header') ? document.getElementById('hybrid-filter-header').value : '';
-    currentFilters.source_hybrid = document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '';
+    try { currentFilters.is_hybrid = getMultiselectValue('hybrid-filter'); } catch(e) { currentFilters.is_hybrid = ''; }
+    try { currentFilters.source_hybrid = getMultiselectValue('source-hybrid-filter'); } catch(e) { currentFilters.source_hybrid = ''; }
     try { currentFilters.secondary_hdr = getMultiselectValue('secondary-filter'); } catch(e) { currentFilters.secondary_hdr = ''; }
-    currentFilters.status = document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '';
+    try { currentFilters.status = getMultiselectValue('status-filter'); } catch(e) { currentFilters.status = ''; }
     try { currentFilters.resolution = getMultiselectValue('res-filter'); } catch(e) { currentFilters.resolution = ''; }
     const sizeFilter = document.getElementById('size-filter-header') ? document.getElementById('size-filter-header').value : '';
     const sizeParsed = parseFilterValue(sizeFilter);
@@ -619,7 +619,7 @@ async function saveFilterPreset() {
     try { currentFilters.video_source = getMultiselectValue('video-source-filter'); } catch(e) { currentFilters.video_source = ''; }
     try { currentFilters.source_format = getMultiselectValue('source-format-filter'); } catch(e) { currentFilters.source_format = ''; }
     try { currentFilters.video_codec = getMultiselectValue('video-codec-filter'); } catch(e) { currentFilters.video_codec = ''; }
-    currentFilters.is_3d = document.getElementById('is-3d-filter-header') ? document.getElementById('is-3d-filter-header').value : '';
+    try { currentFilters.is_3d = getMultiselectValue('is-3d-filter'); } catch(e) { currentFilters.is_3d = ''; }
     try { currentFilters.edition = getMultiselectValue('edition-filter'); } catch(e) { currentFilters.edition = ''; }
     currentFilters.sort = sortCol;
     currentFilters.order = sortOrder;
@@ -670,12 +670,13 @@ async function loadFilterPreset() {
             if (filters.el) setMultiselectValue('el-filter', filters.el, true);
             if (filters.container) setMultiselectValue('container-filter', filters.container, true);
             if (filters.media_type) setMultiselectValue('media-type-filter', filters.media_type, true);
-            if (filters.is_hybrid !== undefined) document.getElementById('hybrid-filter-header').value = filters.is_hybrid;
-            if (filters.source_hybrid !== undefined) document.getElementById('source-hybrid-filter-header').value = filters.source_hybrid;
+            ensureBinaryMultiselects();
+            if (filters.is_hybrid !== undefined) setMultiselectValue('hybrid-filter', filters.is_hybrid, true);
+            if (filters.source_hybrid !== undefined) setMultiselectValue('source-hybrid-filter', filters.source_hybrid, true);
             if (filters.secondary_hdr) setMultiselectValue('secondary-filter', filters.secondary_hdr, true);
-            if (filters.status !== undefined) document.getElementById('status-filter-header').value = filters.status;
-            if (filters.nfo_missing !== undefined) document.getElementById('nfo-filter-header').value = filters.nfo_missing;
-            if (filters.missing !== undefined) document.getElementById('missing-filter-header').value = filters.missing;
+            if (filters.status !== undefined) setMultiselectValue('status-filter', filters.status, true);
+            if (filters.nfo_missing !== undefined) setMultiselectValue('nfo-filter', filters.nfo_missing, true);
+            if (filters.missing !== undefined) setMultiselectValue('missing-filter', filters.missing, true);
             if (filters.resolution) setMultiselectValue('res-filter', filters.resolution, true);
             if (filters.size_op && filters.size_val) {
                 const sizeVal = filters.size_op + filters.size_val;
@@ -689,7 +690,7 @@ async function loadFilterPreset() {
             if (filters.video_source) setMultiselectValue('video-source-filter', filters.video_source, true);
             if (filters.source_format) setMultiselectValue('source-format-filter', filters.source_format, true);
             if (filters.video_codec) setMultiselectValue('video-codec-filter', filters.video_codec, true);
-            if (filters.is_3d !== undefined) document.getElementById('is-3d-filter-header').value = filters.is_3d;
+            if (filters.is_3d !== undefined) setMultiselectValue('is-3d-filter', filters.is_3d, true);
             if (filters.edition) setMultiselectValue('edition-filter', filters.edition, true);
             if (filters.sort) sortCol = filters.sort;
             if (filters.order) sortOrder = filters.order;
