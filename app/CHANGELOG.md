@@ -2,6 +2,110 @@
 
 All notable changes to Video Analyzer are documented here.
 
+## 3.0.50
+
+- Expand README scan-ignore documentation with file, folder-only, combined, and glob examples including `.extras` and `.trickplay`.
+
+## 3.0.49
+
+- Give storage trends separate blue total-size and green duplicate-savings Y-axes so smaller savings values remain readable.
+
+## 3.0.48
+
+- Move the storage trends control to the lower-left corner of the VOLUMES card.
+
+## 3.0.47
+
+- Keep storage trends as a separate upper-left VOLUMES card control so dynamic chart-title updates cannot remove it.
+
+## 3.0.46
+
+- Force the VOLUMES heading info control to remain visible as an inline flex element with explicit stacking and overflow behavior.
+
+## 3.0.45
+
+- Restore the top hamburger’s transparent appearance and move storage-trend information beside the VOLUMES heading, where it no longer depends on doughnut chart geometry.
+
+## 3.0.44
+
+- Calculate duplicate-space savings from logical duplicate groups, matching the groups shown in the Duplicates modal instead of requiring byte-identical files.
+
+## 3.0.43
+
+- Include a live current storage/duplicate-savings point in the trends API, so the chart works immediately from existing library data before the first completed snapshot.
+
+## 3.0.42
+
+- Center the storage-trends button on the doughnut plot area rather than the full chart card, keep hover scaling anchored in place, and show an explanatory empty/error state in the trends modal.
+
+## 3.0.41
+
+- Fix dovi_tool checksum validation for release sidecar files that contain only the SHA-256 hash rather than a filename/checksum pair.
+
+## 3.0.40
+
+- Verify dovi_tool using its original release filename and checksum sidecar directly, then extract it without shell pipelines or filename rewriting.
+
+## 3.0.39
+
+- Simplify Docker checksum verification by rewriting the downloaded checksum file in place and validating it directly, avoiding shell pipeline parsing issues.
+
+## 3.0.38
+
+- Fix Docker dovi_tool checksum verification so the downloaded SHA-256 sidecar is passed to `sha256sum` with the local artifact filename.
+
+## 3.0.37
+
+- Normalize common codec spellings when evaluating quality anomalies (including H.264/AVC1).
+
+## 3.0.36
+
+- Add retained storage trend snapshots and exact-duplicate space-savings calculations, with an `i` button centered in the main doughnut chart opening a trend chart.
+
+## 3.0.35
+
+- Add conservative codec/quality anomaly detection for low-bitrate HD/UHD files, legacy 4K codecs, and unusual frame rates; expose results through `/api/anomalies`.
+
+## 3.0.34
+
+- Add named configurable scan profiles with database-backed save/load controls for common scan settings.
+
+## 3.0.33
+
+- Add “Changed Folders Only” scanning, which prunes directories whose timestamps predate the last full scan and skips missing-file cleanup for partial scans.
+
+## 3.0.32
+
+- Verify the pinned dovi_tool release against its published SHA-256 sidecar during Docker builds and use retrying pinned Chart.js downloads.
+
+## 3.0.31
+
+- Add a durable schema-migration ledger so database upgrades can be versioned and verified instead of relying only on table presence checks.
+
+## 3.0.30
+
+- Improve dashboard accessibility with a skip link, keyboard-operable progress control, live scan status, visible focus states, and menu ARIA state.
+
+## 3.0.29
+
+- Add Flask integration coverage for idle abort/pause controls and scan-start request normalization.
+
+## 3.0.28
+
+- Bound the number of queued scan futures to a small multiple of worker threads, reducing scan memory pressure and improving abort behavior on large libraries.
+
+## 3.0.27
+
+- Persist scan jobs and progress in SQLite; mark jobs interrupted after restart and expose recent jobs through `/api/scan_jobs`.
+
+## 3.0.26
+
+- Add optional `BASIC_AUTH=username:password` login protection with a polished sign-in page; leave empty to disable authentication.
+
+## 3.0.25
+
+- Scan-info label tracks in-flight files (not last-started): updates on finish/early-exit; shows count when several run in parallel.
+
 ## 3.0.24
 
 - Prefer ISOBMFF `dvwC`/`dvcC`/`dvvC` profile over RPU/ffprobe (fixes Profile 20 mislabeled as P5); clear FEL/MEL for non-P7.

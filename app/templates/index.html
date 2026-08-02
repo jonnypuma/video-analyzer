@@ -489,14 +489,27 @@
         </div>
     </div>
 
-    <div class="container">
+    <div id="storage-trend-modal" class="modal-bg" style="z-index: 700; display:none;" onclick="if(event.target===this)closeStorageTrends()">
+        <div class="report-content" style="width:min(900px, 92vw); margin:5% auto; text-align:left;">
+            <div class="details-header">
+                <h2 style="margin:0;">Storage <span style="color:#3498db;">Trends</span></h2>
+                <button class="btn-grey" type="button" onclick="closeStorageTrends()" aria-label="Close storage trends">✕</button>
+            </div>
+            <p style="color:#999;">Library size and reclaimable exact-duplicate space captured after completed scans.</p>
+            <div id="storage-trend-empty" class="storage-trend-empty" role="status" aria-live="polite"></div>
+            <div style="height:320px;"><canvas id="storageTrendChart"></canvas></div>
+        </div>
+    </div>
+
+    <a class="skip-link" href="#library-content">Skip to library</a>
+    <main class="container" id="library-content">
         <div style="display:flex; justify-content: space-between; align-items: flex-end; margin-bottom: 20px; position: relative;">
             <div style="display:flex; align-items: center; gap: 15px; position: relative; z-index: 100;">
                 <div class="app-title-wrap">
                     <h1 style="margin:0; font-weight: 300; letter-spacing: -1px;">Video <span style="font-weight: 800; color:#3498db">Analyzer</span></h1>
                     <span class="app-version-badge" title="Application version">{{ app_version_label }}</span>
                 </div>
-                <div id="btn-main-menu" class="settings-toggle" onclick="toggleMainMenu()" style="position: relative; z-index: 101;">
+                <button id="btn-main-menu" class="settings-toggle" type="button" aria-label="Open main menu" aria-expanded="false" onclick="toggleMainMenu()" style="position: relative; z-index: 101;">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
                         <g stroke-width="6.5" stroke-linecap="round">
                             <path d="M72 82.286h28.75" fill="#009100" fill-rule="evenodd" stroke="#fff" />
@@ -507,7 +520,7 @@
                             <path d="M100.75 125.143h28.75" fill="#009100" fill-rule="evenodd" stroke="#fff" />
                         </g>
                     </svg>
-                </div>
+                </button>
                 <div class="media-type-btn-group" id="media-type-btn-group">
                     <button class="media-type-btn media-type-btn-all" data-type="all" onclick="setMediaTypeButton('all')">All</button>
                     <button class="media-type-btn media-type-btn-movie inactive" data-type="movie" onclick="setMediaTypeButton('movie')">Movies</button>
@@ -516,7 +529,7 @@
                 </div>
             </div>
             <div id="scan-info-wrap">
-                <div id="scan-info-box" title="Jump to logs" onclick="scrollToConsole()">IDLE</div>
+                <div id="scan-info-box" role="status" aria-live="polite" title="Jump to logs" onclick="scrollToConsole()">IDLE</div>
                 <button id="scan-history-btn" class="btn-grey" onclick="openScanHistory()">History</button>
             </div>
         </div>
@@ -699,7 +712,7 @@
                 <button class="btn-grey" id="btn-toggle-charts" onclick="toggleCharts()">Charts ⏵</button>
             </div>
             <div class="status-stack">
-                <div id="progress-container" onclick="togglePause()"><div id="progress-bar"></div><div id="progress-text">0% COMPLETE</div><div id="progress-subtext"></div></div>
+                <div id="progress-container" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0" onclick="togglePause()" onkeydown="if(event.key==='Enter'||event.key===' ')togglePause()"><div id="progress-bar"></div><div id="progress-text">0% COMPLETE</div><div id="progress-subtext"></div></div>
                 <div class="automation-bar">
                     <div id="btn-settings-anim" class="settings-toggle" onclick="toggleConfigMode()">
                       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
@@ -748,12 +761,24 @@
                             <span style="font-size: 0.7em; color: #e67e22; font-weight: bold;">Force Rescan</span>
                         </div>
                         <div style="display:flex; align-items:center; gap:5px;">
+                            <input type="checkbox" id="chk-changed-folders" class="set-chk" style="width:16px; height:16px;">
+                            <span style="font-size: 0.7em; color: #2ecc71; font-weight: bold;" title="Only traverse folders whose directory timestamp changed since the last full scan">Changed Folders Only</span>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:5px;">
                             <input type="checkbox" id="chk-debug" class="set-chk" style="width:16px; height:16px;">
                             <span style="font-size: 0.7em; color: #e74c3c; font-weight: bold;">Debug Log</span>
                         </div>
                         <div style="display:flex; align-items:center; gap:5px;">
                             <span style="font-size: 0.7em; color: #3498db; font-weight: bold; letter-spacing: 1px; margin-left: 5px;">THREADS:</span>
                             <input type="number" id="scan-threads" value="4" min="1" max="32" style="width: 50px; text-align: center; color: #3498db; font-weight: bold;" onkeypress="if(event.key==='Enter') triggerPulse(this)">
+                        </div>
+                        <div class="scan-profile-controls" title="Save and reuse scan settings">
+                            <span class="filter-label">PROFILE:</span>
+                            <select id="scan-profile" aria-label="Scan profile" style="width:120px;">
+                                <option value="">Default</option>
+                            </select>
+                            <button class="btn-grey" type="button" onclick="loadScanProfile()">Load</button>
+                            <button class="btn-grey" type="button" onclick="saveScanProfile()">Save</button>
                         </div>
                     </div>
                     <div id="group-filters" class="filter-group hidden">
@@ -812,6 +837,7 @@
             </div>
             <div class="chart-box">
                 <div class="chart-title-overlay" id="vol-chart-title">VOLUMES</div>
+                <button class="chart-info-button chart-info-card-button" type="button" onclick="openStorageTrends()" title="Storage trends and duplicate savings" aria-label="Storage trends and duplicate savings">i</button>
                 <div class="vol-header">
                     <span>Palette:</span>
                     <select id="palette-select" onchange="updatePalette()">
@@ -1683,7 +1709,7 @@
             </div>
             <div id="debug-console"></div>
         </div>
-    </div>
+    </main>
 
     <script src="{{ url_for('static', filename='js/core.js') }}?v={{ app_version_label }}"></script>
     <script src="{{ url_for('static', filename='js/filters.js') }}?v={{ app_version_label }}"></script>

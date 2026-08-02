@@ -64,6 +64,52 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes pulse-blue { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
     .hidden { display: none !important; }
+    .skip-link {
+        position: fixed; left: 12px; top: -60px; z-index: 2000;
+        padding: 10px 14px; border-radius: 8px; color: #fff;
+        background: #3498db; transition: top .15s ease;
+    }
+    .skip-link:focus { top: 12px; }
+    .chart-info-button {
+        position: absolute; top: 50%; left: 50%; z-index: 3;
+        width: 28px; height: 28px; padding: 0; transform: translate(-50%, -50%);
+        border: 1px solid rgba(255,255,255,.35); border-radius: 50%;
+        color: #cfe8ff; background: rgba(10,10,10,.72); cursor: pointer;
+        font: italic 700 17px Georgia, serif;
+    }
+    .chart-info-button:hover {
+        transform: translate(-50%, -50%) scale(1.18);
+        filter: brightness(1.15);
+    }
+    .chart-info-inline {
+        position: relative; top: auto; left: auto; width: 22px; height: 22px;
+        transform: none; margin-left: 6px; vertical-align: middle;
+        font-size: 14px;
+    }
+    .chart-info-inline:hover { transform: scale(1.18); }
+    #vol-chart-title {
+        left: 50px; display: inline-flex; align-items: center; gap: 4px;
+        white-space: nowrap; overflow: visible;
+    }
+    #vol-chart-title .chart-info-inline {
+        display: inline-flex !important; position: static !important;
+        visibility: visible !important; opacity: 1 !important;
+        flex: 0 0 auto; z-index: 20;
+    }
+    .chart-info-card-button {
+        top: auto; bottom: 12px; left: 14px; width: 22px; height: 22px;
+        transform: none; z-index: 20; font-size: 14px;
+    }
+    .chart-info-card-button:hover { transform: scale(1.18); }
+    #btn-main-menu {
+        appearance: none; border: 0; padding: 0; color: inherit;
+        background: transparent; box-shadow: none;
+    }
+    .storage-trend-empty { min-height: 20px; color: #888; text-align: center; font-size: .85em; }
+    button:focus-visible, [tabindex="0"]:focus-visible, a:focus-visible,
+    input:focus-visible, select:focus-visible {
+        outline: 2px solid #49a8ff; outline-offset: 2px;
+    }
 
     /* --- SETTINGS INPUTS (NUCLEAR OPTION FOR ARROWS) --- */
     input[type=number]::-webkit-inner-spin-button, 

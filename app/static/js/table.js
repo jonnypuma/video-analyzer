@@ -21,6 +21,8 @@ function toggleColMenu() {
     const btn = document.querySelector('#burger-btn .settings-toggle.table-mode');
     ensureColMenuInScrollport();
     const isActive = menu.classList.toggle('active');
+    btn.setAttribute('aria-expanded', String(isActive));
+    btn.setAttribute('aria-label', isActive ? 'Close main menu' : 'Open main menu');
     if (isActive) { 
         syncColMenuPosition();
         setTimeout(() => updateColMenuPosition(), 0);

@@ -1,0 +1,96 @@
+:root {
+    color-scheme: dark;
+    --bg: #080b12;
+    --card: rgba(20, 26, 38, .88);
+    --line: rgba(255, 255, 255, .11);
+    --muted: #9aa6ba;
+    --accent: #49a8ff;
+}
+
+* { box-sizing: border-box; }
+body {
+    min-height: 100vh;
+    margin: 0;
+    color: #f4f7fb;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background:
+        radial-gradient(circle at 18% 15%, rgba(52, 152, 219, .22), transparent 33rem),
+        radial-gradient(circle at 85% 82%, rgba(108, 92, 231, .18), transparent 30rem),
+        var(--bg);
+}
+.auth-shell {
+    display: grid;
+    min-height: 100vh;
+    place-items: center;
+    padding: 24px;
+}
+.auth-card {
+    width: min(100%, 410px);
+    padding: 44px;
+    border: 1px solid var(--line);
+    border-radius: 24px;
+    background: var(--card);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, .42);
+    backdrop-filter: blur(18px);
+}
+.brand-mark {
+    display: grid;
+    width: 48px;
+    height: 48px;
+    margin-bottom: 24px;
+    place-items: center;
+    border-radius: 14px;
+    color: white;
+    font-size: 26px;
+    background: linear-gradient(135deg, #3498db, #6c5ce7);
+}
+.eyebrow {
+    margin: 0 0 8px;
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .16em;
+}
+h1 { margin: 0; font-size: 32px; letter-spacing: -.03em; }
+.subtitle { margin: 10px 0 30px; color: var(--muted); line-height: 1.5; }
+label {
+    display: block;
+    margin: 17px 0 7px;
+    color: #c9d3e2;
+    font-size: 13px;
+    font-weight: 600;
+}
+input {
+    width: 100%;
+    padding: 13px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    outline: none;
+    color: white;
+    background: rgba(0, 0, 0, .22);
+    font: inherit;
+}
+input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(73, 168, 255, .15); }
+button {
+    width: 100%;
+    margin-top: 28px;
+    padding: 13px 16px;
+    border: 0;
+    border-radius: 10px;
+    color: white;
+    background: linear-gradient(100deg, #2980b9, #526de8);
+    cursor: pointer;
+    font: 700 15px inherit;
+    transition: transform .15s ease, filter .15s ease;
+}
+button:hover { filter: brightness(1.12); transform: translateY(-1px); }
+button span { margin-left: 6px; font-size: 18px; }
+.auth-error {
+    padding: 11px 12px;
+    border: 1px solid rgba(231, 76, 60, .4);
+    border-radius: 9px;
+    color: #ffb5ad;
+    background: rgba(231, 76, 60, .12);
+    font-size: 13px;
+}
+@media (max-width: 480px) { .auth-card { padding: 32px 24px; } }

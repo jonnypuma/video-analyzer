@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in | Video Analyzer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/auth.css') }}">
+</head>
+<body>
+    <main class="auth-shell">
+        <section class="auth-card">
+            <div class="brand-mark" aria-hidden="true">◈</div>
+            <p class="eyebrow">VIDEO ANALYZER</p>
+            <h1>Welcome back</h1>
+            <p class="subtitle">Sign in to view your media intelligence dashboard.</p>
+            {% if error %}
+            <div class="auth-error" role="alert">{{ error }}</div>
+            {% endif %}
+            <form method="post">
+                <input type="hidden" name="next" value="{{ next_url }}">
+                <label for="username">Username</label>
+                <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+                <label for="password">Password</label>
+                <input id="password" name="password" type="password" autocomplete="current-password" required>
+                <button type="submit">Sign in <span aria-hidden="true">→</span></button>
+            </form>
+        </section>
+    </main>
+</body>
+</html>

@@ -21,6 +21,8 @@ services:
       - RADARR_URL=${RADARR_URL:-}
       - SONARR_API_KEY=${SONARR_API_KEY:-}
       - SONARR_URL=${SONARR_URL:-}
+      # Optional login credentials in username:password format. Leave empty to disable auth.
+      - BASIC_AUTH=${BASIC_AUTH:-}
       # When set (comma-separated container paths), disables auto-discovery of top-level mounts
       - SCAN_PATHS=${SCAN_PATHS:-}
       - APP_VERSION=${APP_VERSION:-}

@@ -62,7 +62,8 @@ async function triggerScan(targets, force, mode = scanMode) {
                 force_rescan: force,
                 debug_mode: debug,
                 scan_mode: mode,
-                scan_folder: scanFolderTarget
+                scan_folder: scanFolderTarget,
+                scan_scope: document.getElementById('chk-changed-folders')?.checked ? 'changed' : 'all'
             }) 
         }); 
         setTimeout(poll, 500); 

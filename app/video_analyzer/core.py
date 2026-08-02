@@ -26,7 +26,7 @@ import xml.etree.ElementTree as ET
 import copy
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError, wait
 from contextlib import contextmanager
 from collections import OrderedDict
 
@@ -95,15 +95,18 @@ PROGRESS = {
     "status": "idle", "current": 0, "total": 0, "file": "Waiting...", 
     "last_full_scan": "Never", "last_duration": "--",
     "scan_completed": False, "new_found": 0, "failed_count": 0, "last_duration": "0s",
-    "eta": "", "start_time": 0, "paused": False, "warning_count": 0
+    "eta": "", "start_time": 0, "paused": False, "warning_count": 0, "job_id": None
 }
 ABORT_SCAN = False
+ACTIVE_SCAN_JOB_ID: str | None = None
 PAUSE_EVENT = threading.Event()
 PAUSE_EVENT.set()
 LOG_CACHE = []
 DIAG_LOG_TS = 0.0
 API_LOG_TS = 0.0
 progress_lock = threading.Lock()
+# Paths currently being analyzed (path -> display name); drives scan-info label.
+ACTIVE_SCAN_FILES: OrderedDict[str, str] = OrderedDict()
 db_access_lock = threading.Lock()
 LOG_FILE = ""
 FAIL_FILE = ""
@@ -379,6 +382,44 @@ def record_scan_history(entry: Dict[str, Any]) -> None:
     except Exception as e:
         if DEBUG_MODE:
             log_debug(f"Failed to record scan history: {e}", "WARNING")
+
+def create_scan_job(options: Dict[str, Any]) -> str:
+    """Create a durable scan record before work begins."""
+    job_id = str(uuid.uuid4())
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO scan_jobs
+               (job_id, status, started_at, options, progress)
+               VALUES (?, 'running', ?, ?, ?)""",
+            (job_id, now, json.dumps(options), json.dumps({}))
+        )
+    return job_id
+
+def update_scan_job(job_id: str | None, status: str | None = None,
+                    progress: Dict[str, Any] | None = None) -> None:
+    """Persist the latest durable state for a running or completed scan."""
+    if not job_id:
+        return
+    try:
+        fields: list[str] = []
+        values: list[Any] = []
+        if status:
+            fields.append("status = ?")
+            values.append(status)
+        if progress is not None:
+            fields.append("progress = ?")
+            values.append(json.dumps(progress))
+        if status in {"completed", "aborted", "failed", "interrupted"}:
+            fields.append("finished_at = ?")
+            values.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if fields:
+            values.append(job_id)
+            with get_db() as conn:
+                conn.execute(f"UPDATE scan_jobs SET {', '.join(fields)} WHERE job_id = ?", values)
+    except (sqlite3.Error, TypeError, ValueError) as e:
+        if DEBUG_MODE:
+            log_debug(f"Failed to persist scan job {job_id}: {e}", "WARNING")
 
 def wait_if_paused() -> None:
     """Block worker threads while scan is paused; abort still exits immediately."""
@@ -1143,8 +1184,23 @@ def init_db() -> None:
     if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     with get_db() as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS schema_migrations
+               (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"""
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
         conn.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
         conn.execute('CREATE TABLE IF NOT EXISTS scan_history (id INTEGER PRIMARY KEY AUTOINCREMENT, entry TEXT, created_at TEXT)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS storage_snapshots
+                        (id INTEGER PRIMARY KEY AUTOINCREMENT, captured_at TEXT NOT NULL,
+                         total_bytes INTEGER NOT NULL DEFAULT 0,
+                         duplicate_savings_bytes INTEGER NOT NULL DEFAULT 0)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS scan_jobs
+                        (job_id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at TEXT,
+                         finished_at TEXT, options TEXT, progress TEXT)''')
         conn.execute('''CREATE TABLE IF NOT EXISTS videos 
                         (filename TEXT, category TEXT, profile TEXT, el_type TEXT, 
                          container TEXT, source_vol TEXT, full_path TEXT PRIMARY KEY,
@@ -1229,6 +1285,20 @@ def init_db() -> None:
         
         defaults = {'threads': '4', 'skip_words': 'trailer,sample', 'min_size_mb': '50', 'refresh_interval': '60', 'notif_style': 'modal', 'force_rescan': 'false', 'column_order': '', 'scan_folders': '[]', 'scan_extras': 'false', 'debug_mode': 'false', 'remove_missing_from_db': 'true', 'duplicate_check_on_scan': 'false'}
         for k, v in defaults.items(): conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
+        interrupted = conn.execute(
+            "SELECT job_id FROM scan_jobs WHERE status='running'"
+        ).fetchall()
+        for row in interrupted:
+            conn.execute(
+                "UPDATE scan_jobs SET status='interrupted', finished_at=? WHERE job_id=?",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row[0])
+            )
+        if interrupted:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_interrupted_scan', ?)",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)
+            )
 
         # Restore last scan ribbon values so idle UI survives container restarts
         try:
@@ -1462,6 +1532,25 @@ def compute_validation_flag(meta: dict) -> str | None:
         if season is not None or episode is not None:
             flags.append('type_missing_with_season_episode')
 
+    return ",".join(flags) if flags else None
+
+def compute_quality_anomaly_flag(meta: dict) -> str | None:
+    """Detect conservative codec/quality outliers from analyzed video metadata."""
+    flags = []
+    width = int(meta.get("width") or 0)
+    height = int(meta.get("height") or 0)
+    bitrate = float(meta.get("bitrate_mbps") or 0)
+    codec = str(meta.get("video_codec") or "").lower().replace(".", "").replace("-", "")
+    if width >= 3840 or height >= 2160:
+        if 0 < bitrate < 8:
+            flags.append("low_bitrate_4k")
+        if codec in {"h264", "avc", "avc1", "mpeg4"}:
+            flags.append("legacy_codec_4k")
+    elif width >= 1920 or height >= 1080:
+        if 0 < bitrate < 2:
+            flags.append("low_bitrate_1080p")
+    if float(meta.get("fps") or 0) > 120:
+        flags.append("unusual_frame_rate")
     return ",".join(flags) if flags else None
 
 def parse_tv_from_filename(filename_lower: str) -> tuple[str | None, int | None, int | None]:
@@ -3116,6 +3205,40 @@ def _finalize_result(res: dict) -> dict:
     res['subtitles'] = to_str(res['subtitles'])
     return res
 
+
+def _format_active_scan_label(last_completed: str | None = None) -> str:
+    """Build PROGRESS['file'] from ACTIVE_SCAN_FILES (caller must hold progress_lock)."""
+    n = len(ACTIVE_SCAN_FILES)
+    if n == 0:
+        if last_completed:
+            return f"Done: {last_completed}"
+        return PROGRESS.get("file") or "Analyzing..."
+    # Most recently started is last in OrderedDict
+    newest = next(reversed(ACTIVE_SCAN_FILES.values()))
+    if n == 1:
+        return f"Analyzing: {newest}"
+    return f"Analyzing ({n}): {newest} (+{n - 1} more)"
+
+def begin_scan_file(full_path: str, filename: str) -> None:
+    """Register a file as in-flight and refresh the scan-info label."""
+    with progress_lock:
+        ACTIVE_SCAN_FILES[full_path] = filename or os.path.basename(full_path) or full_path
+        ACTIVE_SCAN_FILES.move_to_end(full_path)
+        PROGRESS["file"] = _format_active_scan_label()
+        PROGRESS["active_count"] = len(ACTIVE_SCAN_FILES)
+
+def end_scan_file(full_path: str, filename: str | None = None) -> None:
+    """Unregister a finished file and refresh the scan-info label."""
+    with progress_lock:
+        ACTIVE_SCAN_FILES.pop(full_path, None)
+        PROGRESS["file"] = _format_active_scan_label(last_completed=filename)
+        PROGRESS["active_count"] = len(ACTIVE_SCAN_FILES)
+
+def clear_active_scan_files() -> None:
+    with progress_lock:
+        ACTIVE_SCAN_FILES.clear()
+        PROGRESS["active_count"] = 0
+
 # --- WORKER ---
 def scan_file_worker(path_obj: pathlib.Path) -> dict:
     """
@@ -3136,8 +3259,18 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
         if DEBUG_MODE:
             log_debug(f"Path encoding failed for {path_obj}, using fallback: {e}", "WARNING")
         full_path_str = str(path_obj)
-    filename = path_obj.name
-    
+        filename = path_obj.name
+    else:
+        filename = path_obj.name
+
+    begin_scan_file(full_path_str, filename)
+    try:
+        return _scan_file_worker_body(path_obj, full_path_str, filename)
+    finally:
+        end_scan_file(full_path_str, filename)
+
+def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename: str) -> dict:
+    """Inner scan worker (active-file tracking handled by scan_file_worker)."""
     # Early validation - check if file is accessible before attempting analysis
     try:
         if not os.path.exists(full_path_str):
@@ -3229,7 +3362,6 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
     container = path_obj.suffix.lower().replace('.', '')
     source_vol = path_obj.parts[1] if len(path_obj.parts) > 1 else "Unknown"
     
-    with progress_lock: PROGRESS["file"] = f"Analyzing: {filename}"
     if DEBUG_MODE: log_debug(f"Processing: {full_path_str}", "DEBUG")
     
     # Retry logic with exponential backoff for transient failures
@@ -3288,6 +3420,13 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
         "season": meta.get('season'),
         "episode": meta.get('episode')
     })
+    quality_flag = compute_quality_anomaly_flag({
+        "width": meta.get("width"), "height": meta.get("height"),
+        "bitrate_mbps": meta.get("bitrate"), "video_codec": meta.get("video_codec"),
+        "fps": meta.get("fps"),
+    })
+    if quality_flag:
+        validation_flag = ",".join(filter(None, [validation_flag, quality_flag]))
     return {
         "filename": filename, "category": meta['format'], "profile": meta['dovi_profile'],
         "el_type": meta['dovi_el_type'], "container": container, "source_vol": source_vol,
@@ -3725,7 +3864,8 @@ def file_matches_skip_rules(filename: str, file_subs: list[str], file_globs: lis
 
 def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: dict, 
                           skip_words: list, min_size: int, force_rescan: bool, start_time: float,
-                          scan_extras: bool) -> tuple[list, set]:
+                          scan_extras: bool, changed_only: bool = False,
+                          changed_after: float | None = None) -> tuple[list, set]:
     """
     Scan directories and collect files that need to be analyzed.
     
@@ -3777,6 +3917,13 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
                     log_debug(f"[ABORT] Abort detected while scanning {root}, stopping directory walk", "INFO")
                     break
                 dir_count += 1
+                if changed_only and root != path and changed_after is not None:
+                    try:
+                        if os.path.getmtime(root) <= changed_after:
+                            dirs[:] = []
+                            continue
+                    except OSError:
+                        continue
                 if dir_count <= 10 or dir_count % 100 == 0:
                     log_debug(f"[CRAWL] [{current_vol}] Traversing directory {dir_count}: {root}", "INFO")
                 # After 3s per volume or when we find files, switch from "Starting" to "Found..."
@@ -3891,6 +4038,28 @@ def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: di
     
     return files_to_scan, all_found_files
 
+def iter_bounded_scan_futures(executor: ThreadPoolExecutor, paths: list, max_inflight: int):
+    """Yield completed scan futures while bounding queued work and memory."""
+    pending = set()
+    iterator = iter(paths)
+    try:
+        for _ in range(max(1, max_inflight)):
+            try:
+                pending.add(executor.submit(scan_file_worker, next(iterator)))
+            except StopIteration:
+                break
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                yield future
+                try:
+                    pending.add(executor.submit(scan_file_worker, next(iterator)))
+                except StopIteration:
+                    pass
+    finally:
+        for future in pending:
+            future.cancel()
+
 def analyze_files(files_to_scan: list, processed_map: dict, settings: dict, 
                   final_threads: int, start_time: float) -> dict:
     """
@@ -3917,15 +4086,10 @@ def analyze_files(files_to_scan: list, processed_map: dict, settings: dict,
     duplicate_check_on_scan = str(settings.get('duplicate_check_on_scan', 'false')).lower() == 'true'
             
     with ThreadPoolExecutor(max_workers=final_threads) as executor:
-        futures = [executor.submit(scan_file_worker, m) for m in files_to_scan]
-        
-        for f in as_completed(futures):
+        for f in iter_bounded_scan_futures(executor, files_to_scan, final_threads * 2):
             wait_if_paused()
             if ABORT_SCAN:
                 log_debug("[ABORT] Abort detected in analyze_files loop, stopping file processing", "INFO")
-                # Cancel remaining futures
-                for future in futures:
-                    future.cancel()
                 break
             try:
                 res = f.result()
@@ -3992,6 +4156,14 @@ def analyze_files(files_to_scan: list, processed_map: dict, settings: dict,
                             remaining = PROGRESS["total"] - PROGRESS["current"]
                             eta_seconds = int(remaining / rate) if rate > 0 else 0
                             PROGRESS["eta"] = f"{eta_seconds}s" if eta_seconds > 0 else "calculating..."
+                        job_progress = {
+                            "current": PROGRESS.get("current", 0),
+                            "total": PROGRESS.get("total", 0),
+                            "failed": PROGRESS.get("failed_count", 0),
+                            "new": PROGRESS.get("new_found", 0),
+                            "file": PROGRESS.get("file", ""),
+                        }
+                    update_scan_job(ACTIVE_SCAN_JOB_ID, progress=job_progress)
                     global DIAG_LOG_TS
                     now = time.time()
                     if now - DIAG_LOG_TS >= 5:
@@ -4100,6 +4272,26 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
         dup_groups = conn.execute(
             "SELECT COUNT(DISTINCT dup_group_key) FROM videos WHERE COALESCE(dup_count, 0) > 1 AND dup_group_key IS NOT NULL AND dup_group_key != ''"
         ).fetchone()[0]
+        total_bytes = conn.execute(
+            "SELECT COALESCE(SUM(file_size), 0) FROM videos WHERE COALESCE(missing, 0)=0"
+        ).fetchone()[0] or 0
+        duplicate_savings = conn.execute(
+            """SELECT COALESCE(SUM(group_size - keep_size), 0) FROM (
+                 SELECT dup_group_key, SUM(file_size) AS group_size,
+                        MAX(file_size) AS keep_size
+                 FROM videos
+                 WHERE COALESCE(missing, 0)=0 AND dup_group_key IS NOT NULL
+                 GROUP BY dup_group_key HAVING COUNT(*) > 1
+               )"""
+        ).fetchone()[0] or 0
+        conn.execute(
+            "INSERT INTO storage_snapshots (captured_at, total_bytes, duplicate_savings_bytes) VALUES (?, ?, ?)",
+            (now, int(total_bytes), int(duplicate_savings))
+        )
+        conn.execute(
+            "DELETE FROM storage_snapshots WHERE id NOT IN "
+            "(SELECT id FROM storage_snapshots ORDER BY id DESC LIMIT 120)"
+        )
             
     avg_bitrate = round(metrics_sum["bitrate"] / metrics_count["bitrate"], 2) if metrics_count["bitrate"] > 0 else 0
     avg_width = round(metrics_sum["width"] / metrics_count["width"]) if metrics_count["width"] > 0 else 0
@@ -4108,6 +4300,8 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
             
     with progress_lock:
         PROGRESS.update({"last_full_scan": now, "last_duration": dur, "scan_completed": True, "status": "idle", "paused": False})
+        ACTIVE_SCAN_FILES.clear()
+        PROGRESS["active_count"] = 0
         PROGRESS["last_report"] = {
             "scanned": PROGRESS["total"],
             "new": PROGRESS["new_found"],
@@ -4140,13 +4334,20 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
             "duplicate_groups": dup_groups
         }
     record_scan_history(history_entry)
+    update_scan_job(
+        ACTIVE_SCAN_JOB_ID,
+        "completed",
+        {"current": PROGRESS["total"], "total": PROGRESS["total"],
+         "failed": PROGRESS["failed_count"], "new": PROGRESS["new_found"],
+         "duration": dur}
+    )
             
     log_debug(f"[SUCCESS] Finished: {dur}. Added: {PROGRESS['new_found']}. Errors: {PROGRESS['failed_count']}", "INFO")
 
 
 def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]] = None, 
              force_rescan: bool = False, debug: bool = False, scan_mode: str = "all",
-             scan_folder: dict | None = None) -> None:
+             scan_folder: dict | None = None, scan_scope: str = "all") -> None:
     """
     Main scan function that orchestrates the entire scanning process.
     
@@ -4162,7 +4363,8 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
     Raises:
         RuntimeError: If scan is already in progress (race condition protection).
     """
-    global PROGRESS, ABORT_SCAN, DEBUG_MODE
+    global PROGRESS, ABORT_SCAN, DEBUG_MODE, ACTIVE_SCAN_JOB_ID
+    changed_only = scan_scope == "changed"
     start_time = time.time()
     
     # Check and set status atomically to prevent race condition
@@ -4171,13 +4373,28 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
             log_debug(f"[WARNING] Attempted to start scan while already scanning! Current progress: {PROGRESS.get('current', 0)}/{PROGRESS.get('total', 0)}", "WARNING")
             return
         # Atomically set status to scanning before releasing lock
-        PROGRESS.update({"status": "scanning", "current": 0, "total": 0, "file": "Initializing...", "scan_completed": False, "new_found": 0, "removed": 0, "failed_count": 0, "warning_count": 0, "last_duration": "0s", "start_time": start_time})
+        PROGRESS.update({"status": "scanning", "current": 0, "total": 0, "file": "Initializing...", "scan_completed": False, "new_found": 0, "removed": 0, "failed_count": 0, "warning_count": 0, "last_duration": "0s", "start_time": start_time, "active_count": 0})
+        ACTIVE_SCAN_FILES.clear()
     
     ABORT_SCAN = False
     PAUSE_EVENT.set()
     with progress_lock:
         PROGRESS["paused"] = False
     DEBUG_MODE = debug
+    try:
+        ACTIVE_SCAN_JOB_ID = create_scan_job({
+            "thread_count": thread_count,
+            "target_vols": target_vols or [],
+            "force_rescan": force_rescan,
+            "scan_mode": scan_mode,
+            "scan_folder": scan_folder,
+            "scan_scope": scan_scope,
+        })
+        with progress_lock:
+            PROGRESS["job_id"] = ACTIVE_SCAN_JOB_ID
+    except sqlite3.Error as e:
+        ACTIVE_SCAN_JOB_ID = None
+        log_debug(f"Could not create durable scan job: {e}", "WARNING")
     
     # Clear RPU cache on force rescan to ensure fresh data
     if force_rescan:
@@ -4234,11 +4451,23 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
                 folder_paths, folder_map = build_scan_paths_from_folders(scan_folders, target_vols, force_rescan, scan_mode)
                 if folder_paths:
                     scan_paths, path_to_vol = folder_paths, folder_map
-        files_to_scan, all_found_files = collect_files_to_scan(scan_paths, path_to_vol, processed_map, 
-                                                               skip_words, min_size, force_rescan, start_time, scan_extras)
+        changed_after = None
+        if changed_only:
+            try:
+                prior_scan = settings.get("last_full_scan")
+                changed_after = (
+                    datetime.strptime(prior_scan, "%Y-%m-%d %H:%M:%S").timestamp()
+                    if prior_scan else 0
+                )
+            except (TypeError, ValueError, OSError):
+                changed_after = 0
+        files_to_scan, all_found_files = collect_files_to_scan(
+            scan_paths, path_to_vol, processed_map, skip_words, min_size,
+            force_rescan, start_time, scan_extras, changed_only, changed_after
+        )
         
         # Removed count only known after crawl completes (all_found_files is complete)
-        removed = count_removed_files(target_vols, scan_paths, all_found_files) if not ABORT_SCAN else 0
+        removed = count_removed_files(target_vols, scan_paths, all_found_files) if not ABORT_SCAN and not changed_only else 0
         total_found = len(all_found_files)
         with progress_lock:
             PROGRESS["removed"] = removed
@@ -4253,7 +4482,10 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
         
         if not ABORT_SCAN:
             remove_missing_from_db = str(settings.get('remove_missing_from_db', 'true')).lower() == 'true'
-            removed = cleanup_deleted_files(target_vols, scan_paths, all_found_files, remove_from_db=remove_missing_from_db)
+            if changed_only:
+                removed = 0
+            else:
+                removed = cleanup_deleted_files(target_vols, scan_paths, all_found_files, remove_from_db=remove_missing_from_db)
             with progress_lock:
                 PROGRESS["removed"] = removed
                 total_found = PROGRESS.get("total_found", PROGRESS.get("total", 0))
@@ -4276,6 +4508,8 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
             dur = f"{int(time.time() - start_time)}s"
             with progress_lock:
                 PROGRESS.update({"status": "idle", "file": "Aborted", "paused": False, "scan_completed": True, "last_duration": dur})
+                ACTIVE_SCAN_FILES.clear()
+                PROGRESS["active_count"] = 0
                 _now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 PROGRESS["last_report"] = {
                     "scanned": PROGRESS.get("current", 0),
@@ -4301,11 +4535,28 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
                 "duplicates": 0,
                 "duplicate_groups": 0
             })
+            update_scan_job(
+                ACTIVE_SCAN_JOB_ID,
+                "aborted",
+                {"current": PROGRESS.get("current", 0),
+                 "total": PROGRESS.get("total", 0),
+                 "failed": PROGRESS.get("failed_count", 0),
+                 "duration": dur}
+            )
 
     except Exception as e:
         log_debug(f"[ERROR] CRITICAL: {e}")
         import traceback; traceback.print_exc()
-        with progress_lock: PROGRESS["status"] = "idle"
+        with progress_lock:
+            PROGRESS["status"] = "idle"
+            PROGRESS["file"] = "Scan failed"
+        update_scan_job(
+            ACTIVE_SCAN_JOB_ID,
+            "failed",
+            {"current": PROGRESS.get("current", 0),
+             "total": PROGRESS.get("total", 0),
+             "error": str(e)}
+        )
 
 # --- ROUTES ---
 @bp.route('/')
@@ -4423,6 +4674,70 @@ def get_scan_history() -> Response:
         return jsonify({"status": "ok", "entries": entries})
     except Exception as e:
         log_debug(f"Failed to load scan history: {e}", "ERROR")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@bp.route('/api/scan_jobs')
+def get_scan_jobs() -> Response:
+    """Return recent durable scan jobs, including interrupted jobs after restart."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                """SELECT job_id, status, started_at, finished_at, options, progress
+                   FROM scan_jobs ORDER BY started_at DESC LIMIT 25"""
+            ).fetchall()
+        jobs = []
+        for row in rows:
+            try:
+                options = json.loads(row[4] or "{}")
+            except (TypeError, ValueError):
+                options = {}
+            try:
+                progress = json.loads(row[5] or "{}")
+            except (TypeError, ValueError):
+                progress = {}
+            jobs.append({
+                "job_id": row[0], "status": row[1], "started_at": row[2],
+                "finished_at": row[3], "options": options, "progress": progress,
+            })
+        return jsonify({"status": "ok", "jobs": jobs})
+    except sqlite3.Error as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@bp.route('/api/storage_trends')
+def get_storage_trends() -> Response:
+    """Return retained storage and duplicate-savings snapshots."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                """SELECT captured_at, total_bytes, duplicate_savings_bytes
+                   FROM storage_snapshots ORDER BY id ASC"""
+            ).fetchall()
+            total_bytes = conn.execute(
+                "SELECT COALESCE(SUM(file_size), 0) FROM videos WHERE COALESCE(missing, 0)=0"
+            ).fetchone()[0] or 0
+            duplicate_savings = conn.execute(
+                """SELECT COALESCE(SUM(group_size - keep_size), 0) FROM (
+                     SELECT dup_group_key, SUM(file_size) AS group_size,
+                            MAX(file_size) AS keep_size
+                     FROM videos
+                     WHERE COALESCE(missing, 0)=0 AND dup_group_key IS NOT NULL
+                     GROUP BY dup_group_key HAVING COUNT(*) > 1
+                   )"""
+            ).fetchone()[0] or 0
+        current = {
+            "captured_at": "Current",
+            "total_bytes": int(total_bytes),
+            "duplicate_savings_bytes": int(duplicate_savings),
+        }
+        snapshots = [
+            {"captured_at": row[0], "total_bytes": row[1],
+             "duplicate_savings_bytes": row[2]}
+            for row in rows
+        ]
+        if not snapshots or snapshots[-1] != current:
+            snapshots.append(current)
+        return jsonify({"status": "ok", "snapshots": snapshots})
+    except sqlite3.Error as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @bp.route('/download_log')
@@ -6706,6 +7021,67 @@ def handle_settings() -> Response:
         with get_db() as conn: res = dict(conn.execute("SELECT key, value FROM settings").fetchall())
         return jsonify(res)
 
+@bp.route('/api/scan_profiles', methods=['GET', 'POST', 'DELETE'])
+def handle_scan_profiles() -> Response:
+    """Manage named scan setting presets stored in the application database."""
+    try:
+        with get_db() as conn:
+            raw = conn.execute(
+                "SELECT value FROM settings WHERE key='scan_profiles'"
+            ).fetchone()
+            try:
+                profiles = json.loads(raw[0]) if raw and raw[0] else []
+            except (TypeError, ValueError):
+                profiles = []
+            if not isinstance(profiles, list):
+                profiles = []
+
+            if request.method == "GET":
+                return jsonify({"status": "ok", "profiles": profiles})
+
+            payload = request.get_json(silent=True) or {}
+            name = str(payload.get("name") or "").strip()
+            if not name or len(name) > 64:
+                return jsonify({"status": "error", "message": "A profile name is required"}), 400
+            if request.method == "DELETE":
+                profiles = [p for p in profiles if p.get("name") != name]
+            else:
+                values = payload.get("settings") or {}
+                if not isinstance(values, dict):
+                    return jsonify({"status": "error", "message": "Invalid profile settings"}), 400
+                profile = {"name": name, "settings": values}
+                profiles = [p for p in profiles if p.get("name") != name]
+                profiles.append(profile)
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_profiles', ?)",
+                (json.dumps(profiles),)
+            )
+            return jsonify({"status": "ok", "profiles": profiles})
+    except (sqlite3.Error, TypeError, ValueError) as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@bp.route('/api/anomalies')
+def get_quality_anomalies() -> Response:
+    """Return analyzed titles with codec/quality anomaly flags."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                """SELECT full_path, filename, resolution, bitrate_mbps, video_codec,
+                          validation_flag
+                   FROM videos
+                   WHERE validation_flag LIKE '%bitrate_%'
+                      OR validation_flag LIKE '%legacy_codec_%'
+                      OR validation_flag LIKE '%frame_rate%'
+                   ORDER BY filename COLLATE NOCASE"""
+            ).fetchall()
+        return jsonify({"status": "ok", "anomalies": [
+            {"full_path": r[0], "filename": r[1], "resolution": r[2],
+             "bitrate_mbps": r[3], "video_codec": r[4], "flags": r[5]}
+            for r in rows
+        ]})
+    except sqlite3.Error as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @bp.route('/api/nfo_content', methods=['GET'])
 def get_nfo_content() -> Response:
@@ -6914,8 +7290,15 @@ def start() -> Tuple[Response, int] | Response:
     scan_mode = (request.json.get('scan_mode') or 'all').lower()
     if scan_mode not in ('all', 'tv', 'movie'):
         scan_mode = 'all'
+    scan_scope = (request.json.get('scan_scope') or 'all').lower()
+    if scan_scope not in ('all', 'changed'):
+        scan_scope = 'all'
     scan_folder = request.json.get('scan_folder')
-    threading.Thread(target=run_scan, args=(threads, targets, force, debug, scan_mode, scan_folder), daemon=True).start()
+    threading.Thread(
+        target=run_scan,
+        args=(threads, targets, force, debug, scan_mode, scan_folder, scan_scope),
+        daemon=True
+    ).start()
     return jsonify({"status": "started"})
 
 @bp.route('/abort', methods=['POST'])

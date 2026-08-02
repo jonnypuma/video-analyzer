@@ -4,8 +4,6 @@ Video analyzer and library for HDR content with deep metadata extraction, flexib
 
 See `CHANGELOG.md` for release notes and notable changes.
 
-<img width="2518" height="1029" alt="image" src="https://github.com/user-attachments/assets/f928c301-6533-4e12-ac81-cd9a968dd44d" />
-
 ---
 
 ## 🚀 Key Features
@@ -222,6 +220,30 @@ Example:
 /media/Movies/.scanignore
 ```
 Any folder with `.scanignore` is skipped.
+
+### Scan Ignore Rules
+The **IGNORE** setting is a comma-separated, case-insensitive list. Rules apply while crawling a scan:
+
+| Rule | Matches | Example |
+|------|---------|---------|
+| `name` | Files whose filename contains `name` | `sample,trailer,.extras` |
+| `*.pattern` | Files matching a filename glob | `*.trickplay,*.nfo` |
+| `/name` | Folders whose name is exactly `name` | `/extras,/.extras` |
+| `/*.pattern` | Folders matching a folder-name glob | `/*.trickplay,/.cache*` |
+| `%name` | Files and folders containing `name` | `%sample,%extras` |
+| `%*.pattern` | Files and folders matching a glob | `%*.trickplay` |
+
+Examples:
+
+```text
+sample,trailer,.extras,*.trickplay,/.extras,/*.trickplay,%cache
+```
+
+This skips sample/trailer files, filenames containing `.extras`, files ending in
+`.trickplay`, the exact `.extras` folder, folders ending in `.trickplay`, and
+anything containing `cache`. A bare token such as `.extras` applies to files
+only; prefix it with `/` to target a folder. Use `%` only when both files and
+folders should match.
 
 ### Scan Button
 - Split scan button: **All**, **TV**, **Movie**.

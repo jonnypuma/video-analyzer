@@ -1,4 +1,61 @@
 // --- CHART LOGIC ---
+let storageTrendChart = null;
+
+async function openStorageTrends() {
+    const modal = document.getElementById('storage-trend-modal');
+    const canvas = document.getElementById('storageTrendChart');
+    const empty = document.getElementById('storage-trend-empty');
+    if (!modal || !canvas) return;
+    modal.style.display = 'block';
+    try {
+        const response = await fetch('/api/storage_trends');
+        if (!response.ok) throw new Error(`Storage trends request failed (${response.status})`);
+        const data = await response.json();
+        if (storageTrendChart) storageTrendChart.destroy();
+        const snapshots = data.snapshots || [];
+        if (empty) {
+            empty.textContent = snapshots.length
+                ? ''
+                : 'No completed scan snapshots yet. Finish a scan to begin this history.';
+        }
+        storageTrendChart = new Chart(canvas, {
+            type: 'line',
+            data: {
+                labels: snapshots.map(item => item.captured_at),
+                datasets: [
+                    {label: 'Library size', data: snapshots.map(item => item.total_bytes / 1073741824), borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,.15)', fill: true, tension: .25, yAxisID: 'yTotal'},
+                    {label: 'Duplicate savings', data: snapshots.map(item => item.duplicate_savings_bytes / 1073741824), borderColor: '#2ecc71', backgroundColor: 'transparent', tension: .25, yAxisID: 'ySavings'}
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    yTotal: {
+                        type: 'linear', position: 'left', beginAtZero: true,
+                        title: {display: true, text: 'Total size (GB)', color: '#3498db'},
+                        grid: {color: '#222'}, ticks: {color: '#3498db'}
+                    },
+                    ySavings: {
+                        type: 'linear', position: 'right', beginAtZero: true,
+                        title: {display: true, text: 'Duplicate savings (GB)', color: '#2ecc71'},
+                        grid: {drawOnChartArea: false}, ticks: {color: '#2ecc71'}
+                    },
+                    x: {ticks: {color: '#aaa'}}
+                },
+                plugins: {legend: {labels: {color: '#fff'}}}
+            }
+        });
+    } catch (error) {
+        console.error('Failed to load storage trends', error);
+        if (empty) empty.textContent = 'Storage trend data is currently unavailable.';
+    }
+}
+
+function closeStorageTrends() {
+    const modal = document.getElementById('storage-trend-modal');
+    if (modal) modal.style.display = 'none';
+}
+
 function updateCharts(statsTotal, statsFiltered, filterOpts) {
     const stats = chartMode === 'filtered' && statsFiltered ? statsFiltered : statsTotal;
     if (!stats || !stats.vol_labels) return;
@@ -106,6 +163,7 @@ function updateCharts(statsTotal, statsFiltered, filterOpts) {
         }
     });
 }
+
 
 function updateFilterDropdowns(opts) {
     if (!opts) return;

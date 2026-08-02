@@ -11,9 +11,14 @@ RUN set -eux; \
       arm64) DOVI_ARCH=aarch64-unknown-linux-musl ;; \
       *) echo "Unsupported TARGETARCH=${TARGETARCH} (need amd64 or arm64)" >&2; exit 1 ;; \
     esac; \
-    curl -fL -o dovi_tool.tar.gz \
+    curl -fL -o "dovi_tool-2.1.2-${DOVI_ARCH}.tar.gz" \
       "https://github.com/quietvoid/dovi_tool/releases/download/2.1.2/dovi_tool-2.1.2-${DOVI_ARCH}.tar.gz"; \
-    tar -xzf dovi_tool.tar.gz; \
+    curl -fL -o "dovi_tool-2.1.2-${DOVI_ARCH}.tar.gz.sha256" \
+      "https://github.com/quietvoid/dovi_tool/releases/download/2.1.2/dovi_tool-2.1.2-${DOVI_ARCH}.tar.gz.sha256"; \
+    sha256sum "dovi_tool-2.1.2-${DOVI_ARCH}.tar.gz" > actual.sha256; \
+    sed -i 's/[[:space:]].*//' actual.sha256; \
+    cmp -s actual.sha256 "dovi_tool-2.1.2-${DOVI_ARCH}.tar.gz.sha256"; \
+    tar -xzf "dovi_tool-2.1.2-${DOVI_ARCH}.tar.gz"; \
     chmod +x dovi_tool; \
     mv dovi_tool /usr/local/bin/
 
@@ -40,7 +45,9 @@ RUN mkdir -p static
 
 # Pin Chart.js so builds are reproducible (was unpinned CDN latest).
 ARG CHART_JS_VERSION=4.4.8
-RUN python -c "import urllib.request; urllib.request.urlretrieve('https://cdn.jsdelivr.net/npm/chart.js@${CHART_JS_VERSION}/dist/chart.umd.min.js', 'static/chart.js')"
+RUN curl -fsSL --retry 3 \
+    "https://cdn.jsdelivr.net/npm/chart.js@${CHART_JS_VERSION}/dist/chart.umd.min.js" \
+    -o static/chart.js
 
 # Python deps from lockfile-style pin list
 COPY requirements.txt .

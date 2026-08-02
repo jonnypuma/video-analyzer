@@ -79,6 +79,7 @@ async function updateSettingsUI() {
                 }
             }
             updateScanButtonLabel();
+            updateScanProfiles();
             
             // Never auto-calc - only user can change widths via manual resize or Reset
             toggleSchedInput();
@@ -154,6 +155,65 @@ async function saveSettings(animateButton = true) {
         setTimeout(updateLogs, 500);
         return false;
     }
+}
+
+async function updateScanProfiles() {
+    const select = document.getElementById('scan-profile');
+    if (!select) return;
+    try {
+        const response = await fetch('/api/scan_profiles');
+        const data = await response.json();
+        select.innerHTML = '<option value="">Default</option>';
+        (data.profiles || []).forEach(profile => {
+            const option = document.createElement('option');
+            option.value = profile.name;
+            option.textContent = profile.name;
+            option.dataset.settings = JSON.stringify(profile.settings || {});
+            select.appendChild(option);
+        });
+    } catch (e) { console.error('Failed to load scan profiles', e); }
+}
+
+function currentScanProfileSettings() {
+    return {
+        threads: document.getElementById('scan-threads')?.value,
+        skip_words: document.getElementById('skip-words')?.value,
+        min_size_mb: document.getElementById('min-size')?.value,
+        scan_extras: document.getElementById('chk-scan-extras')?.checked || false,
+        remove_missing_from_db: document.getElementById('chk-remove-missing')?.checked ?? true,
+        duplicate_check_on_scan: document.getElementById('chk-dup-check-scan')?.checked || false
+    };
+}
+
+async function saveScanProfile() {
+    const name = window.prompt('Profile name');
+    if (!name || !name.trim()) return;
+    const response = await fetch('/api/scan_profiles', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name.trim(), settings: currentScanProfileSettings()})
+    });
+    if (response.ok) {
+        await updateScanProfiles();
+        document.getElementById('scan-profile').value = name.trim();
+        showToast('Scan profile saved');
+    }
+}
+
+function loadScanProfile() {
+    const option = document.getElementById('scan-profile')?.selectedOptions[0];
+    if (!option || !option.value) return;
+    try {
+        const settings = JSON.parse(option.dataset.settings || '{}');
+        if (settings.threads) document.getElementById('scan-threads').value = settings.threads;
+        if (settings.skip_words !== undefined) document.getElementById('skip-words').value = settings.skip_words;
+        if (settings.min_size_mb !== undefined) document.getElementById('min-size').value = settings.min_size_mb;
+        ['scan_extras', 'remove_missing_from_db', 'duplicate_check_on_scan'].forEach(key => {
+            const id = {scan_extras:'chk-scan-extras', remove_missing_from_db:'chk-remove-missing', duplicate_check_on_scan:'chk-dup-check-scan'}[key];
+            if (settings[key] !== undefined) document.getElementById(id).checked = Boolean(settings[key]);
+        });
+        showToast('Scan profile loaded');
+    } catch (e) { console.error('Invalid scan profile', e); }
 }
 
 async function updateLogs() {
