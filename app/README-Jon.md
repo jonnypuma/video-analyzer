@@ -214,6 +214,11 @@ Editable fields saved on modal close:
 - **Mute** keeps a folder in the list but skips it during scans.
 - Any folder containing an empty `.scanignore` file is skipped (including all subfolders).
 - If no scan folders are configured, scans default to all mounted volumes.
+- **IGNORE** setting (comma-separated):
+  - `sample` — skip **files** whose names contain `sample`
+  - `/extrathumbs` — skip **folders** named `extrathumbs` (exact; use `/*.trickplay` for globs)
+  - `%sample` — skip **files and folders** matching `sample` (files: substring; folders: name contains `sample`)
+  - Dot-folders (`.chapters`, `.actors`, …) are always skipped; **Scan Extras** still controls `extras` folders
 
 Example:
 ```

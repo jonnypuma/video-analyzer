@@ -1,0 +1,34 @@
+---
+
+services:
+
+  video-analyzer:
+    build: ./app
+    container_name: video-analyzer
+    image: video-analyzer
+    restart: unless-stopped
+    ports:
+      - "6002:6002"
+    volumes:
+#      - /your/share1:/server1/movies:ro
+#      - /your/share2:/server2/tv:ro
+#      - /your/share3:/server3/movies:ro
+      - ./app/results:/output
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=${TZ:-UTC}
+      - RADARR_API_KEY=${RADARR_API_KEY:-}
+      - RADARR_URL=${RADARR_URL:-}
+      - SONARR_API_KEY=${SONARR_API_KEY:-}
+      - SONARR_URL=${SONARR_URL:-}
+      # Optional login credentials in username:password format. Leave empty to disable auth.
+      - BASIC_AUTH=${BASIC_AUTH:-}
+      # When set (comma-separated container paths), disables auto-discovery of top-level mounts
+      - SCAN_PATHS=${SCAN_PATHS:-}
+      - APP_VERSION=${APP_VERSION:-}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6002/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s

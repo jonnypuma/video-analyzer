@@ -47,7 +47,7 @@ let chartMode = 'total';
 let barChartMode = 'volumes';
 let settingsLoaded = false;
 let settingsLoading = false;
-let activeFilters = { search: '', category: '', volume: '', profile: '', el: '', container: '', is_hybrid: '', source_hybrid: '', secondary_hdr: '', status: '', resolution: '', size_op: '', size_val: '', bit_op: '', bit_val: '', audio: '', media_type: '', nfo_missing: '', missing: '', is_3d: '' };
+let activeFilters = { search: '', category: '', volume: '', profile: '', el: '', container: '', is_hybrid: '', source_hybrid: '', secondary_hdr: '', status: '', resolution: '', size_op: '', size_val: '', bit_op: '', bit_val: '', audio: '', media_type: '', nfo_missing: '' };
 let isLoading = false;
 let pendingReload = false;
 let isClearingFilters = false; // Flag to prevent loadData() during clearFilters
@@ -135,23 +135,6 @@ function formatDuration(raw) {
     const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
     return [h, m, s].map(v => v < 10 ? "0" + v : v).join(":");
-}
-
-const LAST_SCAN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-/** Format server last_full_scan ("YYYY-MM-DD HH:MM:SS" or Never) as "12 Jul 2026". */
-function formatLastScanDate(raw) {
-    if (!raw || raw === 'Never' || raw === '--') return 'Never';
-    const m = String(raw).match(/^(\d{4})-(\d{2})-(\d{2})/);
-    if (!m) return String(raw);
-    const day = parseInt(m[3], 10);
-    const month = LAST_SCAN_MONTHS[parseInt(m[2], 10) - 1] || m[2];
-    return `${day} ${month} ${m[1]}`;
-}
-
-function setLastScanDisplay(raw) {
-    const el = document.getElementById('stat-last-scan');
-    if (el) el.innerText = formatLastScanDate(raw);
 }
 
 function formatSize(bytes) {

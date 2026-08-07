@@ -46,6 +46,8 @@ async function confirmScan(fromModal = false, mode = scanMode) {
 async function triggerScan(targets, force, mode = scanMode) {
     document.body.classList.add('scanning');
     document.getElementById('scan-info-box').innerHTML = `STARTING <div class="spinner"></div>`;
+    const durEl = document.getElementById('stat-duration');
+    if (durEl) durEl.innerText = formatDuration(0);
     const debug = document.getElementById('chk-debug').checked;
     // Initialize scanStartTime immediately to start timer right away
     scanStartTime = Date.now() / 1000;
@@ -227,6 +229,7 @@ async function poll() {
                 scanStartTime = 0; // Reset timer when scan completes
                 lastFilterUpdate = 0; // Reset filter update timer
                 document.getElementById('scan-info-box').innerText = "IDLE";
+                if (data.last_full_scan) setLastScanDisplay(data.last_full_scan);
                 const btn = document.getElementById('btn-abort');
                 if(btn) { btn.disabled = false; btn.innerText = "Abort Scan"; }
                 loadData(); 

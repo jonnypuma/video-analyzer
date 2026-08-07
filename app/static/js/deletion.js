@@ -237,10 +237,10 @@ async function confirmDelete() {
         el: getMultiselectValue('el-filter'),
         container: getMultiselectValue('container-filter'),
         media_type: getMultiselectValue('media-type-filter'),
-        is_hybrid: getMultiselectValue('hybrid-filter'),
-        source_hybrid: getMultiselectValue('source-hybrid-filter'),
+        is_hybrid: document.getElementById('hybrid-filter-header') ? document.getElementById('hybrid-filter-header').value : '',
+        source_hybrid: document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '',
         secondary_hdr: getMultiselectValue('secondary-filter'),
-        status: getMultiselectValue('status-filter'),
+        status: document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '',
         resolution: getMultiselectValue('res-filter'),
         size_op: (() => {
             const val = document.getElementById('size-filter-header') ? document.getElementById('size-filter-header').value : '';
@@ -262,7 +262,7 @@ async function confirmDelete() {
             const parsed = parseFilterValue(val);
             return parsed.value;
         })(),
-        audio: getMultiselectValue('audio-filter'),
+        audio: document.getElementById('audio-filter-header') ? document.getElementById('audio-filter-header').value : '',
         sort: sortCol,
         order: sortOrder
     };

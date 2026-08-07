@@ -2,11 +2,6 @@
 
 All notable changes to Video Analyzer are documented here.
 
-<<<<<<< Updated upstream
-=======
-<<<<<<< HEAD
-=======
->>>>>>> Stashed changes
 ## 3.0.50
 
 - Expand README scan-ignore documentation with file, folder-only, combined, and glob examples including `.extras` and `.trickplay`.
@@ -159,7 +154,6 @@ All notable changes to Video Analyzer are documented here.
 - Convert Dual HDR, Hybrid, Status, NFO, Missing, and 3D column filters to checkbox multiselects (same style as other header filters).
 - Scan support for raw AV1 (`.obu`, `.ivf`, `.av1`), raw HEVC/H.264 (`.hevc`, `.h265`, `.265`, `.h264`, `.264`, `.avc`), and raw H.266/VVC (`.vvc`, `.h266`, `.266`).
 
->>>>>>> 36c746e2294d8d14cc7c82658e797c6e61a42eee
 ## 3.0.13
 
 - DT-DL FEL: when multiple video streams exist, try RPU extract on secondary maps first (EL is usually not `v:0`); treat MediaInfo `EL+RPU` as FEL.
