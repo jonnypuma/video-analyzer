@@ -1,0 +1,72 @@
+"""Compatibility barrel: HTTP handlers live in named route modules."""
+from __future__ import annotations
+
+from video_analyzer.routes.health import (  # noqa: F401
+    index,
+    health_check,
+    api_bad_request,
+    api_not_found,
+    api_internal_error,
+    get_logs,
+    log_client_error,
+    download_log,
+    download_failures,
+    get_failures,
+)
+from video_analyzer.routes.scan import (  # noqa: F401
+    get_scan_history,
+    get_scan_jobs,
+    get_storage_trends,
+    pre_scan_check,
+    start,
+    abort,
+    toggle_pause,
+    get_progress,
+    clear_completed,
+    rescan_file,
+    rescan_files,
+    debug_deep_file,
+    backfill_metadata,
+    _RESCAN_FILES_MAX_BATCH,
+)
+from video_analyzer.routes.videos import (  # noqa: F401
+    download_csv,
+    download_json,
+    _build_videos_meta_payload,
+    get_videos,
+    get_videos_meta,
+    filter_paths,
+    update_media_type,
+    update_metadata,
+    bulk_update_metadata,
+    get_quality_anomalies,
+    get_nfo_content,
+    browse_volume,
+    update_validation_flag_for_path,
+)
+from video_analyzer.routes.settings import (  # noqa: F401
+    backup_database,
+    _zip_member_path_is_safe,
+    _validate_restore_zip_members,
+    _write_zip_member_to_path,
+    restore_database,
+    get_filter_presets,
+    save_filter_preset,
+    delete_filter_preset,
+    handle_settings,
+    handle_scan_profiles,
+    arr_search_replace,
+    arr_status,
+    cleanup_db,
+    cleanup_db_preview,
+    db_maintenance,
+    _RESTORE_ALLOWED_BASENAMES,
+)
+from video_analyzer.routes.duplicates import (  # noqa: F401
+    parse_duplicate_group_info,
+    rebuild_duplicates,
+    list_duplicate_groups,
+    list_duplicate_members,
+    delete_files,
+    delete_preview,
+)

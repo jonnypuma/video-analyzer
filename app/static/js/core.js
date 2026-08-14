@@ -47,7 +47,7 @@ let chartMode = 'total';
 let barChartMode = 'volumes';
 let settingsLoaded = false;
 let settingsLoading = false;
-let activeFilters = { search: '', category: '', volume: '', profile: '', el: '', container: '', is_hybrid: '', source_hybrid: '', secondary_hdr: '', status: '', resolution: '', size_op: '', size_val: '', bit_op: '', bit_val: '', audio: '', media_type: '', nfo_missing: '' };
+let activeFilters = { search: '', category: '', volume: '', profile: '', el: '', container: '', is_hybrid: '', source_hybrid: '', secondary_hdr: '', status: '', resolution: '', size_op: '', size_val: '', bit_op: '', bit_val: '', audio: '', media_type: '', nfo_missing: '', missing: '', anomaly: '', is_3d: '' };
 let isLoading = false;
 let pendingReload = false;
 let isClearingFilters = false; // Flag to prevent loadData() during clearFilters
@@ -74,6 +74,76 @@ let dupGroupSortCol = 'file_count';
 let dupGroupSortOrder = 'desc';
 let dupMemberSortCol = '';
 let dupMemberSortOrder = 'desc';
+
+// --- CSRF: send token on mutating fetch calls ---
+(function wrapFetchWithCsrf() {
+    const originalFetch = window.fetch.bind(window);
+    const mutating = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+    function readCsrfToken() {
+        const meta = document.querySelector('meta[name="csrf-token"]');
+        return (meta && meta.getAttribute('content')) || window.CSRF_TOKEN || '';
+    }
+    function writeCsrfToken(token) {
+        if (!token) return;
+        window.CSRF_TOKEN = token;
+        let meta = document.querySelector('meta[name="csrf-token"]');
+        if (!meta) {
+            meta = document.createElement('meta');
+            meta.setAttribute('name', 'csrf-token');
+            document.head.appendChild(meta);
+        }
+        meta.setAttribute('content', token);
+    }
+    function captureCsrfToken(res) {
+        if (!res || !res.headers || typeof res.headers.get !== 'function') return;
+        const token = res.headers.get('X-CSRF-Token') || res.headers.get('X-CSRFToken');
+        if (token) writeCsrfToken(token);
+    }
+    function resolveMethod(input, init) {
+        if (init && init.method) return String(init.method).toUpperCase();
+        if (typeof Request !== 'undefined' && input instanceof Request) {
+            return String(input.method || 'GET').toUpperCase();
+        }
+        return 'GET';
+    }
+    function attachCsrf(init) {
+        const token = readCsrfToken();
+        const headers = new Headers(init.headers || {});
+        if (token) {
+            headers.set('X-CSRF-Token', token);
+        }
+        init.headers = headers;
+        if (init.credentials == null) init.credentials = 'same-origin';
+    }
+
+    window.getCsrfToken = readCsrfToken;
+
+    window.fetch = async function (input, init) {
+        init = init ? { ...init } : {};
+        const method = resolveMethod(input, init);
+        if (mutating.has(method)) attachCsrf(init);
+        let res = await originalFetch(input, init);
+        captureCsrfToken(res);
+        if (res.status === 403 && mutating.has(method)) {
+            let csrfReject = true;
+            try {
+                const body = await res.clone().json();
+                csrfReject = !body || body.message === 'Invalid CSRF token';
+            } catch (e) { /* retry once if the 403 body is not JSON */ }
+            if (csrfReject) {
+                try {
+                    const probe = await originalFetch('/api/health', { credentials: 'same-origin' });
+                    captureCsrfToken(probe);
+                } catch (e) { /* keep original 403 if refresh fails */ }
+                attachCsrf(init);
+                res = await originalFetch(input, init);
+                captureCsrfToken(res);
+            }
+        }
+        return res;
+    };
+})();
 
 // Color generation function - generates distinct colors using HSL color space
 function generateColors(count, paletteStyle = 'vibrant') {
@@ -137,6 +207,23 @@ function formatDuration(raw) {
     return [h, m, s].map(v => v < 10 ? "0" + v : v).join(":");
 }
 
+const LAST_SCAN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** Format server last_full_scan ("YYYY-MM-DD HH:MM:SS" or Never) as "12 Jul 2026". */
+function formatLastScanDate(raw) {
+    if (!raw || raw === 'Never' || raw === '--') return 'Never';
+    const m = String(raw).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return String(raw);
+    const day = parseInt(m[3], 10);
+    const month = LAST_SCAN_MONTHS[parseInt(m[2], 10) - 1] || m[2];
+    return `${day} ${month} ${m[1]}`;
+}
+
+function setLastScanDisplay(raw) {
+    const el = document.getElementById('stat-last-scan');
+    if (el) el.innerText = formatLastScanDate(raw);
+}
+
 function formatSize(bytes) {
     if (bytes == null || bytes === undefined || isNaN(bytes)) return '—';
     const n = Number(bytes);
@@ -187,6 +274,17 @@ function escAttr(val) {
 function escTextOrDash(val) {
     const text = val ?? '';
     return String(text) === '' ? '-' : escHtml(text);
+}
+
+const TABLE_EDGE_FIXED_PX = 40;
+const TABLE_END_PAD_PX = 15;
+function isTableChromeCell(el) {
+    if (!el || !el.classList) return false;
+    return el.classList.contains('col-chk') || el.classList.contains('col-del') || el.classList.contains('end-pad');
+}
+function tableChromeWidthPx(el) {
+    if (el && el.classList && el.classList.contains('end-pad')) return TABLE_END_PAD_PX;
+    return TABLE_EDGE_FIXED_PX;
 }
 
 // --- SCROLL TO CONSOLE ---

@@ -577,6 +577,8 @@ function updateMultiselectOptions(filterId, options, labelMap = {}, blankCount =
     
     if (!multiselectState[filterId]) {
         initMultiselect(filterId, options, labelMap);
+    } else if (labelMap && Object.keys(labelMap).length) {
+        multiselectState[filterId].labelMap = { ...multiselectState[filterId].labelMap, ...labelMap };
     }
 
     // Check for pending value first (set by setMultiselectValue), then fall back to current value
@@ -599,12 +601,17 @@ function updateMultiselectOptions(filterId, options, labelMap = {}, blankCount =
         <label for="${filterId}-chk-all">All</label>
     </div>`;
 
-    const blanksLabel = (blankCount === null || blankCount === undefined) ? 'Blanks' : `Blanks (${blankCount})`;
-    html += `<div class="multiselect-option" onclick="event.stopPropagation()">
-        <input type="checkbox" id="${filterId}-chk-blank" value="__blank__">
-        <label for="${filterId}-chk-blank">${blanksLabel}</label>
-    </div>
-    <div class="multiselect-divider"></div>`;
+    const includeBlanks = blankCount !== false;
+    if (includeBlanks) {
+        const blanksLabel = (blankCount === null || blankCount === undefined) ? 'Blanks' : `Blanks (${blankCount})`;
+        html += `<div class="multiselect-option" onclick="event.stopPropagation()">
+            <input type="checkbox" id="${filterId}-chk-blank" value="__blank__">
+            <label for="${filterId}-chk-blank">${blanksLabel}</label>
+        </div>
+        <div class="multiselect-divider"></div>`;
+    } else {
+        html += `<div class="multiselect-divider"></div>`;
+    }
     
     items.forEach(key => {
         const val = key.toString();
@@ -614,8 +621,9 @@ function updateMultiselectOptions(filterId, options, labelMap = {}, blankCount =
         if(val === 'none') display = 'None';
         
         const count = !Array.isArray(options) && options[val] !== undefined ? options[val] : 0;
-        // Always include items that are currently selected, even if count is 0
-        if (!Array.isArray(options) && count === 0 && !currentValues.includes(val)) return;
+        // Always include items that are currently selected, even if count is 0.
+        // Binary filters (blankCount === false) always keep all option keys visible.
+        if (!Array.isArray(options) && count === 0 && !currentValues.includes(val) && includeBlanks) return;
         
         display += ` (${count})`;
         const checked = currentValues.includes(val) ? 'checked' : '';
@@ -702,7 +710,116 @@ document.addEventListener('click', (e) => {
 });
 
 // --- FILTER LOGIC ---
+function filterValueSet(val) {
+    if (!val) return new Set();
+    return new Set(String(val).split(',').map(v => v.trim()).filter(Boolean));
+}
+
+function ensureBinaryMultiselects() {
+    const specs = [
+        ['hybrid-filter', { '1': 'Yes', '0': 'No' }],
+        ['source-hybrid-filter', { '1': 'Yes', '0': 'No' }],
+        ['status-filter', { 'ok': 'OK', 'failed': 'Failed' }],
+        ['nfo-filter', { '1': 'Missing', '0': 'Found' }],
+        ['missing-filter', { '1': 'Yes', '0': 'No' }],
+        ['anomaly-filter', { '1': 'Yes', '0': 'No' }],
+        ['is-3d-filter', { '1': '3D', '0': '2D' }],
+    ];
+    specs.forEach(([id, labelMap]) => {
+        if (!multiselectState[id] && document.getElementById(`${id}-wrapper`)) {
+            initMultiselect(id, Object.keys(labelMap), labelMap);
+        }
+    });
+}
+
+function updateRibbonActiveState() {
+    ensureBinaryMultiselects();
+    const formatVals = filterValueSet(activeFilters.category || '');
+    const profileVals = filterValueSet(activeFilters.profile || '');
+    const elVals = filterValueSet(activeFilters.el || '');
+    const hybridVal = activeFilters.is_hybrid || '';
+    const srcHybridVal = activeFilters.source_hybrid || '';
+    const statusVal = activeFilters.status || '';
+
+    document.querySelectorAll('.stat-card[data-ribbon]').forEach(card => {
+        const spec = card.getAttribute('data-ribbon') || '';
+        const colon = spec.indexOf(':');
+        if (colon < 0) {
+            card.classList.remove('is-active');
+            return;
+        }
+        const type = spec.slice(0, colon);
+        const value = spec.slice(colon + 1);
+        let active = false;
+        if (type === 'format') {
+            active = formatVals.size === 1 && formatVals.has(value);
+        } else if (type === 'dovi_prof') {
+            if (value === '10.1') {
+                // Ribbon count folds bare "10" into P10.1
+                active = elVals.size === 0 && profileVals.size > 0
+                    && [...profileVals].every(p => p === '10.1' || p === '10');
+            } else {
+                active = profileVals.size === 1 && profileVals.has(value) && elVals.size === 0;
+            }
+        } else if (type === 'el') {
+            active = elVals.size === 1 && elVals.has(value) && profileVals.has('7');
+        } else if (type === 'hybrid') {
+            active = hybridVal === value;
+        } else if (type === 'source_hybrid') {
+            active = srcHybridVal === value;
+        } else if (type === 'status') {
+            active = statusVal === value;
+        } else if (type === 'anomaly') {
+            active = (activeFilters.anomaly || '') === value;
+        }
+        card.classList.toggle('is-active', !!active);
+    });
+}
+
+/** Highlight table header columns that currently have a filter applied. */
+function updateColumnFilterActiveState() {
+    const table = document.getElementById('video-table');
+    if (!table) return;
+
+    const sizeActive = !!(activeFilters.size_val && String(activeFilters.size_val).trim());
+    const bitActive = !!(activeFilters.bit_val && String(activeFilters.bit_val).trim());
+    const searchActive = !!(activeFilters.search && String(activeFilters.search).trim());
+
+    const mapping = [
+        ['col-file', searchActive],
+        ['col-hyb', !!(activeFilters.is_hybrid)],
+        ['col-hybrid-src', !!(activeFilters.source_hybrid)],
+        ['col-main', !!(activeFilters.category)],
+        ['col-prof', !!(activeFilters.profile)],
+        ['col-el', !!(activeFilters.el)],
+        ['col-sec', !!(activeFilters.secondary_hdr)],
+        ['col-res', !!(activeFilters.resolution)],
+        ['col-size', sizeActive],
+        ['col-bit', bitActive],
+        ['col-vol', !!(activeFilters.volume)],
+        ['col-cont', !!(activeFilters.container)],
+        ['col-stat', !!(activeFilters.status)],
+        ['col-nfo', !!(activeFilters.nfo_missing)],
+        ['col-missing', !!(activeFilters.missing)],
+        ['col-anomaly', !!(activeFilters.anomaly)],
+        ['col-audio', !!(activeFilters.audio)],
+        ['col-video-source', !!(activeFilters.video_source)],
+        ['col-source-format', !!(activeFilters.source_format)],
+        ['col-video-codec', !!(activeFilters.video_codec)],
+        ['col-is-3d', !!(activeFilters.is_3d)],
+        ['col-edition', !!(activeFilters.edition)],
+        ['col-media-type', !!(activeFilters.media_type)],
+    ];
+
+    mapping.forEach(([colClass, on]) => {
+        table.querySelectorAll(`thead th.${colClass}`).forEach(th => {
+            th.classList.toggle('is-filtered', !!on);
+        });
+    });
+}
+
 function applyRibbonFilter(type, value) {
+    ensureBinaryMultiselects();
     const currentMediaType = (() => {
         try { return getMultiselectValue('media-type-filter'); } catch (e) { return ''; }
     })();
@@ -711,7 +828,11 @@ function applyRibbonFilter(type, value) {
     let mergePending = null;
     if (type === 'format') mergePending = { format: value };
     else if (type === 'el') mergePending = { profile: '7', el: value };
-    else if (type === 'dovi_prof') mergePending = { profile: value };
+    else if (type === 'dovi_prof') mergePending = { profile: value === '10.1' ? '10.1,10' : value };
+    else if (type === 'hybrid') mergePending = { hybrid: value };
+    else if (type === 'source_hybrid') mergePending = { source_hybrid: value };
+    else if (type === 'status') mergePending = { status: value };
+    else if (type === 'anomaly') mergePending = { anomaly: value };
     
     clearFilters(false, mergePending);
 
@@ -721,8 +842,7 @@ function applyRibbonFilter(type, value) {
     applyMediaTypeColumnVisibility(normalizedType);
     
     if (type === 'format' || type === 'el' || type === 'dovi_prof') {
-        const statEl = document.getElementById('status-filter-header');
-        if (statEl) statEl.value = 'ok';
+        setMultiselectValue('status-filter', 'ok', true);
     }
     
     // Set filter UI and load after DOM settles (150ms for reliability; setFormatFilterValue skips its own reload)
@@ -732,18 +852,19 @@ function applyRibbonFilter(type, value) {
             resetAndLoad();
         }
         else if (type === 'status') {
-            const el = document.getElementById('status-filter-header');
-            if (el) el.value = value;
+            setMultiselectValue('status-filter', value, true);
+            resetAndLoad();
+        }
+        else if (type === 'anomaly') {
+            setMultiselectValue('anomaly-filter', value, true);
             resetAndLoad();
         }
         else if (type === 'hybrid') {
-            const el = document.getElementById('hybrid-filter-header');
-            if (el) el.value = value;
+            setMultiselectValue('hybrid-filter', value, true);
             resetAndLoad();
         }
         else if (type === 'source_hybrid') {
-            const el = document.getElementById('source-hybrid-filter-header');
-            if (el) el.value = value;
+            setMultiselectValue('source-hybrid-filter', value, true);
             resetAndLoad();
         }
         else if (type === 'el') {
@@ -752,14 +873,16 @@ function applyRibbonFilter(type, value) {
             resetAndLoad();
         }
         else if (type === 'dovi_prof') {
-            setMultiselectValue('profile-filter', value, true);
+            setMultiselectValue('profile-filter', value === '10.1' ? '10.1,10' : value, true);
             resetAndLoad();
         }
+        syncActiveFiltersFromDom(false);
     }, 150);
 }
 
 /** Sync `activeFilters` from current DOM controls (and optional pending multiselect values). */
 function syncActiveFiltersFromDom(clearPending = false) {
+    ensureBinaryMultiselects();
     const readMulti = clearPending ? getMultiselectValueAndClearPending : getMultiselectValue;
     activeFilters.search = document.getElementById('search-bar') ? document.getElementById('search-bar').value : '';
     try {
@@ -775,17 +898,18 @@ function syncActiveFiltersFromDom(clearPending = false) {
     try { activeFilters.profile = readMulti('profile-filter'); } catch (e) { activeFilters.profile = ''; }
     try { activeFilters.el = readMulti('el-filter'); } catch (e) { activeFilters.el = ''; }
     try { activeFilters.container = readMulti('container-filter'); } catch (e) { activeFilters.container = ''; }
-    activeFilters.is_hybrid = document.getElementById('hybrid-filter-header') ? document.getElementById('hybrid-filter-header').value : '';
-    activeFilters.source_hybrid = document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '';
+    try { activeFilters.is_hybrid = readMulti('hybrid-filter'); } catch (e) { activeFilters.is_hybrid = ''; }
+    try { activeFilters.source_hybrid = readMulti('source-hybrid-filter'); } catch (e) { activeFilters.source_hybrid = ''; }
     try { activeFilters.secondary_hdr = readMulti('secondary-filter'); } catch (e) { activeFilters.secondary_hdr = ''; }
-    activeFilters.status = document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '';
-    activeFilters.nfo_missing = document.getElementById('nfo-filter-header') ? document.getElementById('nfo-filter-header').value : '';
-    activeFilters.missing = document.getElementById('missing-filter-header') ? document.getElementById('missing-filter-header').value : '';
+    try { activeFilters.status = readMulti('status-filter'); } catch (e) { activeFilters.status = ''; }
+    try { activeFilters.nfo_missing = readMulti('nfo-filter'); } catch (e) { activeFilters.nfo_missing = ''; }
+    try { activeFilters.missing = readMulti('missing-filter'); } catch (e) { activeFilters.missing = ''; }
+    try { activeFilters.anomaly = readMulti('anomaly-filter'); } catch (e) { activeFilters.anomaly = ''; }
     try { activeFilters.resolution = readMulti('res-filter'); } catch (e) { activeFilters.resolution = ''; }
     try { activeFilters.video_source = readMulti('video-source-filter'); } catch (e) { activeFilters.video_source = ''; }
     try { activeFilters.source_format = readMulti('source-format-filter'); } catch (e) { activeFilters.source_format = ''; }
     try { activeFilters.video_codec = readMulti('video-codec-filter'); } catch (e) { activeFilters.video_codec = ''; }
-    activeFilters.is_3d = document.getElementById('is-3d-filter-header') ? document.getElementById('is-3d-filter-header').value : '';
+    try { activeFilters.is_3d = readMulti('is-3d-filter'); } catch (e) { activeFilters.is_3d = ''; }
     try { activeFilters.edition = readMulti('edition-filter'); } catch (e) { activeFilters.edition = ''; }
     try { activeFilters.media_type = readMulti('media-type-filter'); } catch (e) { activeFilters.media_type = ''; }
     const sizeFilter = document.getElementById('size-filter-header') ? document.getElementById('size-filter-header').value : '';
@@ -797,6 +921,8 @@ function syncActiveFiltersFromDom(clearPending = false) {
     activeFilters.bit_op = bitParsed.op;
     activeFilters.bit_val = bitParsed.value;
     try { activeFilters.audio = readMulti('audio-filter'); } catch (e) { activeFilters.audio = ''; }
+    updateRibbonActiveState();
+    updateColumnFilterActiveState();
     return activeFilters;
 }
 
@@ -832,6 +958,10 @@ function clearFilters(doReload = true, mergePending = null) {
     if (editionState) editionState.pendingValue = null;
     const mediaTypeState = multiselectState['media-type-filter'];
     if (mediaTypeState) mediaTypeState.pendingValue = null;
+    ['hybrid-filter', 'source-hybrid-filter', 'status-filter', 'nfo-filter', 'missing-filter', 'anomaly-filter', 'is-3d-filter'].forEach(id => {
+        const st = multiselectState[id];
+        if (st) st.pendingValue = null;
+    });
     
     const searchBar = document.getElementById('search-bar');
     if (searchBar) searchBar.value = '';
@@ -852,9 +982,17 @@ function clearFilters(doReload = true, mergePending = null) {
     setMultiselectValue('video-codec-filter', '', true);
     setMultiselectValue('edition-filter', '', true);
     setMultiselectValue('media-type-filter', '', true);
+    ensureBinaryMultiselects();
+    setMultiselectValue('hybrid-filter', '', true);
+    setMultiselectValue('source-hybrid-filter', '', true);
+    setMultiselectValue('status-filter', '', true);
+    setMultiselectValue('nfo-filter', '', true);
+    setMultiselectValue('missing-filter', '', true);
+    setMultiselectValue('anomaly-filter', '', true);
+    setMultiselectValue('is-3d-filter', '', true);
     
-    // Clear single-select filters
-    const headerFilters = ['hybrid-filter-header', 'source-hybrid-filter-header', 'status-filter-header', 'nfo-filter-header', 'missing-filter-header', 'size-filter-header', 'bit-filter-header'];
+    // Clear text filters
+    const headerFilters = ['size-filter-header', 'bit-filter-header'];
     headerFilters.forEach(id => {
         const el = document.getElementById(id);
         if (el) {
@@ -871,7 +1009,14 @@ function clearFilters(doReload = true, mergePending = null) {
         if (mergePending.el && elState) elState.pendingValue = mergePending.el;
         const secondaryState = multiselectState['secondary-filter'];
         if (mergePending.secondary && secondaryState) secondaryState.pendingValue = mergePending.secondary;
+        if (mergePending.hybrid && multiselectState['hybrid-filter']) multiselectState['hybrid-filter'].pendingValue = mergePending.hybrid;
+        if (mergePending.source_hybrid && multiselectState['source-hybrid-filter']) multiselectState['source-hybrid-filter'].pendingValue = mergePending.source_hybrid;
+        if (mergePending.status && multiselectState['status-filter']) multiselectState['status-filter'].pendingValue = mergePending.status;
+        if (mergePending.anomaly && multiselectState['anomaly-filter']) multiselectState['anomaly-filter'].pendingValue = mergePending.anomaly;
     }
+
+    document.querySelectorAll('.stat-card.is-active').forEach(card => card.classList.remove('is-active'));
+    document.querySelectorAll('#video-table thead th.is-filtered').forEach(th => th.classList.remove('is-filtered'));
     
     // Force a synchronous DOM update by reading a property
     // This ensures all DOM changes are applied before we continue
@@ -909,31 +1054,47 @@ function parseFilterValue(val) {
 }
 
 function setFilter(type, val) {
+     ensureBinaryMultiselects();
      if (type === 'format') {
          setFormatFilterValue(val);
          resetAndLoad();
          return;
      }
      if (type === 'resolution') {
-         // Resolution is a multiselect filter
          setMultiselectValue('res-filter', val);
          resetAndLoad();
          return;
      }
      if (type === 'el') {
-         // EL is a multiselect filter
          setMultiselectValue('el-filter', val);
          resetAndLoad();
          return;
      }
-     let id = '';
-     if (type === 'status') id = 'status-filter-header';
-     else if (type === 'hybrid') id = 'hybrid-filter-header';
-     else if (type === 'source_hybrid') id = 'source-hybrid-filter-header';
-     else if (type === 'dovi_prof') id = 'profile-filter-header';
-
-     const el = document.getElementById(id);
-     if (el) { el.value = val; resetAndLoad(); }
+     if (type === 'status') {
+         setMultiselectValue('status-filter', val);
+         resetAndLoad();
+         return;
+     }
+     if (type === 'anomaly') {
+         setMultiselectValue('anomaly-filter', val);
+         resetAndLoad();
+         return;
+     }
+     if (type === 'hybrid') {
+         setMultiselectValue('hybrid-filter', val);
+         resetAndLoad();
+         return;
+     }
+     if (type === 'source_hybrid') {
+         setMultiselectValue('source-hybrid-filter', val);
+         resetAndLoad();
+         return;
+     }
+     if (type === 'dovi_prof') {
+         setMultiselectValue('profile-filter', val);
+         resetAndLoad();
+         return;
+     }
 }
 
 function normalizeMediaTypeFilter(val) {
@@ -1028,8 +1189,8 @@ function resetColumnWidths() {
     const colWidthsForSync = [];
     table.querySelectorAll('thead th').forEach(th => {
         const colClass = Array.from(th.classList).find(c => c.startsWith('col-') && c !== 'col-chk' && c !== 'col-del');
-        if (th.classList.contains('col-chk') || th.classList.contains('col-del')) {
-            colWidthsForSync.push(40);
+        if (isTableChromeCell(th)) {
+            colWidthsForSync.push(tableChromeWidthPx(th));
         } else if (colClass) {
             const w = getMinColWidth(colClass);
             widths[colClass] = w + 'px';
@@ -1053,15 +1214,14 @@ function resetColumnWidths() {
     });
     showToast('Column widths reset to minimum');
 }
-/** col-chk / col-del are always 40px — detect by class, not column index (column reorder breaks index 0 / last). */
+/** col-chk / col-del stay 40px; end-pad stays 15px — detect by class, not column index. */
 function clampChkDelWidthsFromHeaderRow(headerRow, colWidths) {
-    const FIXED = 40;
     if (!headerRow || !colWidths || !colWidths.length) return colWidths || [];
     const out = colWidths.slice();
     const n = Math.min(headerRow.children.length, out.length);
     for (let i = 0; i < n; i++) {
         const th = headerRow.children[i];
-        if (th && (th.classList.contains('col-chk') || th.classList.contains('col-del'))) out[i] = FIXED;
+        if (th && isTableChromeCell(th)) out[i] = tableChromeWidthPx(th);
     }
     return out;
 }
@@ -1140,7 +1300,7 @@ function applyCollapsedColumnCellStyles() {
         cell.style.removeProperty('border-right-width');
     };
     Array.from(headerRow.children).forEach(th => {
-        if (!th || th.classList.contains('col-chk') || th.classList.contains('col-del')) return;
+        if (!th || isTableChromeCell(th)) return;
         const colClass = Array.from(th.classList).find(c => c.startsWith('col-') && c !== 'col-chk' && c !== 'col-del');
         if (!colClass) return;
         const collapsed = isColumnLayoutCollapsed(colClass, tableWrap);
@@ -1182,14 +1342,14 @@ function enforceCellWidthsFromColgroupByIndex() {
         const w = classWidthMap[colClass];
         table.querySelectorAll(`tbody td.${colClass}`).forEach(td => applyCell(td, w));
     });
-    // Keep fixed edge columns pinned at 40px.
-    table.querySelectorAll('th.col-chk, td.col-chk, th.col-del, td.col-del').forEach(cell => applyCell(cell, 40));
+    // Keep chrome columns pinned: chk/del 40px, end-pad 15px.
+    table.querySelectorAll('th.col-chk, td.col-chk, th.col-del, td.col-del').forEach(cell => applyCell(cell, TABLE_EDGE_FIXED_PX));
+    table.querySelectorAll('th.end-pad, td.end-pad').forEach(cell => applyCell(cell, TABLE_END_PAD_PX));
 }
 function syncColgroupFromWidths(colWidths) {
     if (!colWidths || !colWidths.length) return;
     const colgroups = getTableColgroups();
     if (!colgroups.length) return;
-    const FIXED_WIDTH = 40; // col-chk and col-del must never expand
     const headerRow = getVideoTableHeaderRow();
     colgroups.forEach(colgroup => {
         while (colgroup.children.length < colWidths.length) colgroup.appendChild(document.createElement('col'));
@@ -1197,8 +1357,8 @@ function syncColgroupFromWidths(colWidths) {
         for (let i = 0; i < colWidths.length; i++) {
             const c = colgroup.children[i];
             const th = headerRow && headerRow.children[i];
-            const isFixedCol = th && (th.classList.contains('col-chk') || th.classList.contains('col-del'));
-            const w = isFixedCol ? FIXED_WIDTH : (colWidths[i] || 0);
+            const isFixedCol = th && isTableChromeCell(th);
+            const w = isFixedCol ? tableChromeWidthPx(th) : (colWidths[i] || 0);
             c.style.width = w + 'px';
             if (w <= 0) {
                 c.style.minWidth = '0px';
@@ -1293,8 +1453,8 @@ function rebuildColgroupFromStoredColumnWidths(overrideClass, overridePx, overri
     const colWidths = [];
     for (let i = 0; i < headerRow.children.length; i++) {
         const th = headerRow.children[i];
-        if (th && (th.classList.contains('col-chk') || th.classList.contains('col-del'))) {
-            colWidths.push(40);
+        if (th && isTableChromeCell(th)) {
+            colWidths.push(tableChromeWidthPx(th));
         } else if (th) {
             const colClass = Array.from(th.classList).find(c => c.startsWith('col-') && c !== 'col-chk' && c !== 'col-del');
             let w = 0;
@@ -1370,8 +1530,8 @@ function filterBadge(cat, prof, elType, sec) {
     if (sec) mergePending.secondary = sec;
     
     if (prof || elType) {
-        const statEl = document.getElementById('status-filter-header');
-        if (statEl) statEl.value = 'ok';
+        ensureBinaryMultiselects();
+        setMultiselectValue('status-filter', 'ok', true);
     }
     
     clearFilters(false, Object.keys(mergePending).length ? mergePending : null);

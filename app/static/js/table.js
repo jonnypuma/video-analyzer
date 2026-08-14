@@ -150,6 +150,7 @@ function applyColumnOrder(order) {
         cells.forEach(cell => {
             const classes = Array.from(cell.classList);
             if (classes.includes('col-chk')) cellMap['col-chk'] = cell;
+            if (classes.includes('end-pad')) cellMap['end-pad'] = cell;
             if (classes.includes('col-del')) cellMap['col-del'] = cell;
             const colClass = classes.find(c => c.startsWith('col-') && c !== 'col-chk' && c !== 'col-del');
             if (colClass) cellMap[colClass] = cell;
@@ -168,6 +169,7 @@ function applyColumnOrder(order) {
                 delete cellMap[colClass];
             }
         });
+        if (cellMap['end-pad']) row.appendChild(cellMap['end-pad']);
         if (cellMap['col-del']) row.appendChild(cellMap['col-del']);
     };
 
@@ -187,6 +189,7 @@ function alignBodyColumnsToHeaderOrder() {
     if (!headerRow || !tbody) return;
     const headerKeys = Array.from(headerRow.children).map(th => {
         if (th.classList.contains('col-chk')) return 'col-chk';
+        if (th.classList.contains('end-pad')) return 'end-pad';
         if (th.classList.contains('col-del')) return 'col-del';
         return Array.from(th.classList).find(c => c.startsWith('col-')) || '';
     });
@@ -197,6 +200,7 @@ function alignBodyColumnsToHeaderOrder() {
         const cellMap = {};
         cells.forEach(td => {
             if (td.classList.contains('col-chk')) cellMap['col-chk'] = td;
+            else if (td.classList.contains('end-pad')) cellMap['end-pad'] = td;
             else if (td.classList.contains('col-del')) cellMap['col-del'] = td;
             else {
                 const cls = Array.from(td.classList).find(c => c.startsWith('col-'));
@@ -623,7 +627,7 @@ function initColumnResize() {
         document.addEventListener('mouseup', onColumnResizeMouseUp);
     }
     const startResizeForHeader = (th, e) => {
-        if (!th || th.classList.contains('col-chk') || th.classList.contains('col-del')) return;
+        if (!th || isTableChromeCell(th)) return;
         const colClass = Array.from(th.classList).find(c => c.startsWith('col-') && c !== 'col-chk' && c !== 'col-del');
         if (!colClass) return;
         e.preventDefault();
@@ -673,7 +677,7 @@ function initColumnResize() {
     };
     // Attach explicit handles to each data header so resize target is exact (no coordinate ambiguity).
     const headers = Array.from(document.querySelectorAll('#video-table thead th'))
-        .filter(th => !th.classList.contains('col-chk') && !th.classList.contains('col-del'));
+        .filter(th => !isTableChromeCell(th));
     headers.forEach(th => {
         if (th.querySelector(':scope > .col-resize-handle')) return;
         const handle = document.createElement('div');
@@ -752,6 +756,7 @@ function calculateColumnWidths(forceRecalculate = false, allowOverrideManual = f
         'col-stat': 0.7,     // Status
         'col-nfo': 0.6,      // NFO
         'col-missing': 0.6,  // Missing
+        'col-anomaly': 0.7,  // Quality anomaly
         'col-dup': 0.6,      // Duplicate count
         'col-hyb': 0.6,       // Dual HDR
         'col-hybrid-src': 0.6, // Source Hybrid
@@ -1016,13 +1021,14 @@ function updateSelectedRowHighlight() {
 }
 
 function selectRowByIndex(index) {
-    selectedRowIndex = index;
+    selectedRowIndex = Number(index);
     updateSelectedRowHighlight();
 }
 
 let contextMenuPath = '';
 
 function handleRowClick(evt, index, path) {
+    const rowIndex = Number(index);
     if (evt && (evt.ctrlKey || evt.metaKey)) {
         const row = evt.currentTarget;
         const chk = row ? row.querySelector('input.row-chk') : null;
@@ -1030,8 +1036,16 @@ function handleRowClick(evt, index, path) {
             chk.checked = !chk.checked;
             toggleRow(chk, path);
         }
+        selectRowByIndex(rowIndex);
+        return;
     }
-    selectRowByIndex(index);
+    // Second click on the same row clears the keyboard highlight
+    if (selectedRowIndex === rowIndex) {
+        selectedRowIndex = -1;
+        updateSelectedRowHighlight();
+        return;
+    }
+    selectRowByIndex(rowIndex);
 }
 
 function openRowContextMenu(evt, index, path) {
@@ -1613,6 +1627,8 @@ function applyStatsToUI(stats, totalItems, fullStats, mediaTypeOverride) {
     if (!stats) return;
     document.getElementById('stat-total').innerText = stats.total ?? 0;
     document.getElementById('stat-failed').innerText = stats.failed ?? 0;
+    const anomEl = document.getElementById('stat-anomalies');
+    if (anomEl) anomEl.innerText = stats.anomalies ?? 0;
     document.getElementById('stat-hybrid').innerText = stats.hybrid ?? 0;
     const srcHybridEl = document.getElementById('stat-source-hybrid');
     if (srcHybridEl) srcHybridEl.innerText = stats.source_hybrid ?? 0;
@@ -1626,16 +1642,18 @@ function applyStatsToUI(stats, totalItems, fullStats, mediaTypeOverride) {
     document.getElementById('stat-p5').innerText = stats.dovi_p5 || 0;
     document.getElementById('stat-p81').innerText = stats.dovi_p81 || 0;
     document.getElementById('stat-p84').innerText = stats.dovi_p84 || 0;
-    document.getElementById('stat-p10').innerText = stats.dovi_p10 || 0;
-    document.getElementById('stat-p101').innerText = stats.dovi_p101 || 0;
+    // Bare profile "10" (no compat hint) folds into P10.1 — same idea as bare P8 → chart P8.1
+    document.getElementById('stat-p101').innerText = (stats.dovi_p101 || 0) + (stats.dovi_p10 || 0);
     document.getElementById('stat-p104').innerText = stats.dovi_p104 || 0;
+    const p20El = document.getElementById('stat-p20');
+    if (p20El) p20El.innerText = stats.dovi_p20 || 0;
     document.getElementById('res-total-display').innerText = stats.total ?? 0;
     if (typeof totalItems === 'number') {
         document.getElementById('res-filtered').innerText = totalItems;
     }
-    // Only update duration from stats if not currently scanning (to avoid resetting live timer)
+    // Idle: show last scan date. During scan the live timer owns #stat-duration.
     if (!document.body.classList.contains('scanning')) {
-        document.getElementById('stat-duration').innerText = formatDuration(stats.last_scan_time || '0s');
+        setLastScanDisplay(stats.last_full_scan || 'Never');
     }
     // Total size badge: use fullStats (data.stats) which has total_size_all/movie/tv
     const badge = document.getElementById('total-size-badge');
@@ -1673,7 +1691,7 @@ async function loadData() {
 
     const perPageVal = document.getElementById('per-page-select') ? document.getElementById('per-page-select').value : '50';
     const tbody = document.getElementById('video-table-body');
-    tbody.innerHTML = '<tr><td colspan="52" style="text-align:center; padding: 20px;">Loading...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="53" style="text-align:center; padding: 20px;">Loading...</td></tr>';
     const loadId = ++loadDataSeq;
     try {
         const params = new URLSearchParams({ page: currentPage, per_page: perPageVal, sort: sortCol, order: sortOrder, ...activeFilters });
@@ -1712,7 +1730,7 @@ async function loadData() {
         if(icon) icon.innerText = arrow;
 
         if (data.rows.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="52" style="text-align:center; padding: 20px;">No results found</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="53" style="text-align:center; padding: 20px;">No results found</td></tr>';
         } else {
             currentRowData = [];
             currentRowDataEncoded = [];
@@ -1778,7 +1796,8 @@ async function loadData() {
                     trakt_rating: (hasSourceHybrid ? 62 : 60) + off,
                     dup_group_key: (hasSourceHybrid ? 63 : 61) + off,
                     dup_exact_key: (hasSourceHybrid ? 64 : 62) + off,
-                    dup_count: (hasSourceHybrid ? 65 : 63) + off
+                    dup_count: (hasSourceHybrid ? 65 : 63) + off,
+                    quality_anomaly: (hasSourceHybrid ? 66 : 64) + off
                 };
                 const rowData = {
                     filename: row[idx.filename], category: row[idx.category], profile: row[idx.profile], el_type: row[idx.el_type],
@@ -1790,6 +1809,7 @@ async function loadData() {
                     video_source: row[idx.video_source], source_format: row[idx.source_format], video_codec: row[idx.video_codec], is_3d: row[idx.is_3d], edition: row[idx.edition], year: row[idx.year],
                     media_type: row[idx.media_type], show_title: row[idx.show_title], season: row[idx.season], episode: row[idx.episode], movie_title: row[idx.movie_title], episode_title: row[idx.episode_title],
                     nfo_missing: row[idx.nfo_missing],
+                    missing: idx.missing >= 0 ? row[idx.missing] : 0,
                     fps: row[idx.fps], aspect_ratio: row[idx.aspect_ratio],
                     imdb_id: row[idx.imdb_id], tvdb_id: row[idx.tvdb_id], tmdb_id: row[idx.tmdb_id], rotten_id: row[idx.rotten_id], metacritic_id: row[idx.metacritic_id], trakt_id: row[idx.trakt_id],
                     tvdb_series_id: idx.tvdb_series_id >= 0 ? row[idx.tvdb_series_id] : null, tvdb_episode_id: idx.tvdb_episode_id >= 0 ? row[idx.tvdb_episode_id] : null,
@@ -1799,7 +1819,8 @@ async function loadData() {
                     rotten_series_id: idx.rotten_series_id >= 0 ? row[idx.rotten_series_id] : null, rotten_episode_id: idx.rotten_episode_id >= 0 ? row[idx.rotten_episode_id] : null,
                     metacritic_series_id: idx.metacritic_series_id >= 0 ? row[idx.metacritic_series_id] : null, metacritic_episode_id: idx.metacritic_episode_id >= 0 ? row[idx.metacritic_episode_id] : null,
                     imdb_rating: row[idx.imdb_rating], tvdb_rating: row[idx.tvdb_rating], tmdb_rating: row[idx.tmdb_rating], rotten_rating: row[idx.rotten_rating], metacritic_rating: row[idx.metacritic_rating], trakt_rating: row[idx.trakt_rating],
-                    dup_group_key: row[idx.dup_group_key], dup_exact_key: row[idx.dup_exact_key], dup_count: row[idx.dup_count]
+                    dup_group_key: row[idx.dup_group_key], dup_exact_key: row[idx.dup_exact_key], dup_count: row[idx.dup_count],
+                    quality_anomaly: idx.quality_anomaly >= 0 ? row[idx.quality_anomaly] : null
                 };
                 const rowJson = encodeURIComponent(JSON.stringify(rowData));
                 currentRowData.push(rowData);
@@ -1898,6 +1919,7 @@ async function loadData() {
                             else if (profVal === '10') profCls = 'badge-p10';
                             else if (profVal === '10.1') profCls = 'badge-p101';
                             else if (profVal === '10.4') profCls = 'badge-p104';
+                            else if (profVal === '20') profCls = 'badge-p20';
                             const profLabel = `P${profVal}`;
                             const profClick = `filterBadge('dovi', '${profVal}')`;
                             profileBadge = `<span class="badge ${profCls}" onclick="${profClick}" title="Filter: DV ${profLabel}" style="cursor:pointer">${profLabel}</span>`;
@@ -1931,10 +1953,15 @@ async function loadData() {
                 const safePath = String(row[idx.full_path] ?? '').replace(/'/g, "\\'");
                 const resIconHtml = resText !== '-' ? `<div class="res-icon-wrapper" style="display:inline-block;" onclick="setFilter('resolution', '${String(resText).replace(/'/g, "\\'")}')"><img src="/static/${String(resText).toLowerCase()}.png" alt="${resText}" style="height:28px; vertical-align:middle;" onerror="this.outerHTML='<span>'+this.alt+'</span>'"></div>` : '-';
 
+                const anomalyFlags = idx.quality_anomaly >= 0 ? (row[idx.quality_anomaly] || '') : '';
+                const anomalyHtml = anomalyFlags
+                    ? `<a href="#" class="anomaly-why-link" title="${escAttr(anomalyFlags)}" onclick="event.preventDefault(); event.stopPropagation(); showAnomalyDetails(${rowIndex})">Yes</a>`
+                    : '-';
+
                 return `<tr data-row-index="${rowIndex}" onclick="handleRowClick(event, ${rowIndex}, '${safePath}')" oncontextmenu="openRowContextMenu(event, ${rowIndex}, '${safePath}')">
                         <td class="col-chk"><input type="checkbox" class="row-chk" ${isChecked} onclick="event.stopPropagation(); toggleRow(this, '${safePath}')"></td>
                         <td title="${escAttr(row[idx.full_path])}" class="col-file">
-                            <div class="file-name" style="cursor:pointer; color:#fff;" onclick="event.stopPropagation(); showDetails('${rowJson}')">${escHtml(row[0])}</div>
+                            <div class="file-name" style="cursor:pointer; color:#fff;" onclick="event.stopPropagation(); showDetailsByIndex(${rowIndex})">${escHtml(row[0])}</div>
                             <div class="file-path">${escHtml(row[idx.full_path])}</div>
                         </td>
                         <td class="td-center col-hyb">${dualHdrHtml}</td>
@@ -1954,6 +1981,7 @@ async function loadData() {
                         <td class="td-center col-stat">${statusText}</td>
                         <td class="td-center col-nfo">${nfoHtml}</td>
                         <td class="td-center col-missing">${idx.missing >= 0 && row[idx.missing] === 1 ? '<span style="color:#e67e22; font-weight:bold;">Yes</span>' : '-'}</td>
+                        <td class="td-center col-anomaly">${anomalyHtml}</td>
                         <td class="td-center col-dup">${dupBadge}</td>
                         <td class="col-audio hide-col-audio" title="${escAttr(audioTxt)}">${escHtml(audioTxt)}</td>
                         <td class="td-center col-audio-ch hide-col-audio-ch">${escHtml(audioChTxt)}</td>
@@ -1998,6 +2026,7 @@ async function loadData() {
                         <td class="td-center col-rotten-rating hide-col-rotten-rating">${escTextOrDash(rottenRtTxt)}</td>
                         <td class="td-center col-metacritic-rating hide-col-metacritic-rating">${escTextOrDash(metaRtTxt)}</td>
                         <td class="td-center col-trakt-rating hide-col-trakt-rating">${escTextOrDash(traktRtTxt)}</td>
+                        <td class="end-pad" aria-hidden="true"></td>
                         <td class="col-del"><button class="trash-btn" onclick="event.stopPropagation(); promptDelete('${safePath}')">🗑</button></td>
                     </tr>`;
             }).join('');
@@ -2059,7 +2088,7 @@ async function loadData() {
         console.error(e);
         const tbody = document.getElementById('video-table-body');
         if (tbody) {
-            tbody.innerHTML = `<tr><td colspan="52" style="text-align:center; padding: 20px; color:#e74c3c; font-weight:bold;">Error Loading Data: ${e.message}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="53" style="text-align:center; padding: 20px; color:#e74c3c; font-weight:bold;">Error Loading Data: ${e.message}</td></tr>`;
         }
     } finally {
         if (loadId === loadDataSeq) {
@@ -2090,9 +2119,9 @@ window.addEventListener('keydown', (e) => {
         return;
     }
     if (key === 'Enter') {
-        if (selectedRowIndex >= 0 && currentRowDataEncoded[selectedRowIndex]) {
+        if (selectedRowIndex >= 0 && currentRowData[selectedRowIndex]) {
             e.preventDefault();
-            showDetails(currentRowDataEncoded[selectedRowIndex]);
+            showDetailsByIndex(selectedRowIndex);
         }
         return;
     }

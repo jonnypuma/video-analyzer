@@ -24,44 +24,10 @@ See `CHANGELOG.md` for release notes and notable changes.
 - **Missing File Tracking:** `missing` column and filter for files no longer on disk; optional "Remove Missing from DB" setting (delete vs mark).
 - **Scan Report:** Shows scanned, new, removed, failures, and whether missing files were deleted or marked.
 - **Duplicate Detection Suite:** Persistent duplicate keys/counts, duplicate groups modal, exact fingerprint rebuild option, and `Dup` badges in the main table.
-
----
-
-## 🆕 Updates (2026-03-21)
-
-- **Duplicate check (persistent):**
-  - Added DB fields: `dup_group_key`, `dup_exact_key`, `dup_count`
-  - Added duplicate indexes for faster grouping
-  - Added duplicate APIs:
-    - `POST /api/duplicates/rebuild`
-    - `POST /api/duplicates/groups`
-    - `POST /api/duplicates/members`
-- **Duplicate check modal + actions:**
-  - New **Duplicates** button next to **Bulk Edit/Rescan**
-  - Group view + inline member dropdown (opens directly under selected group row) with keep recommendation
-  - QoL actions: copy path/folder, copy selected paths, rescan selected, delete selected
-  - Controls:
-    - **Refresh Groups**
-    - **Rebuild Keys**
-    - **Rebuild + Exact Fingerprints**
-  - Recommended first-time workflow:
-    1. Run **Rebuild Keys** (fast; builds logical grouping and `dup_count`)
-    2. Open groups and review with **View Files**
-    3. Run **Rebuild + Exact Fingerprints** only when you need byte-level exact duplicate verification
-- **Scan automation setting:**
-  - New checkbox in settings: **Duplicate Check While Scanning**
-  - Default is **off** (normal scans do not do duplicate-key work unless enabled)
-- **Main table duplicate badges:**
-  - New **Dup** column with sortable `xN` badges (`dup_count`)
-  - Clicking a duplicate badge opens duplicate details for that row group
-- **Metadata precedence hardening:**
-  - NFO media type now takes priority over filename parsing
-  - Movie NFO results clear TV-only fields to avoid stale cross-type metadata
-- **Table/column UX polish:**
-  - Restored horizontal scrollbar panel for table navigation
-  - Sticky edge dividers for `col-chk` and `col-del` remain visible while side scrolling
-  - Column menu layout fix for reset-widths overlap/clipping
-  - `col-del` sizing/alignment adjusted to match `col-chk`
+- **Quality anomalies:** Dedicated `quality_anomaly` column and Yes/No filter for low-bitrate HD/UHD, legacy 4K codecs, and unusual frame rates.
+- **Optional login:** `BASIC_AUTH` session login, Logout next to the version badge, and CSRF on mutating requests.
+- **Scan resume:** Interrupted jobs keep pending paths; use **Resume** (scans do not auto-start after reboot).
+- **Skip unchanged files:** Incremental scans still walk the library, then skip analysis when size and file mtime match the database.
 
 ---
 
@@ -71,7 +37,7 @@ See `CHANGELOG.md` for release notes and notable changes.
 - **Backend:** Python / Flask — package `app/video_analyzer/` with thin WSGI entry `app/analyzer.py` (`analyzer:app`)
 - **Database:** SQLite
 
-Layout (3.0+): domain modules under `video_analyzer/` (`config`, `state`, `db`, `queries`, `analysis`, `scan`, `routes`, …). Prefer `from video_analyzer…` for internals; Gunicorn still loads `analyzer:app`.
+Layout (3.1+): domain modules under `video_analyzer/` own implementations (`config`, `state`, `db`, `queries`, `scan/pipeline`, `routes/*.py`). `core.py` is a compatibility barrel for older imports. Gunicorn still loads `analyzer:app`. SQLite schema changes go through `schema_migrations` (applied on startup).
 
 ---
 
@@ -87,7 +53,7 @@ Layout (3.0+): domain modules under `video_analyzer/` (`config`, `state`, `db`, 
    docker compose build --no-cache
    docker compose up -d
    ```
-   Confirm the UI version badge matches the latest entry in `CHANGELOG.md` / `app/CHANGELOG.md` (e.g. **v3.0.5**). Sync the full repo to the NAS before building (not just `docker-compose.yml`). Prefer leaving `APP_VERSION` unset in `.env` so the changelog drives the badge.
+   Confirm the UI version badge matches the latest entry in `CHANGELOG.md` / `app/CHANGELOG.md` (e.g. **v3.1.6**). Sync the full repo to the NAS before building (not just `docker-compose.yml`). Prefer leaving `APP_VERSION` unset in `.env` so the changelog drives the badge.
 4. Open: `http://localhost:6002` (or host IP)
 
 The compose service uses `restart: unless-stopped` and a health check against `/api/health`. Python deps are pinned in `app/requirements.txt`. Images build for **amd64** and **arm64** (`dovi_tool` musl binaries).
@@ -103,9 +69,20 @@ pytest -q
 
 CI runs the same suite via `.github/workflows/ci.yml` on push/PR.
 
+### Authentication and CSRF
+
+Optional login is controlled by environment variables (see `.env.example` and `docker-compose.yml`):
+
+- `BASIC_AUTH=username:password` — enables the login page and a **Logout** control next to the version badge. Leave empty to keep the UI open on the LAN.
+- `SECRET_KEY` — Flask session secret. When unset, the app writes a durable key to `/output/.flask_secret` (not derived from the password).
+
+Session cookies are `HttpOnly` with `SameSite=Lax`. `Secure` is not forced, because LAN HTTP is normal.
+
+Mutating requests (`POST` / `PUT` / `PATCH` / `DELETE`) require a CSRF token even when auth is off, so a drive-by page cannot trigger delete/restore/scan. The UI reads `<meta name="csrf-token">` (and `window.CSRF_TOKEN`) and sends `X-CSRF-Token`. Responses include the current token in the `X-CSRF-Token` header; the UI copies that into the meta tag and retries once if a POST gets `Invalid CSRF token`. The login form posts `csrf_token`. `GET` and `/api/health` are exempt.
+
 ### Deployment Scope
 
-This app is designed for trusted LAN use only. It exposes scan, database restore, delete, cleanup, and maintenance actions without built-in authentication, so do not publish it directly to the internet. If remote access is needed, place it behind a secured reverse proxy or VPN with authentication.
+This app is designed for trusted LAN use. Enable `BASIC_AUTH` if the UI is reachable beyond your household, and do not publish it directly to the internet. If remote access is needed, place it behind a VPN or a secured reverse proxy.
 
 ### ARR Integration Environment Variables
 
@@ -156,6 +133,7 @@ Clicking badges applies a filter immediately. When you have **Movies** or **TV**
 - Multi‑select filters include **All** + **Blanks** and show counts.
 - **Media Type** filter (Movie/TV).
 - **Missing** filter (Yes/No) for files no longer on disk.
+- **Anomaly** filter (Yes/No) for quality flags (low bitrate, legacy 4K codec, unusual FPS).
 - Resolution, volumes, codecs, formats, source, container, edition, etc.
 
 ### Advanced Search
@@ -249,6 +227,8 @@ folders should match.
 - Split scan button: **All**, **TV**, **Movie**.
 - Hover TV/Movie to pick a specific typed folder from a submenu.
 - The main button shows the selected mode and folder target.
+- **Skip unchanged files** walks every video, then skips analysis when the DB row exists, `file_size` matches, there is no `scan_error`, and file mtime is not newer than `last_scanned`. Force-rescan still analyzes all. Missing-file cleanup still runs. The API keeps `scan_scope=changed` for compatibility.
+- If the latest job was interrupted or aborted with pending files, **Resume** continues those paths without a full recrawl. Scans do not auto-start after reboot.
 - During scan: "Starting" shows for up to 3 seconds per volume, then "Found X (Y new / Z removed)".
 - Click the progress bar during a scan to pause/resume scanning and analyzing.
 - History button appears when idle and shows recent scan history with a per-entry report view (scanned, new, removed, failures).
@@ -274,6 +254,11 @@ folders should match.
 ### Missing Column (Table)
 - **Missing** indicates whether the file no longer exists on disk (Yes/No).
 - When "Remove Missing from DB" is disabled, scans mark missing files instead of deleting them; use the Missing filter to find and delete them manually.
+
+### Anomaly Column (Table)
+- **Anomaly** is Yes when the file matched a quality heuristic (stored in `quality_anomaly`, separate from media-type `validation_flag`).
+- Use the Anomaly Yes/No filter or the ribbon card; `/api/anomalies` lists matching rows.
+- Click **Yes** to open a modal that explains each flag (low 4K bitrate, legacy 4K codec, low 1080p bitrate, unusual frame rate) with the file’s measured resolution, bitrate, codec, and fps.
 
 ### Filename Heuristics (Fallback Only)
 - Movie title fallback (only if `.nfo` missing)
@@ -314,7 +299,7 @@ Paginated table rows with filters and sorting. **Fast path:** returns `rows`, `p
 Key params:
 - `search`, `category`, `profile`, `el`, `resolution`, `volume`, `container`
 - `video_source`, `source_format`, `video_codec`, `media_type`
-- `secondary_hdr`, `status`, `nfo_missing`, `missing` (1=yes, 0=no)
+- `secondary_hdr`, `status`, `nfo_missing`, `missing` (1=yes, 0=no), `anomaly` / `quality_anomaly` (1=yes, 0=no)
 - `size_op`, `size_val`, `bit_op`, `bit_val`
 - `sort`, `order`, `page`, `per_page`
 
@@ -326,6 +311,13 @@ Includes duplicate fields in each row payload:
 ### GET `/api/videos/meta`
 Heavy dashboard metadata for the same filter params: `stats`, `stats_filtered`, `stats_media_scoped`, and filtered `total_items`.
 Optional `include_options=0|1` (default `1`): when `1`, also returns `filter_options` facet counts for dropdowns. The UI loads stats with `include_options=0` first, then refreshes facet counts on a short delay.
+
+### GET `/api/anomalies`
+Returns rows whose `quality_anomaly` column is set.
+
+### POST `/start`
+Start a library scan. CSRF required. Body includes `threads`, `scan_mode` (`all`/`tv`/`movie`), `scan_scope` (`all` or `changed` = skip unchanged files), optional folder targets, and optional `resume_job_id` to continue pending paths without recrawling.
+
 ### POST `/api/duplicates/rebuild`
 Rebuild persistent duplicate keys/counts for current filters.
 

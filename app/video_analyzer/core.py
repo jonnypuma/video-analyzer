@@ -13,6 +13,7 @@ import io
 import time
 import sys
 import glob
+import fnmatch
 import hashlib
 import signal
 import tempfile
@@ -30,7 +31,7 @@ from contextlib import contextmanager
 from collections import OrderedDict
 
 from flask import (
-    Flask, render_template, jsonify, make_response, request, send_file, Response, Blueprint,
+    Flask, render_template, jsonify, make_response, request, send_file, Response, Blueprint, session,
 )
 
 try:
@@ -40,69 +41,34 @@ except ImportError:
     BackgroundScheduler = None  # type: ignore
     HAS_SCHEDULER = False
 
-bp = Blueprint("main", __name__)
+from video_analyzer.blueprint import bp
+from video_analyzer.config import (
+    APP_VERSION_FALLBACK, BASE_DIR, CHANGELOG_PATH, DB_PATH, DB_TIMEOUT,
+    LOCAL_OUTPUT_FALLBACK, LOG_CLEANUP_LIMIT, MAX_RETRIES, MAX_SCAN_ATTEMPTS,
+    MEDIAINFO_TIMEOUT, OUTPUT_DIR, PROCESSED_MAP_CHUNK_SIZE, PROGRESS_UPDATE_INTERVAL,
+    RADARR_API_KEY, RADARR_URL, RETRY_DELAY_INITIAL, RPU_CACHE_MAX_SIZE,
+    SONARR_API_KEY, SONARR_URL, SUBPROCESS_TIMEOUT, SYSTEM_DIRS, VIDEO_EXTENSIONS,
+    app_version, app_version_label,
+)
+from video_analyzer.db.connection import get_db, get_db_readonly, invalidate_library_stats_cache
+from video_analyzer.db.schema import ensure_video_column, init_db
+from video_analyzer.state import (
+    ACTIVE_PROCS, ACTIVE_SCAN_FILES, ARR_STATUS_CACHE, LIBRARY_STATS_CACHE,
+    LOG_CACHE, PAUSE_EVENT, PROGRESS, RPU_CACHE, TOOL_VERSION_CACHE,
+    db_access_lock, library_stats_cache_lock, proc_lock, progress_lock, rpu_cache_lock,
+    APP_START_TIME,
+)
+from video_analyzer import state as va_state
 
-# --- begin migrated monolith ---
-# --- CONFIGURATION ---
-# Allow override for tests / alternate data dirs (default remains /output for Docker).
-OUTPUT_DIR = (os.environ.get("VIDEO_ANALYZER_OUTPUT") or "").strip() or '/output'
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # app/
-LOCAL_OUTPUT_FALLBACK = os.path.join(BASE_DIR, 'results')
-if not os.path.exists(OUTPUT_DIR) and os.path.exists(LOCAL_OUTPUT_FALLBACK):
-    OUTPUT_DIR = LOCAL_OUTPUT_FALLBACK
-DB_PATH = os.path.join(OUTPUT_DIR, 'processed_videos.db')
-CHANGELOG_PATH = os.path.join(BASE_DIR, 'CHANGELOG.md')
-if not os.path.exists(CHANGELOG_PATH):
-    _changelog_alt = os.path.join(os.path.dirname(BASE_DIR), 'CHANGELOG.md')
-    if os.path.exists(_changelog_alt):
-        CHANGELOG_PATH = _changelog_alt
-VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mpeg', '.mpg', '.mov', '.ts', '.m2ts', '.webm', '.wmv'}
-SYSTEM_DIRS = {'bin', 'boot', 'dev', 'etc', 'home', 'lib', 'lib64', 'media', 'mnt', 'opt', 'proc', 'root', 'run', 'sbin', 'srv', 'sys', 'tmp', 'usr', 'var', 'app', 'defaults', 'config', 'output'}
-
-# --- CONSTANTS ---
-DB_TIMEOUT = 120  # Database connection timeout in seconds
-PROCESSED_MAP_CHUNK_SIZE = 10000  # Number of records to load from database per chunk
-MAX_RETRIES = 2  # Maximum retries for file analysis
-RETRY_DELAY_INITIAL = 1  # Initial retry delay in seconds (exponential backoff)
-RPU_CACHE_MAX_SIZE = 50000  # Maximum RPU cache entries (LRU eviction)
-LOG_CLEANUP_LIMIT = 5  # Number of old log files to keep
-MAX_SCAN_ATTEMPTS = 3  # Maximum scan attempts before skipping a file
-PROGRESS_UPDATE_INTERVAL = 10  # Update progress every N files (reduces lock contention)
-SUBPROCESS_TIMEOUT = 30  # Subprocess timeout in seconds (30 seconds per command)
-MEDIAINFO_TIMEOUT = 120  # MediaInfo can be slower on large REMUX files
-
-# --- GLOBAL STATE ---
-APP_START_TIME = time.time()
-APP_VERSION_FALLBACK = os.environ.get("APP_VERSION", "dev")
-RADARR_URL = (os.environ.get("RADARR_URL") or "").strip().rstrip("/")
-RADARR_API_KEY = (os.environ.get("RADARR_API_KEY") or "").strip()
-SONARR_URL = (os.environ.get("SONARR_URL") or "").strip().rstrip("/")
-SONARR_API_KEY = (os.environ.get("SONARR_API_KEY") or "").strip()
-ARR_STATUS_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": None}
-TOOL_VERSION_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": None}
-# Unfiltered library stats for /api/videos/meta (invalidated on any DB write via get_db).
-LIBRARY_STATS_CACHE: Dict[str, Any] = {"bundle": None}
-library_stats_cache_lock = threading.Lock()
-PROGRESS = {
-    "status": "idle", "current": 0, "total": 0, "file": "Waiting...", 
-    "last_full_scan": "Never", "last_duration": "--",
-    "scan_completed": False, "new_found": 0, "failed_count": 0, "last_duration": "0s",
-    "eta": "", "start_time": 0, "paused": False, "warning_count": 0, "job_id": None
-}
-ABORT_SCAN = False
-ACTIVE_SCAN_JOB_ID: str | None = None
-PAUSE_EVENT = threading.Event()
-PAUSE_EVENT.set()
-LOG_CACHE = []
-DIAG_LOG_TS = 0.0
-API_LOG_TS = 0.0
-progress_lock = threading.Lock()
-# Paths currently being analyzed (path -> display name); drives scan-info label.
-ACTIVE_SCAN_FILES: OrderedDict[str, str] = OrderedDict()
-db_access_lock = threading.Lock()
-LOG_FILE = ""
-FAIL_FILE = ""
-DEBUG_MODE = False
+# Compatibility aliases for tests and remaining core functions.
+ABORT_SCAN = va_state.ABORT_SCAN
+DEBUG_MODE = va_state.DEBUG_MODE
+ACTIVE_SCAN_JOB_ID = va_state.ACTIVE_SCAN_JOB_ID
+LOG_FILE = va_state.LOG_FILE
+FAIL_FILE = va_state.FAIL_FILE
+DIAG_LOG_TS = va_state.DIAG_LOG_TS
+API_LOG_TS = va_state.API_LOG_TS
+scheduler = va_state.scheduler
 
 def is_heavy_job_running() -> bool:
     """True while a library scan or backfill owns PROGRESS status=scanning."""
@@ -127,33 +93,6 @@ def reject_if_busy(status_code: int = 409):
         "status": "busy",
         "message": f"A scan or heavy job is already running: {detail}",
     }), status_code
-
-# PROCESS TRACKING FOR INSTANT KILL
-ACTIVE_PROCS = set()
-proc_lock = threading.Lock()
-
-# RPU CACHE - Cache RPU extraction results to avoid re-extraction
-# Key: (file_path, file_size, mtime), Value: {'dovi_data': dict, 'rpu_size': int}
-# Using LRU eviction - most recently used items are kept
-RPU_CACHE = OrderedDict()  # OrderedDict for LRU behavior
-rpu_cache_lock = threading.Lock()
-
-def app_version() -> str:
-    """Return the latest semantic version listed in CHANGELOG.md."""
-    try:
-        with open(CHANGELOG_PATH, 'r', encoding='utf-8') as f:
-            for line in f:
-                match = re.match(r"^##\s+v?(\d+\.\d+\.\d+)\s*$", line.strip(), re.IGNORECASE)
-                if match:
-                    return match.group(1)
-    except OSError:
-        pass
-    return (APP_VERSION_FALLBACK or "dev").strip()
-
-def app_version_label() -> str:
-    version = app_version()
-    return version if version.lower().startswith("v") or version == "dev" else f"v{version}"
-
 def clear_rpu_cache() -> None:
     """
     Clear the RPU cache. Useful for force rescans or when cache becomes stale.
@@ -161,13 +100,13 @@ def clear_rpu_cache() -> None:
     global RPU_CACHE
     with rpu_cache_lock:
         RPU_CACHE.clear()
-        if DEBUG_MODE: log_debug("RPU cache cleared", "DEBUG")
+        if va_state.DEBUG_MODE: log_debug("RPU cache cleared", "DEBUG")
 
-scheduler = None
 if HAS_SCHEDULER:
     try:
-        scheduler = BackgroundScheduler()
-        scheduler.start()
+        va_state.scheduler = BackgroundScheduler()
+        va_state.scheduler.start()
+        scheduler = va_state.scheduler
     except (OSError, ValueError) as e:
         print(f"Error starting scheduler: {e}")
 
@@ -263,16 +202,16 @@ def restore_scan_schedule_from_settings() -> None:
 # --- HELPERS ---
 def setup_new_log_files() -> None:
     """Initialize new log files for the current scan session."""
-    global LOG_FILE, FAIL_FILE
+    # log paths on va_state
     if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    LOG_FILE = os.path.join(OUTPUT_DIR, f"{ts}_scan_activity.log")
-    FAIL_FILE = os.path.join(OUTPUT_DIR, f"{ts}_scan_failures.csv")
+    va_state.LOG_FILE = os.path.join(OUTPUT_DIR, f"{ts}_scan_activity.log")
+    va_state.FAIL_FILE = os.path.join(OUTPUT_DIR, f"{ts}_scan_failures.csv")
     try:
-        with open(FAIL_FILE, 'w', newline='', encoding='utf-8') as f:
+        with open(va_state.FAIL_FILE, 'w', newline='', encoding='utf-8') as f:
             csv.writer(f, delimiter='|').writerow(['Timestamp', 'Volume', 'Path', 'Filename', 'Error'])
     except (OSError, IOError) as e:
-        if DEBUG_MODE:
+        if va_state.DEBUG_MODE:
             log_debug(f"Failed to create failure log file: {e}", "WARNING")
 
 def cleanup_old_logs(limit: int = LOG_CLEANUP_LIMIT) -> None:
@@ -290,28 +229,12 @@ def cleanup_old_logs(limit: int = LOG_CLEANUP_LIMIT) -> None:
                     try: 
                         os.remove(f)
                     except (OSError, IOError) as e:
-                        if DEBUG_MODE:
+                        if va_state.DEBUG_MODE:
                             log_debug(f"Failed to remove old log file {f}: {e}", "WARNING")
     except (OSError, IOError) as e:
-        if DEBUG_MODE:
+        if va_state.DEBUG_MODE:
             log_debug(f"Error during log cleanup: {e}", "WARNING")
 
-def cleanup_old_rpu_files() -> None:
-    """Clean up any leftover RPU temporary files from previous runs."""
-    try:
-        temp_dir = tempfile.gettempdir()
-        for pattern in ['dovi_*_rpu.bin', 'temp_*_rpu.bin']:
-            for temp_file in glob.glob(os.path.join(temp_dir, pattern)):
-                try:
-                    if os.path.exists(temp_file):
-                        os.remove(temp_file)
-                        if DEBUG_MODE:
-                            log_debug(f"Cleaned up leftover RPU temp file: {temp_file}", "DEBUG")
-                except OSError:
-                    pass  # File may have been deleted already or is in use
-    except (OSError, PermissionError) as e:
-        if DEBUG_MODE:
-            log_debug(f"Error cleaning up old RPU files: {e}", "WARNING")
 
 setup_new_log_files()
 cleanup_old_logs()
@@ -323,8 +246,8 @@ def log_debug(msg: str, level: str = "INFO") -> None:
     fmt = f"[{ts}] [{level}] {safe}"
     print(fmt, flush=True)
     try:
-        if LOG_FILE:
-            with open(LOG_FILE, 'a', encoding='utf-8') as f: f.write(f"{fmt}\n")
+        if va_state.LOG_FILE:
+            with open(va_state.LOG_FILE, 'a', encoding='utf-8') as f: f.write(f"{fmt}\n")
     except OSError as e:
         print(f"Failed to write to log file: {e}", flush=True)
     with progress_lock:
@@ -335,8 +258,8 @@ def log_failure(vol: str, path: str, name: str, err: str) -> None:
     """Log a scan failure to both the failure CSV and debug log."""
     try:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if FAIL_FILE:
-            with open(FAIL_FILE, 'a', newline='', encoding='utf-8') as f:
+        if va_state.FAIL_FILE:
+            with open(va_state.FAIL_FILE, 'a', newline='', encoding='utf-8') as f:
                 csv.writer(f, delimiter='|').writerow([ts, vol, path, name, err])
         # Also log to debug console
         log_debug(f"[FAILURE] {vol}: {name} - {err}", "ERROR")
@@ -347,8 +270,8 @@ def log_scan_warning(path: str, name: str, message: str) -> None:
     """Log a scan warning to the failure CSV so it shows in the failure log file."""
     try:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if FAIL_FILE:
-            with open(FAIL_FILE, 'a', newline='', encoding='utf-8') as f:
+        if va_state.FAIL_FILE:
+            with open(va_state.FAIL_FILE, 'a', newline='', encoding='utf-8') as f:
                 csv.writer(f, delimiter='|').writerow([ts, 'WARNING', path, name, message])
         with progress_lock:
             PROGRESS["warning_count"] = PROGRESS.get("warning_count", 0) + 1
@@ -372,7 +295,7 @@ def record_scan_history(entry: Dict[str, Any]) -> None:
                 "DELETE FROM scan_history WHERE id NOT IN (SELECT id FROM scan_history ORDER BY id DESC LIMIT 50)"
             )
     except Exception as e:
-        if DEBUG_MODE:
+        if va_state.DEBUG_MODE:
             log_debug(f"Failed to record scan history: {e}", "WARNING")
 
 def create_scan_job(options: Dict[str, Any]) -> str:
@@ -410,13 +333,13 @@ def update_scan_job(job_id: str | None, status: str | None = None,
             with get_db() as conn:
                 conn.execute(f"UPDATE scan_jobs SET {', '.join(fields)} WHERE job_id = ?", values)
     except (sqlite3.Error, TypeError, ValueError) as e:
-        if DEBUG_MODE:
+        if va_state.DEBUG_MODE:
             log_debug(f"Failed to persist scan job {job_id}: {e}", "WARNING")
 
 def wait_if_paused() -> None:
     """Block worker threads while scan is paused; abort still exits immediately."""
     while not PAUSE_EVENT.is_set():
-        if ABORT_SCAN:
+        if va_state.ABORT_SCAN:
             raise RuntimeError("Scan Aborted")
         time.sleep(0.2)
 
@@ -494,295 +417,6 @@ def resolve_allowed_media_path(path: str) -> tuple[Optional[str], Optional[str]]
             return real, None
     return None, "Path is outside allowed media mounts"
 
-# --- DATABASE ---
-@contextmanager
-def get_db() -> Any:
-    """
-    Context manager for database connections with automatic commit/rollback.
-    
-    Yields:
-        sqlite3.Connection: Database connection object
-        
-    Example:
-        with get_db() as conn:
-            conn.execute("SELECT * FROM videos")
-    """
-    """
-    Context manager for database connections with thread safety.
-    
-    Yields:
-        sqlite3.Connection: Database connection object
-    """
-    with db_access_lock:
-        conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
-            yield conn
-            # Invalidate only when this connection mutated rows (avoid wiping cache on read-only get_db use).
-            changed = conn.total_changes > 0
-            conn.commit()
-            if changed:
-                invalidate_library_stats_cache()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-def invalidate_library_stats_cache() -> None:
-    """Drop cached unfiltered library stats so the next meta request rebuilds them."""
-    with library_stats_cache_lock:
-        LIBRARY_STATS_CACHE["bundle"] = None
-
-def _load_scan_folders(conn: Any) -> list:
-    try:
-        row = conn.execute("SELECT value FROM settings WHERE key='scan_folders'").fetchone()
-        folders = json.loads(row[0]) if row and row[0] else []
-    except Exception:
-        folders = []
-    if isinstance(folders, dict):
-        folders = [folders]
-    if not isinstance(folders, list):
-        folders = []
-    return folders
-
-def _path_counts_for_where(conn: Any, where_clause: str, params: list[Any]) -> Tuple[List[str], List[int]]:
-    labels: list[str] = []
-    counts: list[int] = []
-    for f in _load_scan_folders(conn) or []:
-        if not isinstance(f, dict):
-            continue
-        if f.get('muted'):
-            continue
-        vol = (f.get('volume') or '').strip()
-        path = (f.get('path') or '').strip()
-        if not vol:
-            continue
-        label = f"{vol}{'/' + path if path else ''}"
-        labels.append(label)
-        if path:
-            normalized = path.replace('\\', '/').strip('/')
-            prefix = f"/{vol}/{normalized}"
-            like_pattern = f"%{prefix}%"
-            count = conn.execute(
-                f"SELECT COUNT(*) FROM videos WHERE {where_clause} AND source_vol = ? AND (full_path LIKE ? OR REPLACE(full_path, '\\\\', '/') LIKE ?)",
-                params + [vol, like_pattern, like_pattern],
-            ).fetchone()[0]
-        else:
-            count = conn.execute(
-                f"SELECT COUNT(*) FROM videos WHERE {where_clause} AND source_vol = ?",
-                params + [vol],
-            ).fetchone()[0]
-        counts.append(count)
-    return labels, counts
-
-def _group_col_counts(conn: Any, col: str, where_clause: Optional[str] = None, params: Optional[list[Any]] = None) -> Dict[Any, int]:
-    clause = f"{col} != '' AND {col} IS NOT NULL"
-    query_params: list[Any] = list(params or [])
-    if where_clause:
-        clause = f"{clause} AND {where_clause}"
-    return {
-        r[0]: r[1]
-        for r in conn.execute(
-            f"SELECT {col}, COUNT(*) FROM videos WHERE {clause} GROUP BY {col}",
-            query_params,
-        ).fetchall()
-    }
-
-def _secondary_hdr_counts(conn: Any, where_clause: str, params: list[Any]) -> Dict[str, int]:
-    clause = where_clause or "1=1"
-    result: Dict[str, int] = {}
-    for key, val in conn.execute(
-        f"SELECT secondary_hdr, COUNT(*) FROM videos WHERE {clause} GROUP BY secondary_hdr",
-        params,
-    ).fetchall():
-        result[key if key else 'none'] = val
-    return result
-
-def _audio_codec_counts_sql(conn: Any, where_sql: str, params: list[Any]) -> Dict[str, int]:
-    """
-    Count individual codecs from comma-separated audio_codecs using a recursive CTE.
-    Avoids fetching every matching row into Python for splitting.
-    """
-    clause = where_sql or "1=1"
-    rows = conn.execute(
-        f"""
-        WITH RECURSIVE
-        filtered AS (
-            SELECT audio_codecs AS raw
-            FROM videos
-            WHERE audio_codecs IS NOT NULL AND audio_codecs != '' AND ({clause})
-        ),
-        split(codec, rest) AS (
-            SELECT
-                TRIM(
-                    CASE
-                        WHEN INSTR(raw, ',') > 0 THEN SUBSTR(raw, 1, INSTR(raw, ',') - 1)
-                        ELSE raw
-                    END
-                ),
-                CASE
-                    WHEN INSTR(raw, ',') > 0 THEN SUBSTR(raw, INSTR(raw, ',') + 1)
-                    ELSE ''
-                END
-            FROM filtered
-            UNION ALL
-            SELECT
-                TRIM(
-                    CASE
-                        WHEN INSTR(rest, ',') > 0 THEN SUBSTR(rest, 1, INSTR(rest, ',') - 1)
-                        ELSE rest
-                    END
-                ),
-                CASE
-                    WHEN INSTR(rest, ',') > 0 THEN SUBSTR(rest, INSTR(rest, ',') + 1)
-                    ELSE ''
-                END
-            FROM split
-            WHERE rest != ''
-        )
-        SELECT codec, COUNT(*) AS cnt
-        FROM split
-        WHERE codec IS NOT NULL AND codec != ''
-        GROUP BY codec
-        """,
-        params,
-    ).fetchall()
-    return {str(r[0]): int(r[1]) for r in rows if r[0]}
-
-def _compute_enriched_stats(conn: Any, where_sql: str, params: list[Any], include_sizes: bool = False) -> Dict[str, Any]:
-    """Build ribbon/chart stats for a WHERE scope via SQL aggregations (no full-row Python scan)."""
-    stats = _build_stats_sql(conn, where_sql, params)
-    if where_sql == "1=1":
-        vol = _group_col_counts(conn, 'source_vol', None, [])
-        res = _group_col_counts(conn, 'resolution', None, [])
-    else:
-        vol = _group_col_counts(conn, 'source_vol', where_sql, params)
-        res = _group_col_counts(conn, 'resolution', where_sql, params)
-    stats['vol_labels'] = list(vol.keys())
-    stats['vol_data'] = list(vol.values())
-    stats['res_labels'] = list(res.keys())
-    stats['res_data'] = list(res.values())
-    stats['secondary_hdrs'] = _secondary_hdr_counts(conn, where_sql, params)
-    stats['path_labels'], stats['path_data'] = _path_counts_for_where(conn, where_sql, params)
-    stats['last_scan_time'] = PROGRESS["last_duration"]
-    if include_sizes:
-        stats['total_size_all'] = conn.execute("SELECT COALESCE(SUM(file_size), 0) FROM videos").fetchone()[0]
-        stats['total_size_movie'] = conn.execute(
-            "SELECT COALESCE(SUM(file_size), 0) FROM videos WHERE LOWER(media_type) = 'movie'"
-        ).fetchone()[0]
-        stats['total_size_tv'] = conn.execute(
-            "SELECT COALESCE(SUM(file_size), 0) FROM videos WHERE LOWER(media_type) = 'tv'"
-        ).fetchone()[0]
-    return stats
-
-def _build_stats_sql(conn: Any, where_sql: str, params: list[Any]) -> Dict[str, Any]:
-    """
-    Ribbon badge counts using SQL aggregates.
-    Matches prior Python semantics: failed rows count toward total/failed only;
-    category/hybrid badges ignore failed rows.
-    """
-    ok = "(scan_error IS NULL OR scan_error = '')"
-    row = conn.execute(
-        f"""
-        SELECT
-          COUNT(*) AS total,
-          COALESCE(SUM(CASE WHEN scan_error IS NOT NULL AND scan_error != '' THEN 1 ELSE 0 END), 0) AS failed,
-          COALESCE(SUM(CASE WHEN {ok} AND is_hybrid = 1 THEN 1 ELSE 0 END), 0) AS hybrid,
-          COALESCE(SUM(CASE WHEN {ok} AND COALESCE(is_source_hybrid, 0) = 1 THEN 1 ELSE 0 END), 0) AS source_hybrid,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' THEN 1 ELSE 0 END), 0) AS dovi,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '7' AND el_type = 'FEL' THEN 1 ELSE 0 END), 0) AS dovi_p7_fel,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '7' AND IFNULL(el_type, '') != 'FEL' THEN 1 ELSE 0 END), 0) AS dovi_p7_mel,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '5' THEN 1 ELSE 0 END), 0) AS dovi_p5,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '8.1' THEN 1 ELSE 0 END), 0) AS dovi_p81,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '8.4' THEN 1 ELSE 0 END), 0) AS dovi_p84,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '8' THEN 1 ELSE 0 END), 0) AS dovi_p8,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '10.1' THEN 1 ELSE 0 END), 0) AS dovi_p101,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '10.4' THEN 1 ELSE 0 END), 0) AS dovi_p104,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'dovi' AND profile = '10' THEN 1 ELSE 0 END), 0) AS dovi_p10,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'hdr10plus' THEN 1 ELSE 0 END), 0) AS hdr10plus,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'hdr10' THEN 1 ELSE 0 END), 0) AS hdr10,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'hlg' THEN 1 ELSE 0 END), 0) AS hlg,
-          COALESCE(SUM(CASE WHEN {ok} AND category = 'sdr_only' THEN 1 ELSE 0 END), 0) AS sdr
-        FROM videos
-        WHERE {where_sql}
-        """,
-        params,
-    ).fetchone()
-    return {
-        "total": int(row["total"] or 0),
-        "failed": int(row["failed"] or 0),
-        "hybrid": int(row["hybrid"] or 0),
-        "source_hybrid": int(row["source_hybrid"] or 0),
-        "dovi": int(row["dovi"] or 0),
-        "dovi_p7_fel": int(row["dovi_p7_fel"] or 0),
-        "dovi_p7_mel": int(row["dovi_p7_mel"] or 0),
-        "dovi_p81": int(row["dovi_p81"] or 0),
-        "dovi_p84": int(row["dovi_p84"] or 0),
-        "dovi_p8": int(row["dovi_p8"] or 0),
-        "dovi_p5": int(row["dovi_p5"] or 0),
-        "dovi_p101": int(row["dovi_p101"] or 0),
-        "dovi_p104": int(row["dovi_p104"] or 0),
-        "dovi_p10": int(row["dovi_p10"] or 0),
-        "hdr10plus": int(row["hdr10plus"] or 0),
-        "hdr10": int(row["hdr10"] or 0),
-        "hlg": int(row["hlg"] or 0),
-        "sdr": int(row["sdr"] or 0),
-        "vol_labels": [],
-        "vol_data": [],
-        "res_labels": [],
-        "res_data": [],
-        "secondary_hdrs": {},
-    }
-
-def get_or_build_library_stats_bundle(conn: Any) -> Dict[str, Any]:
-    """
-    Cached unfiltered library stats (all / movie / tv) + library_total.
-    Safe across filter clicks; rebuilt after any write transaction.
-    """
-    with library_stats_cache_lock:
-        cached = LIBRARY_STATS_CACHE.get("bundle")
-        if cached is not None:
-            return copy.deepcopy(cached)
-
-    bundle = {
-        "library_total": conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0],
-        "stats": _compute_enriched_stats(conn, "1=1", [], include_sizes=True),
-        "stats_movie": _compute_enriched_stats(conn, "LOWER(media_type) = 'movie'", []),
-        "stats_tv": _compute_enriched_stats(conn, "LOWER(media_type) = 'tv'", []),
-    }
-    with library_stats_cache_lock:
-        LIBRARY_STATS_CACHE["bundle"] = bundle
-        return copy.deepcopy(bundle)
-
-@contextmanager
-def get_db_readonly() -> Any:
-    """
-    Context manager for read-only database connections without a global lock.
-    Safe with WAL; allows UI polling during scans.
-    """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-def ensure_video_column(col: str, type_def: str) -> None:
-    """
-    Ensure a column exists on videos table (safe for hot paths).
-    """
-    try:
-        with get_db() as conn:
-            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()}
-            if col not in existing_cols:
-                log_debug(f"Migrating DB: Adding missing column '{col}'...", "WARNING")
-                conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {type_def}")
-    except sqlite3.Error as e:
-        log_debug(f"Migration Error: {e}", "ERROR")
-
 
 def _as_int(value: Any) -> Optional[int]:
     """Convert value to int when possible; otherwise return None."""
@@ -823,7 +457,7 @@ def _arr_request(
             url = f"{url}?{urllib.parse.urlencode(query_clean)}"
 
     _log_safe = f"{method} {base_url}/api/v3/{ep}"
-    if DEBUG_MODE:
+    if va_state.DEBUG_MODE:
         log_debug(f"[ARR] {_log_safe}", "DEBUG")
 
     body = None
@@ -1164,160 +798,6 @@ def get_tool_versions() -> Dict[str, Any]:
     TOOL_VERSION_CACHE["ts"] = now
     TOOL_VERSION_CACHE["payload"] = payload
     return payload
-
-def init_db() -> None:
-    """
-    Initialize the database with required tables and migrations.
-    """
-    log_debug("Initializing Database...")
-    if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    with get_db() as conn:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS schema_migrations
-               (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"""
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-            (1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-        conn.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
-        conn.execute('CREATE TABLE IF NOT EXISTS scan_history (id INTEGER PRIMARY KEY AUTOINCREMENT, entry TEXT, created_at TEXT)')
-        conn.execute('''CREATE TABLE IF NOT EXISTS storage_snapshots
-                        (id INTEGER PRIMARY KEY AUTOINCREMENT, captured_at TEXT NOT NULL,
-                         total_bytes INTEGER NOT NULL DEFAULT 0,
-                         duplicate_savings_bytes INTEGER NOT NULL DEFAULT 0)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS scan_jobs
-                        (job_id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at TEXT,
-                         finished_at TEXT, options TEXT, progress TEXT)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS videos 
-                        (filename TEXT, category TEXT, profile TEXT, el_type TEXT, 
-                         container TEXT, source_vol TEXT, full_path TEXT PRIMARY KEY,
-                         last_scanned TEXT, resolution TEXT, bitrate_mbps REAL, scan_error TEXT,
-                         is_hybrid INTEGER DEFAULT 0, secondary_hdr TEXT,
-                         width INTEGER, height INTEGER, file_size INTEGER, bl_compatibility_id TEXT,
-                        audio_codecs TEXT, audio_langs TEXT, audio_channels TEXT, subtitles TEXT, max_cll TEXT, max_fall TEXT,
-                        fps REAL, aspect_ratio TEXT,
-                        imdb_id TEXT, tvdb_id TEXT, tmdb_id TEXT, rotten_id TEXT, metacritic_id TEXT, trakt_id TEXT,
-                        imdb_rating REAL, tvdb_rating REAL, tmdb_rating REAL, rotten_rating REAL, metacritic_rating REAL, trakt_rating REAL,
-                         scan_attempts INTEGER DEFAULT 0,
-                         video_source TEXT, source_format TEXT, video_codec TEXT, is_3d INTEGER DEFAULT 0, edition TEXT, year INTEGER,
-                         media_type TEXT, show_title TEXT, season INTEGER, episode INTEGER, movie_title TEXT, episode_title TEXT,
-                         nfo_missing INTEGER DEFAULT 0, missing INTEGER DEFAULT 0, validation_flag TEXT,
-                         dup_group_key TEXT, dup_exact_key TEXT, dup_count INTEGER DEFAULT 0)''')
-        
-        try:
-            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()}
-            required_cols = {
-                'audio_codecs': 'TEXT', 'audio_langs': 'TEXT', 'audio_channels': 'TEXT', 'subtitles': 'TEXT', 
-                'max_cll': 'TEXT', 'max_fall': 'TEXT', 'scan_attempts': 'INTEGER DEFAULT 0',
-                'fps': 'REAL', 'aspect_ratio': 'TEXT',
-                'imdb_id': 'TEXT', 'tvdb_id': 'TEXT', 'tmdb_id': 'TEXT', 'rotten_id': 'TEXT', 'metacritic_id': 'TEXT', 'trakt_id': 'TEXT',
-                'imdb_rating': 'REAL', 'tvdb_rating': 'REAL', 'tmdb_rating': 'REAL', 'rotten_rating': 'REAL', 'metacritic_rating': 'REAL', 'trakt_rating': 'REAL',
-                'video_source': 'TEXT', 'source_format': 'TEXT', 'video_codec': 'TEXT', 
-                'is_3d': 'INTEGER DEFAULT 0', 'edition': 'TEXT', 'year': 'INTEGER',
-                'is_source_hybrid': 'INTEGER DEFAULT 0',
-                'media_type': 'TEXT', 'show_title': 'TEXT', 'season': 'INTEGER', 'episode': 'INTEGER',
-                'movie_title': 'TEXT', 'episode_title': 'TEXT', 'nfo_missing': 'INTEGER DEFAULT 0', 'missing': 'INTEGER DEFAULT 0', 'validation_flag': 'TEXT',
-                'dup_group_key': 'TEXT', 'dup_exact_key': 'TEXT', 'dup_count': 'INTEGER DEFAULT 0',
-                'tvdb_series_id': 'TEXT', 'tvdb_episode_id': 'TEXT', 'imdb_series_id': 'TEXT', 'imdb_episode_id': 'TEXT',
-                'tmdb_series_id': 'TEXT', 'tmdb_episode_id': 'TEXT', 'trakt_series_id': 'TEXT', 'trakt_episode_id': 'TEXT',
-                'rotten_series_id': 'TEXT', 'rotten_episode_id': 'TEXT', 'metacritic_series_id': 'TEXT', 'metacritic_episode_id': 'TEXT'
-            }
-            for col, type_def in required_cols.items():
-                if col not in existing_cols: 
-                    log_debug(f"Migrating DB: Adding missing column '{col}'...")
-                    conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {type_def}")
-        except sqlite3.Error as e:
-            log_debug(f"Migration Error: {e}")
-
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_category ON videos (category)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_vol ON videos (source_vol)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_profile ON videos (profile)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_container ON videos (container)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_resolution ON videos (resolution)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_error ON videos (scan_error)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_is_hybrid ON videos (is_hybrid)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_last_scanned ON videos (last_scanned)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_video_source ON videos (video_source)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_source_format ON videos (source_format)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_video_codec ON videos (video_codec)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_is_3d ON videos (is_3d)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_year ON videos (year)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_media_type ON videos (media_type)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_dup_group_key ON videos (dup_group_key)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_dup_exact_key ON videos (dup_exact_key)")
-        # Additional filter / sort helpers (safe IF NOT EXISTS for existing DBs)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_el_type ON videos (el_type)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_secondary_hdr ON videos (secondary_hdr)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_edition ON videos (edition)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_missing ON videos (missing)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_nfo_missing ON videos (nfo_missing)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_is_source_hybrid ON videos (is_source_hybrid)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON videos (file_size)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_bitrate_mbps ON videos (bitrate_mbps)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_dup_count ON videos (dup_count)")
-        # Expression indexes match LOWER(...) filter predicates used by build_filter_query
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_category_lower ON videos (LOWER(category))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_media_type_lower ON videos (LOWER(media_type))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_vol_lower ON videos (LOWER(source_vol))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_resolution_lower ON videos (LOWER(resolution))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_secondary_hdr_lower ON videos (LOWER(secondary_hdr))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_lower ON videos (LOWER(profile))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_el_type_lower ON videos (LOWER(el_type))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_container_lower ON videos (LOWER(container))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_edition_lower ON videos (LOWER(edition))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_video_source_lower ON videos (LOWER(video_source))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_source_format_lower ON videos (LOWER(source_format))")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_video_codec_lower ON videos (LOWER(video_codec))")
-        recompute_duplicate_counts(conn)
-        
-        defaults = {'threads': '4', 'skip_words': 'trailer,sample', 'min_size_mb': '50', 'refresh_interval': '60', 'notif_style': 'modal', 'force_rescan': 'false', 'column_order': '', 'scan_folders': '[]', 'scan_extras': 'false', 'debug_mode': 'false', 'remove_missing_from_db': 'true', 'duplicate_check_on_scan': 'false'}
-        for k, v in defaults.items(): conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
-
-<<<<<<< Updated upstream
-=======
-<<<<<<< HEAD
-=======
->>>>>>> Stashed changes
-        interrupted = conn.execute(
-            "SELECT job_id FROM scan_jobs WHERE status='running'"
-        ).fetchall()
-        for row in interrupted:
-            conn.execute(
-                "UPDATE scan_jobs SET status='interrupted', finished_at=? WHERE job_id=?",
-                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row[0])
-            )
-        if interrupted:
-            conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_interrupted_scan', ?)",
-                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)
-            )
-
-        # Restore last scan ribbon values so idle UI survives container restarts
-        try:
-            persisted = dict(conn.execute(
-                "SELECT key, value FROM settings WHERE key IN ('last_full_scan', 'last_duration')"
-            ).fetchall())
-            with progress_lock:
-                if persisted.get("last_full_scan"):
-                    PROGRESS["last_full_scan"] = persisted["last_full_scan"]
-                if persisted.get("last_duration"):
-                    PROGRESS["last_duration"] = persisted["last_duration"]
-        except Exception as e:
-            log_debug(f"Could not restore last scan settings: {e}", "WARNING")
-
->>>>>>> 36c746e2294d8d14cc7c82658e797c6e61a42eee
-    log_debug("Database ready.")
-    
-    mounts = get_mount_status()
-    if mounts:
-        log_debug("--- VOLUME STATUS CHECK ---")
-        for vol, path in mounts.items():
-            log_debug(f"Volume {vol}: ONLINE ✅")
-    else:
-        log_debug("⚠️ No media volumes detected in root.")
-
 # --- EXECUTION WRAPPER ---
 def run_command(cmd_list: list, capture: bool = True, capture_stderr: bool = False, timeout_seconds: Optional[int] = None) -> tuple[int, str, str]:
     """
@@ -1334,8 +814,8 @@ def run_command(cmd_list: list, capture: bool = True, capture_stderr: bool = Fal
     Returns:
         Tuple of (return_code, stdout, stderr) if capture_stderr is True, (return_code, stdout, "") otherwise
     """
-    global ABORT_SCAN
-    if ABORT_SCAN: raise RuntimeError("Scan Aborted")
+    # abort flag on va_state
+    if va_state.ABORT_SCAN: raise RuntimeError("Scan Aborted")
     
     # Match old version exactly: use text=True, pass paths as strings
     # Path is already normalized via os.fsencode/fsdecode in scan_file_worker
@@ -1351,7 +831,7 @@ def run_command(cmd_list: list, capture: bool = True, capture_stderr: bool = Fal
         time.sleep(timeout_value)
         if p.poll() is None:  # Process still running
             timeout_occurred.set()
-            if DEBUG_MODE: log_debug(f"[RUN_COMMAND] Timeout thread killing process {p.pid} for: {cmd_list[0]}", "WARNING")
+            if va_state.DEBUG_MODE: log_debug(f"[RUN_COMMAND] Timeout thread killing process {p.pid} for: {cmd_list[0]}", "WARNING")
             try:
                 os.killpg(os.getpgid(p.pid), signal.SIGTERM)
             except (OSError, ProcessLookupError, ValueError):
@@ -1366,7 +846,7 @@ def run_command(cmd_list: list, capture: bool = True, capture_stderr: bool = Fal
     
     try:
         # Check for abort before blocking on communicate
-        if ABORT_SCAN: 
+        if va_state.ABORT_SCAN: 
             p.kill()
             raise RuntimeError("Scan Aborted")
         # Try communicate with timeout first
@@ -2185,6 +1665,151 @@ def extract_video_codec(filename: str, probe_data: dict) -> str | None:
         return codec_from_probe
     return codec_from_filename
 
+_DOVI_CONFIG_BOXES = {b"dvcC", b"dvvC", b"dvwC"}
+_ISOM_CONTAINER_BOXES = {
+    b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd",
+    b"udta", b"meta", b"iprp", b"ipco", b"moof", b"traf",
+    b"vexu", b"eyes",
+}
+_ISOM_CONTAINER_EXTS = {".mp4", ".mov", ".m4v", ".cmfv", ".qt"}
+
+
+def _decode_dovi_config_payload(payload: bytes) -> dict | None:
+    """Decode dvcC/dvvC/dvwC payload into profile / level / compatibility id."""
+    if len(payload) < 4:
+        return None
+    tmp = (payload[2] << 8) | payload[3]
+    profile = (tmp >> 9) & 0x7F
+    level = (tmp >> 3) & 0x3F
+    rpu = (tmp >> 2) & 0x01
+    el = (tmp >> 1) & 0x01
+    bl = tmp & 0x01
+    compat = None
+    if len(payload) >= 5:
+        compat = (payload[4] >> 4) & 0x0F
+    return {
+        "dovi_profile": str(profile),
+        "dovi_level": str(level),
+        "rpu_present": bool(rpu),
+        "el_present": bool(el),
+        "bl_present": bool(bl),
+        "bl_compatibility_id": str(compat) if compat is not None else None,
+        "dv_version_major": payload[0],
+        "dv_version_minor": payload[1],
+    }
+
+
+def _scan_buffer_for_dovi_config(buf: bytes) -> dict | None:
+    """Find and decode the first dvcC/dvvC/dvwC box inside a byte buffer."""
+    for box in _DOVI_CONFIG_BOXES:
+        idx = buf.find(box)
+        if idx < 4:
+            continue
+        size_off = idx - 4
+        nsize = int.from_bytes(buf[size_off:size_off + 4], "big")
+        if 8 <= nsize <= 64 and size_off + nsize <= len(buf):
+            payload = buf[idx + 4:size_off + nsize]
+        else:
+            payload = buf[idx + 4:idx + 4 + 24]
+        decoded = _decode_dovi_config_payload(payload)
+        if decoded:
+            decoded["box_type"] = box.decode("ascii", errors="replace")
+            return decoded
+    return None
+
+
+def parse_isom_dovi_config(path: str) -> dict | None:
+    """
+    Parse Dolby Vision config from ISOBMFF (MP4/MOV) without loading the whole file.
+
+    Looks for dvcC / dvvC / dvwC boxes. Profile 20 (MV-HEVC stereo) uses dvwC.
+    Also notes Video Extended Usage stereo signalling (vexu/eyes).
+
+    Returns:
+        Dict with dovi_profile, bl_compatibility_id, is_stereo, box_type — or None.
+    """
+    try:
+        file_size = os.path.getsize(path)
+    except OSError:
+        return None
+    if file_size < 16:
+        return None
+
+    found: dict | None = None
+    is_stereo = False
+
+    def walk(f, end: int, depth: int = 0) -> None:
+        nonlocal found, is_stereo
+        if depth > 24:
+            return
+        while f.tell() + 8 <= end:
+            start = f.tell()
+            header = f.read(8)
+            if len(header) < 8:
+                break
+            size = int.from_bytes(header[:4], "big")
+            typ = header[4:8]
+            hdr_len = 8
+            if size == 1:
+                largesize = f.read(8)
+                if len(largesize) < 8:
+                    break
+                size = int.from_bytes(largesize, "big")
+                hdr_len = 16
+            elif size == 0:
+                size = end - start
+            if size < hdr_len or start + size > end:
+                break
+            payload_start = start + hdr_len
+            payload_end = start + size
+            payload_size = payload_end - payload_start
+
+            if typ in _DOVI_CONFIG_BOXES and found is None and payload_size >= 4:
+                payload = f.read(min(payload_size, 32))
+                decoded = _decode_dovi_config_payload(payload)
+                if decoded:
+                    found = decoded
+                    found["box_type"] = typ.decode("ascii", errors="replace")
+            elif typ in (b"vexu", b"eyes"):
+                is_stereo = True
+                if typ == b"vexu" and payload_size > 0:
+                    f.seek(payload_start)
+                    walk(f, payload_end, depth + 1)
+            elif typ in _ISOM_CONTAINER_BOXES and payload_size > 0:
+                f.seek(payload_start)
+                if typ == b"stsd" and payload_size >= 8:
+                    f.read(8)
+                elif typ == b"meta" and payload_size >= 4:
+                    f.read(4)
+                walk(f, payload_end, depth + 1)
+            elif found is None and 16 < payload_size < 8192 and typ not in (b"mdat", b"free", b"skip", b"wide"):
+                # Sample entries (dvh1/hvc1/…) are not ISO containers — scan nested DOVI boxes
+                f.seek(payload_start)
+                peek = f.read(payload_size)
+                if b"vexu" in peek or b"eyes" in peek:
+                    is_stereo = True
+                decoded = _scan_buffer_for_dovi_config(peek)
+                if decoded:
+                    found = decoded
+
+            f.seek(payload_end)
+            if found is not None and is_stereo:
+                return
+
+    try:
+        with open(path, "rb") as f:
+            walk(f, file_size, 0)
+    except OSError:
+        return None
+
+    if found is None and not is_stereo:
+        return None
+    if found is None:
+        return {"is_stereo": True}
+    found["is_stereo"] = is_stereo or found.get("dovi_profile") == "20"
+    return found
+
+
 def analyze_file_deep(path: str) -> dict:
     """
     Perform deep analysis of a video file to extract metadata.
@@ -2226,7 +1851,7 @@ def analyze_file_deep(path: str) -> dict:
             return _finalize_result(result)
     except (OSError, UnicodeEncodeError, UnicodeDecodeError) as e:
         result['error'] = f"File access error: {str(e)}"
-        if DEBUG_MODE:
+        if va_state.DEBUG_MODE:
             log_debug(f"Early file access check failed for {path}: {e}", "ERROR")
         return _finalize_result(result)
 
@@ -2241,23 +1866,23 @@ def analyze_file_deep(path: str) -> dict:
     try:
         # 1. FFPROBE
         # Path is already properly encoded via os.fsencode/fsdecode in scan_file_worker
-        if DEBUG_MODE: log_debug(f"[FFPROBE] Starting ffprobe for: {path}", "DEBUG")
+        if va_state.DEBUG_MODE: log_debug(f"[FFPROBE] Starting ffprobe for: {path}", "DEBUG")
         probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', path]
         rc, out, err = run_command(probe_cmd, capture_stderr=True)
-        if DEBUG_MODE: log_debug(f"[FFPROBE] Completed with return code: {rc}", "DEBUG")
+        if va_state.DEBUG_MODE: log_debug(f"[FFPROBE] Completed with return code: {rc}", "DEBUG")
         if rc != 0: 
             error_msg = f"ffprobe failed with return code {rc}"
             if err:
                 # Include stderr output for more detailed error information
                 error_msg = f"ffprobe failed (code {rc}): {err.strip()}"
             result['error'] = error_msg
-            if DEBUG_MODE: log_debug(f"ffprobe failed for {path}: {error_msg}", "ERROR")
+            if va_state.DEBUG_MODE: log_debug(f"ffprobe failed for {path}: {error_msg}", "ERROR")
             return _finalize_result(result)
         try:
             probe_data = json.loads(out)
         except json.JSONDecodeError as e:
             result['error'] = f"Failed to parse ffprobe JSON: {e}"
-            if DEBUG_MODE: log_debug(f"JSON parse error for {path}: {e}", "ERROR")
+            if va_state.DEBUG_MODE: log_debug(f"JSON parse error for {path}: {e}", "ERROR")
             return _finalize_result(result)
 
         video_stream = next((s for s in probe_data.get('streams', []) if s['codec_type'] == 'video'), None)
@@ -2519,7 +2144,7 @@ def analyze_file_deep(path: str) -> dict:
                 RPU_CACHE[cache_key] = cached
                 dovi_data = cached.get('dovi_data')
                 rpu_size = cached.get('rpu_size', 0)
-                if DEBUG_MODE: log_debug(f"Using cached RPU data for {path}", "DEBUG")
+                if va_state.DEBUG_MODE: log_debug(f"Using cached RPU data for {path}", "DEBUG")
         
         def _rank_dovi_info(info: dict | None, size: int) -> tuple:
             """Prefer FEL, then any profile, then larger RPU."""
@@ -2539,7 +2164,7 @@ def analyze_file_deep(path: str) -> dict:
             p2 = None
             try:
                 os.close(rpu_fd)
-                if ABORT_SCAN:
+                if va_state.ABORT_SCAN:
                     raise RuntimeError("Scan Aborted")
                 ffmpeg_cmd = ['ffmpeg', '-i', path]
                 if video_map_index is not None:
@@ -2554,7 +2179,7 @@ def analyze_file_deep(path: str) -> dict:
                 with proc_lock:
                     ACTIVE_PROCS.add(p2)
                 p1.stdout.close()
-                if ABORT_SCAN:
+                if va_state.ABORT_SCAN:
                     raise RuntimeError("Scan Aborted")
                 p2.communicate()
                 with proc_lock:
@@ -2577,7 +2202,7 @@ def analyze_file_deep(path: str) -> dict:
                     try:
                         os.remove(rpu_path)
                     except OSError as e:
-                        if DEBUG_MODE:
+                        if va_state.DEBUG_MODE:
                             log_debug(f"Failed to remove RPU file {rpu_path}: {e}", "WARNING")
             return local_data, local_size
 
@@ -2598,7 +2223,7 @@ def analyze_file_deep(path: str) -> dict:
                 best_size = 0
                 best_rank = (-1, -1, -1)
                 for map_idx in map_indexes:
-                    if ABORT_SCAN:
+                    if va_state.ABORT_SCAN:
                         raise RuntimeError("Scan Aborted")
                     cand_data, cand_size = _extract_rpu_via_ffmpeg(map_idx)
                     rank = _rank_dovi_info(cand_data, cand_size)
@@ -2616,15 +2241,15 @@ def analyze_file_deep(path: str) -> dict:
                         if len(RPU_CACHE) >= RPU_CACHE_MAX_SIZE:
                             oldest_key = next(iter(RPU_CACHE))
                             del RPU_CACHE[oldest_key]
-                            if DEBUG_MODE:
+                            if va_state.DEBUG_MODE:
                                 log_debug(f"RPU cache full, evicted oldest entry. Cache size: {len(RPU_CACHE)}", "DEBUG")
                         RPU_CACHE[cache_key] = {'dovi_data': dovi_data, 'rpu_size': rpu_size}
-                        if DEBUG_MODE:
+                        if va_state.DEBUG_MODE:
                             log_debug(f"Cached RPU data for {path} (cache size: {len(RPU_CACHE)})", "DEBUG")
             except RuntimeError:
                 raise
             except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as e:
-                if DEBUG_MODE:
+                if va_state.DEBUG_MODE:
                     log_debug(f"RPU extraction error for {path}: {e}", "ERROR")
         
         # Store dovi_data for processing after all tests are complete
@@ -2684,7 +2309,7 @@ def analyze_file_deep(path: str) -> dict:
                         dovi_el_type_raw = 'MEL'
         elif dovi_profile_from_ffprobe:
             dovi_profile_raw = dovi_profile_from_ffprobe
-            if DEBUG_MODE:
+            if va_state.DEBUG_MODE:
                 log_debug(f"Dolby Vision detected from ffprobe DOVI side_data: profile={dovi_profile_raw}", "DEBUG")
         
         # Note: Format determination happens AFTER MediaInfo to ensure all sources are checked
@@ -2696,7 +2321,7 @@ def analyze_file_deep(path: str) -> dict:
             Handles tokens like:
               - dvhe.08.06
               - dvav.10.01 / dva1.10.04
-              - Profile 10 / Profile 10.1
+              - Profile 10 / Profile 10.1 / Profile 20
             """
             parts = [str(v) for v in values if v]
             if not parts:
@@ -2704,12 +2329,12 @@ def analyze_file_deep(path: str) -> dict:
             text = " ".join(parts)
             lower = text.lower()
 
-            if not any(tok in lower for tok in ("dolby vision", "dovi", "dvhe", "dvh1", "dvav", "dva1")):
+            if not any(tok in lower for tok in ("dolby vision", "dovi", "dvhe", "dvh1", "dvav", "dva1", "dav1")):
                 return None
 
             # Codec/profile token format:
-            #   dvav.10.01, dva1.10.04, dvhe.08.04, dav1.10
-            m = re.search(r'(?:dv(?:he|h1|av|a1)|dav1)\.(\d{2})(?:\.(\d{2}))?', lower)
+            #   dvav.10.01, dva1.10.04, dvhe.08.04, dav1.10, dvh1.20
+            m = re.search(r'(?:dv(?:he|h1|av|a1)|dav1)\.(\d{1,2})(?:\.(\d{2}))?', lower)
             if m:
                 profile_num = str(int(m.group(1)))
                 compat_raw = m.group(2)
@@ -2721,12 +2346,12 @@ def analyze_file_deep(path: str) -> dict:
                         return f"{profile_num}.4"
                 return profile_num
 
-            # Free-form "Profile 10.1" style
+            # Free-form "Profile 10.1" / "Profile 20" style
             m = re.search(r'profile\s*([0-9]{1,2}(?:\.[0-9])?)', lower)
             if m:
                 return m.group(1)
 
-            # Filename-like "DOVI P10.1" style
+            # Filename-like "DOVI P10.1" / "DOVI P20" style
             m = re.search(r'\bdovi?\s*p?([0-9]{1,2}(?:\.[0-9])?)\b', lower)
             if m:
                 return m.group(1)
@@ -2739,13 +2364,13 @@ def analyze_file_deep(path: str) -> dict:
         rc_mi = -1
         out_mi = ""
         try:
-            if DEBUG_MODE: log_debug(f"[MEDIAINFO] Starting mediainfo for: {path}", "DEBUG")
+            if va_state.DEBUG_MODE: log_debug(f"[MEDIAINFO] Starting mediainfo for: {path}", "DEBUG")
             try:
                 rc_mi, out_mi, _ = run_command(['mediainfo', '--Output=JSON', path], timeout_seconds=MEDIAINFO_TIMEOUT)
-                if DEBUG_MODE: log_debug(f"[MEDIAINFO] Completed with return code: {rc_mi}", "DEBUG")
+                if va_state.DEBUG_MODE: log_debug(f"[MEDIAINFO] Completed with return code: {rc_mi}", "DEBUG")
             except (RuntimeError, Exception) as e:
                 # Catch ALL exceptions from MediaInfo (timeout, errors, etc.) and continue without it
-                if DEBUG_MODE: 
+                if va_state.DEBUG_MODE: 
                     error_msg = str(e).lower()
                     if "timed out" in error_msg or "timeout" in error_msg:
                         log_debug(f"[MEDIAINFO] Timed out for: {path}, skipping MediaInfo and continuing", "WARNING")
@@ -2759,7 +2384,7 @@ def analyze_file_deep(path: str) -> dict:
                 try:
                     mi_data = json.loads(out_mi)
                 except json.JSONDecodeError as e:
-                    if DEBUG_MODE: log_debug(f"[MEDIAINFO] JSON decode error for {path}: {e}, skipping MediaInfo data", "WARNING")
+                    if va_state.DEBUG_MODE: log_debug(f"[MEDIAINFO] JSON decode error for {path}: {e}, skipping MediaInfo data", "WARNING")
                     mi_data = None
                 
                 if mi_data:
@@ -2798,7 +2423,7 @@ def analyze_file_deep(path: str) -> dict:
                                 )
                                 if mi_dv_profile:
                                     dovi_profile_raw = mi_dv_profile
-                                    if DEBUG_MODE:
+                                    if va_state.DEBUG_MODE:
                                         log_debug(
                                             f"Dolby Vision detected from MediaInfo fields: profile={mi_dv_profile}",
                                             "DEBUG"
@@ -2826,7 +2451,7 @@ def analyze_file_deep(path: str) -> dict:
                                 if 'HDR10+' in compat_str or 'HDR10PLUS' in compat_str:
                                     if "HDR10+" not in sec_hdrs:
                                         sec_hdrs.append("HDR10+")
-                                        if DEBUG_MODE:
+                                        if va_state.DEBUG_MODE:
                                             log_debug(f"HDR10+ detected from MediaInfo HDR_Format_Compatibility: {hdr_compat}", "DEBUG")
                                 if 'HDR10' in compat_str and "HDR10" not in sec_hdrs:
                                     sec_hdrs.append("HDR10")
@@ -2841,7 +2466,7 @@ def analyze_file_deep(path: str) -> dict:
                                 if 'SMPTE ST 2094' in hdr_str or 'SMPTE2094' in hdr_str or '2094' in hdr_str:
                                     if "HDR10+" not in sec_hdrs:
                                         sec_hdrs.append("HDR10+")
-                                        if DEBUG_MODE:
+                                        if va_state.DEBUG_MODE:
                                             log_debug(f"HDR10+ detected from MediaInfo HDR_Format: {hdr_format}", "DEBUG")
                             
                             # Also check for HDR10+ in transfer characteristics
@@ -2849,12 +2474,38 @@ def analyze_file_deep(path: str) -> dict:
                             if transfer and ('2094' in str(transfer) or 'HDR10+' in str(transfer).upper()):
                                 if "HDR10+" not in sec_hdrs:
                                     sec_hdrs.append("HDR10+")
-                                    if DEBUG_MODE:
+                                    if va_state.DEBUG_MODE:
                                         log_debug(f"HDR10+ detected from MediaInfo transfer_characteristics: {transfer}", "DEBUG")
         except Exception as e:
             # Outer catch for any unexpected errors - continue without MediaInfo
-            if DEBUG_MODE: 
+            if va_state.DEBUG_MODE: 
                 log_debug(f"[MEDIAINFO] Outer exception for {path}: {e}, continuing without MediaInfo data", "WARNING")
+
+        # ISOBMFF dvcC/dvvC/dvwC — authoritative delivery profile for MP4/MOV.
+        # Profile 20 RPU metadata often looks like Profile 5; trust the container box.
+        isom_dovi = None
+        try:
+            ext = pathlib.Path(path).suffix.lower()
+            if ext in _ISOM_CONTAINER_EXTS:
+                isom_dovi = parse_isom_dovi_config(path)
+        except Exception as e:
+            if va_state.DEBUG_MODE:
+                log_debug(f"[ISOM-DOVI] parse failed for {path}: {e}", "WARNING")
+            isom_dovi = None
+        if isom_dovi:
+            if isom_dovi.get("is_stereo"):
+                result["is_3d"] = 1
+            if isom_dovi.get("dovi_profile"):
+                isom_prof = str(isom_dovi["dovi_profile"])
+                if dovi_profile_raw and dovi_profile_raw != isom_prof and va_state.DEBUG_MODE:
+                    log_debug(
+                        f"ISOMBF {isom_dovi.get('box_type')} profile {isom_prof} "
+                        f"overrides prior profile {dovi_profile_raw}",
+                        "DEBUG",
+                    )
+                dovi_profile_raw = isom_prof
+            if isom_dovi.get("bl_compatibility_id") is not None:
+                bl_compatibility_id = str(isom_dovi["bl_compatibility_id"])
 
         # NOW DETERMINE FORMATS AFTER ALL TESTS (ffprobe, dovi_tool, mediainfo) ARE COMPLETE
         # Priority: DV > HDR10+ > HDR10 > HLG > SDR
@@ -2876,11 +2527,11 @@ def analyze_file_deep(path: str) -> dict:
                 profile_prefix = dovi_profile_raw
                 if is_hlg_base:
                     result['dovi_profile'] = f"{profile_prefix}.4"
-                    if DEBUG_MODE:
+                    if va_state.DEBUG_MODE:
                         log_debug(f"Detected P{profile_prefix}.4 (HLG base layer, bl_id={bl_id})", "DEBUG")
                 elif bl_id == "4":
                     result['dovi_profile'] = f"{profile_prefix}.4"
-                    if DEBUG_MODE:
+                    if va_state.DEBUG_MODE:
                         log_debug(f"Detected P{profile_prefix}.4 (bl_id=4)", "DEBUG")
                 elif bl_id == "1":
                     result['dovi_profile'] = f"{profile_prefix}.1"
@@ -2894,15 +2545,24 @@ def analyze_file_deep(path: str) -> dict:
                         result['dovi_profile'] = profile_prefix
             else:
                 result['dovi_profile'] = dovi_profile_raw
+
+            # Profile 20 is MV-HEVC stereoscopic Dolby Vision
+            if str(result.get('dovi_profile') or '').split('.')[0] == '20':
+                result['is_3d'] = 1
             
-            # Set EL type (RPU first; MediaInfo BL+EL/FEL/MEL as fallback)
+            # Set EL type (RPU first; MediaInfo BL+EL/FEL/MEL as fallback) — P7 only
             if not dovi_el_type_raw and mi_el_hint:
                 dovi_el_type_raw = mi_el_hint
-                if DEBUG_MODE:
+                if va_state.DEBUG_MODE:
                     log_debug(f"EL type from MediaInfo HDR_Format_Settings: {mi_el_hint}", "DEBUG")
-            result['dovi_el_type'] = dovi_el_type_raw
+            prof_base = str(result.get('dovi_profile') or '').split('.')[0]
+            if prof_base == '7':
+                result['dovi_el_type'] = dovi_el_type_raw
+            else:
+                # FEL/MEL are Profile 7 concepts; ignore for P5/P20/etc.
+                result['dovi_el_type'] = None
             
-            if DEBUG_MODE:
+            if va_state.DEBUG_MODE:
                 log_debug(f"DV Profile {result['dovi_profile']}, BL_ID: {bl_id}, HLG base: {is_hlg_base}, Sec HDRs: {sec_hdrs}", "DEBUG")
         elif is_hlg_base:
             result['format'] = 'hlg'
@@ -2958,15 +2618,15 @@ def analyze_file_deep(path: str) -> dict:
     except RuntimeError as e:
         if "Scan Aborted" in str(e):
             result['error'] = "Scan aborted by user"
-            if DEBUG_MODE: log_debug(f"Scan aborted during analysis of {path}", "WARNING")
+            if va_state.DEBUG_MODE: log_debug(f"Scan aborted during analysis of {path}", "WARNING")
         else:
             result['error'] = f"Runtime error: {str(e)}"
-            if DEBUG_MODE: log_debug(f"Runtime error analyzing {path}: {e}", "ERROR")
+            if va_state.DEBUG_MODE: log_debug(f"Runtime error analyzing {path}: {e}", "ERROR")
     except Exception as e:
         result['error'] = f"Unexpected error: {str(e)}"
-        if DEBUG_MODE: log_debug(f"Error analyzing {path}: {e}", "ERROR")
+        if va_state.DEBUG_MODE: log_debug(f"Error analyzing {path}: {e}", "ERROR")
         import traceback
-        if DEBUG_MODE: log_debug(f"Traceback: {traceback.format_exc()}", "DEBUG")
+        if va_state.DEBUG_MODE: log_debug(f"Traceback: {traceback.format_exc()}", "DEBUG")
     
     return _finalize_result(result)
 
@@ -3071,7 +2731,7 @@ def scan_file_worker(path_obj: pathlib.Path) -> dict:
         filename = os.fsdecode(os.fsencode(path_obj.name))
     except (UnicodeEncodeError, UnicodeDecodeError, OSError) as e:
         # Fallback if encoding fails - use path as-is
-        if DEBUG_MODE:
+        if va_state.DEBUG_MODE:
             log_debug(f"Path encoding failed for {path_obj}, using fallback: {e}", "WARNING")
         full_path_str = str(path_obj)
         filename = path_obj.name
@@ -3089,7 +2749,7 @@ def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename:
     # Early validation - check if file is accessible before attempting analysis
     try:
         if not os.path.exists(full_path_str):
-            if DEBUG_MODE:
+            if va_state.DEBUG_MODE:
                 log_debug(f"File does not exist: {full_path_str}", "ERROR")
             err_result = {
                 "filename": filename, "category": 'sdr_only', "profile": None,
@@ -3118,7 +2778,7 @@ def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename:
             _enrich_from_nfo_and_filename(full_path_str, err_result)
             return err_result
         if not os.access(full_path_str, os.R_OK):
-            if DEBUG_MODE:
+            if va_state.DEBUG_MODE:
                 log_debug(f"File not accessible: {full_path_str}", "ERROR")
             err_result = {
                 "filename": filename, "category": 'sdr_only', "profile": None,
@@ -3146,7 +2806,7 @@ def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename:
             _enrich_from_nfo_and_filename(full_path_str, err_result)
             return err_result
     except (OSError, UnicodeEncodeError, UnicodeDecodeError) as e:
-        if DEBUG_MODE:
+        if va_state.DEBUG_MODE:
             log_debug(f"File validation error for {full_path_str}: {e}", "ERROR")
         err_result = {
             "filename": filename, "category": 'sdr_only', "profile": None,
@@ -3177,7 +2837,7 @@ def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename:
     container = path_obj.suffix.lower().replace('.', '')
     source_vol = path_obj.parts[1] if len(path_obj.parts) > 1 else "Unknown"
     
-    if DEBUG_MODE: log_debug(f"Processing: {full_path_str}", "DEBUG")
+    if va_state.DEBUG_MODE: log_debug(f"Processing: {full_path_str}", "DEBUG")
     
     # Retry logic with exponential backoff for transient failures
     max_retries = MAX_RETRIES
@@ -3186,7 +2846,7 @@ def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename:
     for attempt in range(max_retries + 1):
         try:
             # Check for abort before starting analysis
-            if ABORT_SCAN:
+            if va_state.ABORT_SCAN:
                 log_debug(f"[ABORT] Abort detected before analyzing {filename}, skipping", "INFO")
                 meta = _create_error_result("Scan aborted by user")
                 break
@@ -3201,19 +2861,19 @@ def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename:
                 meta = _create_error_result("Scan aborted by user")
                 break  # Don't retry on abort
             if attempt < max_retries:
-                if DEBUG_MODE: log_debug(f"Retry {attempt + 1}/{max_retries} for {full_path_str} after {retry_delay}s", "WARNING")
+                if va_state.DEBUG_MODE: log_debug(f"Retry {attempt + 1}/{max_retries} for {full_path_str} after {retry_delay}s", "WARNING")
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
             else:
-                if DEBUG_MODE: log_debug(f"Max retries reached for {full_path_str}", "ERROR")
+                if va_state.DEBUG_MODE: log_debug(f"Max retries reached for {full_path_str}", "ERROR")
                 meta = _create_error_result(f"Failed after {max_retries} retries: {str(e)}")
         except Exception as e:
             if attempt < max_retries:
-                if DEBUG_MODE: log_debug(f"Retry {attempt + 1}/{max_retries} for {full_path_str} after {retry_delay}s: {e}", "WARNING")
+                if va_state.DEBUG_MODE: log_debug(f"Retry {attempt + 1}/{max_retries} for {full_path_str} after {retry_delay}s: {e}", "WARNING")
                 time.sleep(retry_delay)
                 retry_delay *= 2
             else:
-                if DEBUG_MODE: log_debug(f"Max retries reached for {full_path_str}: {e}", "ERROR")
+                if va_state.DEBUG_MODE: log_debug(f"Max retries reached for {full_path_str}: {e}", "ERROR")
                 meta = _create_error_result(f"Failed after {max_retries} retries: {str(e)}")
     
     if meta is None:
@@ -3224,7 +2884,7 @@ def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename:
     try:
         file_size = os.path.getsize(full_path_str)
     except OSError as e:
-        if DEBUG_MODE: log_debug(f"Failed to get file size for {full_path_str}: {e}", "WARNING")
+        if va_state.DEBUG_MODE: log_debug(f"Failed to get file size for {full_path_str}: {e}", "WARNING")
 
     # Note: scan_attempts will be calculated in run_scan based on previous attempts
     validation_flag = compute_validation_flag({
@@ -3240,8 +2900,11 @@ def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename:
         "bitrate_mbps": meta.get("bitrate"), "video_codec": meta.get("video_codec"),
         "fps": meta.get("fps"),
     })
-    if quality_flag:
-        validation_flag = ",".join(filter(None, [validation_flag, quality_flag]))
+    file_mtime = None
+    try:
+        file_mtime = os.path.getmtime(full_path_str)
+    except OSError:
+        file_mtime = None
     return {
         "filename": filename, "category": meta['format'], "profile": meta['dovi_profile'],
         "el_type": meta['dovi_el_type'], "container": container, "source_vol": source_vol,
@@ -3278,7 +2941,9 @@ def _scan_file_worker_body(path_obj: pathlib.Path, full_path_str: str, filename:
         "movie_title": meta.get('movie_title'), "episode_title": meta.get('episode_title'),
         "nfo_missing": meta.get('nfo_missing', 1),
         "missing": 0,
-        "validation_flag": validation_flag
+        "validation_flag": validation_flag,
+        "quality_anomaly": quality_flag,
+        "file_mtime": file_mtime,
     }
 
 def build_backfill_metadata(file_path: str, filename: str, current: dict) -> dict:
@@ -3471,6 +3136,8 @@ def save_batch_to_db(data_list: list, duplicate_check_on_scan: Optional[bool] = 
             item.setdefault('dup_group_key', None)
             item.setdefault('dup_exact_key', None)
         item.setdefault('dup_count', 0)
+        item.setdefault('quality_anomaly', None)
+        item.setdefault('file_mtime', None)
     
     # Sanitize all string values in the data before insertion
     sanitized_list = [sanitize_dict_for_db(item) for item in data_list]
@@ -3485,7 +3152,7 @@ def save_batch_to_db(data_list: list, duplicate_check_on_scan: Optional[bool] = 
                  tvdb_series_id, tvdb_episode_id, imdb_series_id, imdb_episode_id, tmdb_series_id, tmdb_episode_id,
                  trakt_series_id, trakt_episode_id, rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id,
                  imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating,
-                 scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, missing, validation_flag, dup_group_key, dup_exact_key, dup_count) 
+                 scan_attempts, video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, episode, movie_title, episode_title, nfo_missing, missing, validation_flag, quality_anomaly, file_mtime, dup_group_key, dup_exact_key, dup_count) 
                 VALUES (:filename, :category, :profile, :el_type, :container, :source_vol, :full_path, :last_scanned, 
                  :resolution, :bitrate_mbps, :scan_error, :is_hybrid, :is_source_hybrid, :secondary_hdr, :width, :height, 
                  :file_size, :bl_compatibility_id, :audio_codecs, :audio_langs, :audio_channels, :subtitles, :max_cll, :max_fall, :fps, :aspect_ratio,
@@ -3493,3607 +3160,44 @@ def save_batch_to_db(data_list: list, duplicate_check_on_scan: Optional[bool] = 
                  :tvdb_series_id, :tvdb_episode_id, :imdb_series_id, :imdb_episode_id, :tmdb_series_id, :tmdb_episode_id,
                  :trakt_series_id, :trakt_episode_id, :rotten_series_id, :rotten_episode_id, :metacritic_series_id, :metacritic_episode_id,
                  :imdb_rating, :tvdb_rating, :tmdb_rating, :rotten_rating, :metacritic_rating, :trakt_rating,
-                 :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :nfo_missing, :missing, :validation_flag, :dup_group_key, :dup_exact_key, :dup_count)""", sanitized_list)
+                 :scan_attempts, :video_source, :source_format, :video_codec, :is_3d, :edition, :year, :media_type, :show_title, :season, :episode, :movie_title, :episode_title, :nfo_missing, :missing, :validation_flag, :quality_anomaly, :file_mtime, :dup_group_key, :dup_exact_key, :dup_count)""", sanitized_list)
             if duplicate_check_on_scan:
                 recompute_duplicate_counts(conn)
-            if DEBUG_MODE:
+            if va_state.DEBUG_MODE:
                 for item in sanitized_list:
                     log_debug(f"Saved to DB: {item['filename']} -> {item['category']} {item['profile']} (error: {item.get('scan_error', 'None')})", "DEBUG")
     except sqlite3.Error as e:
         log_debug(f"Database error saving batch: {e}", "ERROR")
-        if DEBUG_MODE:
+        if va_state.DEBUG_MODE:
             log_debug(f"Failed batch items: {[item.get('filename', 'unknown') for item in sanitized_list]}", "ERROR")
 
-# --- SCAN HELPERS ---
-def load_processed_map() -> dict:
-    """
-    Load processed files map from database for efficient lookups during scanning.
-    
-    Returns:
-        Dictionary mapping file paths to their metadata (size, attempts, error)
-    """
-    processed_map = {}
-    with get_db() as conn:
-        total_count = conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
-        log_debug(f"[INIT] Database contains {total_count} records. Loading into memory...", "INFO")
-        chunk_size = PROCESSED_MAP_CHUNK_SIZE
-        offset = 0
-        while True:
-            rows = conn.execute("SELECT full_path, file_size, scan_attempts, scan_error FROM videos LIMIT ? OFFSET ?", (chunk_size, offset)).fetchall()
-            if not rows:
-                break
-            processed_map.update({row[0]: {'size': row[1], 'attempts': row[2] or 0, 'error': row[3]} for row in rows})
-            offset += chunk_size
-            with progress_lock:
-                PROGRESS["file"] = f"Loading database: {offset}/{total_count} records..."
-            if offset % 10000 == 0:
-                log_debug(f"[INIT] Loading database: {offset}/{total_count} records...", "INFO")
-        log_debug(f"[INIT] Database loading complete: {offset}/{total_count} records loaded", "INFO")
-    return processed_map
 
-def prepare_scan_paths(target_vols: list | None, force_rescan: bool) -> tuple[list, dict]:
-    """
-    Prepare scan paths and volume mappings based on target volumes.
-    
-    Args:
-        target_vols: List of target volume names, or None for all volumes
-        force_rescan: Whether to reset scan attempts for target volumes
-    
-    Returns:
-        Tuple of (scan_paths list, path_to_vol mapping dictionary)
-    """
-    online_mounts = get_mount_status() 
-    scan_paths = []
-    path_to_vol = {}
-        
-    if target_vols and len(target_vols) > 0:
-        for vol_name in target_vols:
-            if vol_name in online_mounts:
-                scan_path = online_mounts[vol_name]
-                scan_paths.append(scan_path)
-                path_to_vol[scan_path] = vol_name
-                if force_rescan:
-                    with get_db() as conn:
-                        conn.execute("UPDATE videos SET scan_attempts=0 WHERE source_vol=?", (vol_name,))
-    else:
-        for vol_name, scan_path in sorted(online_mounts.items()):
-            scan_paths.append(scan_path)
-            path_to_vol[scan_path] = vol_name
-    
-    return scan_paths, path_to_vol
-
-
-def build_scan_paths_from_folders(scan_folders: list, target_vols: list | None, force_rescan: bool, scan_mode: str) -> tuple[list, dict]:
-    """
-    Build scan paths from a list of folder entries with volume + relative path.
-    """
-    online_mounts = get_mount_status()
-    scan_paths = []
-    path_to_vol = {}
-    vol_names = set()
-    selected_vols = set(target_vols) if target_vols else None
-
-    for entry in scan_folders:
-        vol_name = (entry.get('volume') or '').strip()
-        if not vol_name:
-            continue
-        if selected_vols and vol_name not in selected_vols:
-            continue
-        if entry.get('muted'):
-            continue
-        entry_type = (entry.get('type') or 'auto').strip().lower()
-        if scan_mode in ('tv', 'movie') and entry_type not in (scan_mode,):
-            continue
-        base = online_mounts.get(vol_name)
-        if not base:
-            continue
-        rel_path = (entry.get('path') or '').strip()
-        if rel_path:
-            candidate = rel_path
-            if not os.path.isabs(candidate):
-                candidate = os.path.join(base, rel_path.lstrip('/\\'))
-        else:
-            candidate = base
-
-        base_real = os.path.realpath(base)
-        target_real = os.path.realpath(candidate)
-        if not target_real.startswith(base_real):
-            continue
-        if not os.path.isdir(target_real):
-            continue
-        scan_paths.append(target_real)
-        path_to_vol[target_real] = vol_name
-        vol_names.add(vol_name)
-
-    if force_rescan and vol_names:
-        with get_db() as conn:
-            for vol_name in vol_names:
-                conn.execute("UPDATE videos SET scan_attempts=0 WHERE source_vol=?", (vol_name,))
-
-    return scan_paths, path_to_vol
-
-def collect_files_to_scan(scan_paths: list, path_to_vol: dict, processed_map: dict, 
-                          skip_words: list, min_size: int, force_rescan: bool, start_time: float,
-                          scan_extras: bool, changed_only: bool = False,
-                          changed_after: float | None = None) -> tuple[list, set]:
-    """
-    Scan directories and collect files that need to be analyzed.
-    
-    Args:
-        scan_paths: List of paths to scan
-        path_to_vol: Mapping of paths to volume names
-        processed_map: Dictionary of already processed files
-        skip_words: List of words to skip in filenames
-        min_size: Minimum file size in bytes
-        force_rescan: Whether to force rescan of all files
-        start_time: Scan start time for progress updates
-    
-    Returns:
-        Tuple of (files_to_scan list, all_found_files set)
-    """
-    files_to_scan = []
-    all_found_files = set() 
-    total_seen = 0
-    last_vol_started = None
-    vol_start_time = 0.0
-    
-    with progress_lock:
-        PROGRESS["file"] = "Scanning directories..."
-    log_debug("[CRAWL] Starting directory scan...", "INFO")
-        
-    for path in scan_paths:
-        wait_if_paused()
-        if ABORT_SCAN:
-            log_debug("[ABORT] Abort detected in collect_files_to_scan, stopping directory scan", "INFO")
-            break
-        current_vol = path_to_vol.get(path, os.path.basename(path) if path else "Unknown")
-        if not os.path.exists(path):
-            log_debug(f"[CRAWL] Volume path does not exist: {path}", "WARNING")
-            continue
-        
-        if current_vol != last_vol_started:
-            last_vol_started = current_vol
-            vol_start_time = time.time()
-            with progress_lock:
-                PROGRESS["file"] = f"Scanning [{current_vol}]: Starting..."
-        log_debug(f"[CRAWL] Starting scan of volume: {current_vol}", "INFO")
-        
-        try:
-            dir_count = 0
-            for root, dirs, files in os.walk(path):
-                wait_if_paused()
-                if ABORT_SCAN:
-                    log_debug(f"[ABORT] Abort detected while scanning {root}, stopping directory walk", "INFO")
-                    break
-                dir_count += 1
-                if changed_only and root != path and changed_after is not None:
-                    try:
-                        if os.path.getmtime(root) <= changed_after:
-                            dirs[:] = []
-                            continue
-                    except OSError:
-                        continue
-                if dir_count <= 10 or dir_count % 100 == 0:
-                    log_debug(f"[CRAWL] [{current_vol}] Traversing directory {dir_count}: {root}", "INFO")
-                # After 3s per volume or when we find files, switch from "Starting" to "Found..."
-                # Throttle: every 50 dirs when no files yet; every 1 or 500 when we have files
-                elapsed_vol = time.time() - vol_start_time
-                show_found = elapsed_vol >= 3.0 or total_seen >= 1
-                throttle = (total_seen == 0 and dir_count % 50 == 0) or (total_seen == 1) or (total_seen > 1 and total_seen % 500 == 0)
-                if show_found and throttle:
-                    elapsed = int(time.time() - start_time)
-                    with progress_lock:
-                        PROGRESS["file"] = f"Scanning [{current_vol}]: Found {total_seen} files ({len(files_to_scan)} new)"
-                        PROGRESS["last_duration"] = f"{elapsed}s"
-                if os.path.isfile(os.path.join(root, '.scanignore')):
-                    dirs[:] = []
-                    continue
-                if not scan_extras:
-                    def should_skip_extras(parent_dir: str) -> bool:
-                        try:
-                            season_dir = re.compile(r'^(season[\s._-]*\d+|s\d{1,2})$', re.IGNORECASE)
-                            with os.scandir(parent_dir) as it:
-                                for entry in it:
-                                    name = entry.name
-                                    if entry.is_file():
-                                        if name.lower().endswith('.nfo'):
-                                            return True
-                                        if pathlib.Path(name).suffix.lower() in VIDEO_EXTENSIONS:
-                                            return True
-                                    elif entry.is_dir():
-                                        if season_dir.match(name):
-                                            return True
-                        except OSError:
-                            return False
-                        return False
-                    dirs[:] = [d for d in dirs if not (d.lower() == 'extras' and should_skip_extras(root))]
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
-                
-                for f in files:
-                    wait_if_paused()
-                    ext = os.path.splitext(f)[1].lower()
-                    if ext not in VIDEO_EXTENSIONS:
-                        continue
-                    
-                    total_seen += 1
-                    full_p = os.path.join(root, f)
-                    
-                    if any(s in f.lower() for s in skip_words):
-                        if DEBUG_MODE:
-                            log_debug(f"Skipping file (skip_words): {full_p}", "DEBUG")
-                        continue
-                    
-                    try:
-                        current_size = os.path.getsize(full_p)
-                        if min_size > 0 and current_size < min_size:
-                            if DEBUG_MODE:
-                                log_debug(f"Skipping file (size < {min_size}): {full_p} ({current_size} bytes)", "DEBUG")
-                            continue
-                    except (OSError, PermissionError) as e:
-                        if DEBUG_MODE:
-                            log_debug(f"Error getting size for {full_p}: {e}", "DEBUG")
-                        continue
-                            
-                    fp_str = os.fsdecode(os.fsencode(full_p))
-                    all_found_files.add(fp_str)
-                    
-                    existing = processed_map.get(fp_str)
-                    should_scan = False
-                    
-                    if not existing:
-                        should_scan = True
-                        if DEBUG_MODE:
-                            log_debug(f"New file to scan: {fp_str}", "DEBUG")
-                    elif existing['size'] != current_size:
-                        should_scan = True
-                        if DEBUG_MODE:
-                            log_debug(f"File size changed: {fp_str} ({existing['size']} -> {current_size})", "DEBUG")
-                    elif force_rescan:
-                        should_scan = True
-                        if DEBUG_MODE:
-                            log_debug(f"Force rescan: {fp_str}", "DEBUG")
-                    elif existing['attempts'] > MAX_SCAN_ATTEMPTS:
-                        should_scan = False
-                        if DEBUG_MODE:
-                            log_debug(f"Skipping file (attempts > {MAX_SCAN_ATTEMPTS}): {fp_str}", "DEBUG")
-                    elif existing.get('error'):
-                        should_scan = True
-                        if DEBUG_MODE:
-                            log_debug(f"Rescanning file with error: {fp_str}", "DEBUG")
-                    
-                    if should_scan:
-                        files_to_scan.append(pathlib.Path(fp_str))
-                        if DEBUG_MODE and len(files_to_scan) % 100 == 0:
-                            log_debug(f"Added {len(files_to_scan)} files to scan queue...", "DEBUG")
-                    
-                    if total_seen == 1 or total_seen % 500 == 0:
-                        elapsed = int(time.time() - start_time)
-                        with progress_lock:
-                            PROGRESS["file"] = f"Scanning [{current_vol}]: Found {total_seen} files ({len(files_to_scan)} new)"
-                            PROGRESS["last_duration"] = f"{elapsed}s"
-                        if DEBUG_MODE:
-                            log_debug(f"[CRAWL] [{current_vol}] Found {total_seen} files ({len(files_to_scan)} new) - {elapsed}s elapsed", "DEBUG")
-        except (OSError, PermissionError) as e:
-            log_debug(f"Error scanning {path}: {e}", "ERROR")
-    
-    return files_to_scan, all_found_files
-
-def iter_bounded_scan_futures(executor: ThreadPoolExecutor, paths: list, max_inflight: int):
-    """Yield completed scan futures while bounding queued work and memory."""
-    pending = set()
-    iterator = iter(paths)
-    try:
-        for _ in range(max(1, max_inflight)):
-            try:
-                pending.add(executor.submit(scan_file_worker, next(iterator)))
-            except StopIteration:
-                break
-        while pending:
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
-            for future in done:
-                yield future
-                try:
-                    pending.add(executor.submit(scan_file_worker, next(iterator)))
-                except StopIteration:
-                    pass
-    finally:
-        for future in pending:
-            future.cancel()
-
-def analyze_files(files_to_scan: list, processed_map: dict, settings: dict, 
-                  final_threads: int, start_time: float) -> dict:
-    """
-    Analyze files using ThreadPoolExecutor and return metrics.
-    
-    Args:
-        files_to_scan: List of file paths to analyze
-        processed_map: Dictionary of processed files for attempt tracking
-        settings: Dictionary of scan settings
-        final_threads: Number of threads to use
-        start_time: Scan start time for progress updates
-    
-    Returns:
-        Dictionary containing metrics_sum and metrics_count
-    """
-    log_debug(f"[ANALYZING] {len(files_to_scan)} files (New/Modified)...", "INFO")
-    with progress_lock:
-        PROGRESS["total"] = len(files_to_scan)
-        
-    batch_buffer = []
-    metrics_sum = {"bitrate": 0.0, "width": 0, "height": 0, "file_size": 0}
-    metrics_count = {"bitrate": 0, "width": 0, "height": 0, "file_size": 0}
-    progress_updates = {"current": 0, "failed_count": 0, "new_found": 0}
-    duplicate_check_on_scan = str(settings.get('duplicate_check_on_scan', 'false')).lower() == 'true'
-            
-    with ThreadPoolExecutor(max_workers=final_threads) as executor:
-        for f in iter_bounded_scan_futures(executor, files_to_scan, final_threads * 2):
-            wait_if_paused()
-            if ABORT_SCAN:
-                log_debug("[ABORT] Abort detected in analyze_files loop, stopping file processing", "INFO")
-                break
-            try:
-                res = f.result()
-                if DEBUG_MODE:
-                    log_debug(f"Scanned: {res['filename']} -> {res['category']} {res['profile']} (error: {res.get('scan_error', 'None')}, path: {res['full_path']})", "DEBUG")
-                batch_buffer.append(res)
-                
-                if not res.get('scan_error'):
-                    if res.get('bitrate_mbps'):
-                        metrics_sum["bitrate"] += float(res['bitrate_mbps'])
-                        metrics_count["bitrate"] += 1
-                    if res.get('width'):
-                        metrics_sum["width"] += int(res['width'])
-                        metrics_count["width"] += 1
-                    if res.get('height'):
-                        metrics_sum["height"] += int(res['height'])
-                        metrics_count["height"] += 1
-                    if res.get('file_size'):
-                        metrics_sum["file_size"] += int(res['file_size'])
-                        metrics_count["file_size"] += 1
-                
-                attempts = processed_map.get(res['full_path'], {}).get('attempts', 0)
-                if res['scan_error']:
-                    attempts += 1
-                else:
-                    attempts = 0
-                res['scan_attempts'] = attempts
-
-                if res['scan_error']:
-                    log_failure(res['source_vol'], res['full_path'], res['filename'], res['scan_error'])
-                    progress_updates["failed_count"] += 1
-                    if DEBUG_MODE:
-                        log_debug(f"File has error, will still be saved: {res['full_path']} - {res['scan_error']}", "DEBUG")
-                else:
-                    progress_updates["new_found"] += 1
-                    if DEBUG_MODE:
-                        log_debug(f"File scanned successfully: {res['full_path']}", "DEBUG")
-                
-                progress_updates["current"] += 1
-                
-                batch_size = 50
-                try:
-                    batch_size = int(settings.get('batch_size', 50))
-                except (ValueError, TypeError):
-                    pass
-                        
-                if len(batch_buffer) >= batch_size:
-                    save_batch_to_db(batch_buffer, duplicate_check_on_scan=duplicate_check_on_scan)
-                    batch_buffer = []
-                            
-                if progress_updates["current"] >= PROGRESS_UPDATE_INTERVAL:
-                    with progress_lock: 
-                        old_current = PROGRESS.get("current", 0)
-                        old_total = PROGRESS.get("total", 0)
-                        PROGRESS["current"] += progress_updates["current"]
-                        PROGRESS["failed_count"] += progress_updates["failed_count"]
-                        PROGRESS["new_found"] += progress_updates["new_found"]
-                        elapsed = int(time.time() - start_time)
-                        PROGRESS["last_duration"] = f"{elapsed}s"
-                        if old_current == 0 and PROGRESS["current"] == progress_updates["current"] and old_total != PROGRESS.get("total", 0):
-                            log_debug(f"[WARNING] PROGRESS current reset detected! Was {old_current}/{old_total}, now {PROGRESS['current']}/{PROGRESS.get('total', 0)}", "WARNING")
-                        if PROGRESS["current"] > 0 and PROGRESS["total"] > 0 and elapsed > 0:
-                            rate = PROGRESS["current"] / elapsed
-                            remaining = PROGRESS["total"] - PROGRESS["current"]
-                            eta_seconds = int(remaining / rate) if rate > 0 else 0
-                            PROGRESS["eta"] = f"{eta_seconds}s" if eta_seconds > 0 else "calculating..."
-                        job_progress = {
-                            "current": PROGRESS.get("current", 0),
-                            "total": PROGRESS.get("total", 0),
-                            "failed": PROGRESS.get("failed_count", 0),
-                            "new": PROGRESS.get("new_found", 0),
-                            "file": PROGRESS.get("file", ""),
-                        }
-                    update_scan_job(ACTIVE_SCAN_JOB_ID, progress=job_progress)
-                    global DIAG_LOG_TS
-                    now = time.time()
-                    if now - DIAG_LOG_TS >= 5:
-                        log_debug(
-                            f"[SCAN_DIAG] current={PROGRESS.get('current', 0)}/{PROGRESS.get('total', 0)} "
-                            f"new={PROGRESS.get('new_found', 0)} failed={PROGRESS.get('failed_count', 0)} "
-                            f"batch_buffer={len(batch_buffer)}",
-                            "INFO"
-                        )
-                        DIAG_LOG_TS = now
-                    progress_updates = {"current": 0, "failed_count": 0, "new_found": 0}
-            except Exception as e:
-                log_debug(f"Thread error processing file: {e}", "ERROR")
-                import traceback
-                log_debug(f"Thread error traceback: {traceback.format_exc()}", "ERROR")
-                progress_updates["failed_count"] += 1
-                progress_updates["current"] += 1
-    
-    if batch_buffer:
-        save_batch_to_db(batch_buffer, duplicate_check_on_scan=duplicate_check_on_scan)
-
-    if progress_updates["current"] > 0:
-        with progress_lock:
-            PROGRESS["current"] += progress_updates["current"]
-            PROGRESS["failed_count"] += progress_updates["failed_count"]
-            PROGRESS["new_found"] += progress_updates["new_found"]
-    
-    return {"metrics_sum": metrics_sum, "metrics_count": metrics_count}
-
-def count_removed_files(target_vols: list | None, scan_paths: list, all_found_files: set) -> int:
-    """
-    Count files in DB that would be removed (no longer on disk).
-    Does not modify the database.
-    """
-    with get_db() as conn:
-        if target_vols and len(target_vols) > 0:
-            placeholders = ','.join('?' * len(target_vols))
-            sql = f"SELECT full_path FROM videos WHERE source_vol IN ({placeholders})"
-            existing_db_files = {row[0] for row in conn.execute(sql, tuple(target_vols)).fetchall()}
-        else:
-            online_prefixes = tuple(scan_paths)
-            all_rows = conn.execute("SELECT full_path FROM videos").fetchall()
-            existing_db_files = {r[0] for r in all_rows if r[0].startswith(online_prefixes)}
-    return sum(1 for f in existing_db_files if f not in all_found_files)
-
-
-def cleanup_deleted_files(target_vols: list | None, scan_paths: list, all_found_files: set, remove_from_db: bool = True) -> int:
-    """
-    Remove or mark files from database that no longer exist on disk.
-    
-    Args:
-        target_vols: List of target volume names, or None
-        scan_paths: List of scan paths
-        all_found_files: Set of all files found during scan
-        remove_from_db: If True, delete rows; if False, set missing=1
-    
-    Returns:
-        Number of files removed or marked missing
-    """
-    log_debug("🧹 Running cleanup...", "INFO")
-    to_del = []
-    with get_db() as conn:
-        if target_vols and len(target_vols) > 0:
-            placeholders = ','.join('?' * len(target_vols))
-            sql = f"SELECT full_path FROM videos WHERE source_vol IN ({placeholders})"
-            existing_db_files = {row[0] for row in conn.execute(sql, tuple(target_vols)).fetchall()}
-        else:
-            online_prefixes = tuple(scan_paths)
-            all_rows = conn.execute("SELECT full_path FROM videos").fetchall()
-            existing_db_files = {r[0] for r in all_rows if r[0].startswith(online_prefixes)}
-    
-    for f in existing_db_files:
-        if f not in all_found_files:
-            to_del.append(f)
-    
-    removed = len(to_del)
-    if to_del:
-        with get_db() as conn:
-            if remove_from_db:
-                log_debug(f"Removing {removed} missing files from DB...", "INFO")
-                conn.executemany("DELETE FROM videos WHERE full_path=?", [(f,) for f in to_del])
-            else:
-                log_debug(f"Marking {removed} missing files in DB...", "INFO")
-                conn.executemany("UPDATE videos SET missing = 1 WHERE full_path = ?", [(f,) for f in to_del])
-    return removed
-
-def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
-                  scan_mode: str, target_vols: Optional[List[str]],
-                  scan_folder: dict | None, removed: int = 0, remove_missing_from_db: bool = True) -> None:
-    """
-    Finalize scan by updating database settings and PROGRESS state.
-    
-    Args:
-        metrics_sum: Dictionary of accumulated metrics
-        metrics_count: Dictionary of metric counts
-        start_time: Scan start time
-    """
-    dur = f"{int(time.time() - start_time)}s"
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    dup_files = 0
-    dup_groups = 0
-    with get_db() as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_full_scan', ?)", (now,))
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_duration', ?)", (dur,))
-        dup_files = conn.execute("SELECT COUNT(*) FROM videos WHERE COALESCE(dup_count, 0) > 1").fetchone()[0]
-        dup_groups = conn.execute(
-            "SELECT COUNT(DISTINCT dup_group_key) FROM videos WHERE COALESCE(dup_count, 0) > 1 AND dup_group_key IS NOT NULL AND dup_group_key != ''"
-        ).fetchone()[0]
-        total_bytes = conn.execute(
-            "SELECT COALESCE(SUM(file_size), 0) FROM videos WHERE COALESCE(missing, 0)=0"
-        ).fetchone()[0] or 0
-        duplicate_savings = conn.execute(
-            """SELECT COALESCE(SUM(group_size - keep_size), 0) FROM (
-                 SELECT dup_group_key, SUM(file_size) AS group_size,
-                        MAX(file_size) AS keep_size
-                 FROM videos
-                 WHERE COALESCE(missing, 0)=0 AND dup_group_key IS NOT NULL
-                 GROUP BY dup_group_key HAVING COUNT(*) > 1
-               )"""
-        ).fetchone()[0] or 0
-        conn.execute(
-            "INSERT INTO storage_snapshots (captured_at, total_bytes, duplicate_savings_bytes) VALUES (?, ?, ?)",
-            (now, int(total_bytes), int(duplicate_savings))
-        )
-        conn.execute(
-            "DELETE FROM storage_snapshots WHERE id NOT IN "
-            "(SELECT id FROM storage_snapshots ORDER BY id DESC LIMIT 120)"
-        )
-            
-    avg_bitrate = round(metrics_sum["bitrate"] / metrics_count["bitrate"], 2) if metrics_count["bitrate"] > 0 else 0
-    avg_width = round(metrics_sum["width"] / metrics_count["width"]) if metrics_count["width"] > 0 else 0
-    avg_height = round(metrics_sum["height"] / metrics_count["height"]) if metrics_count["height"] > 0 else 0
-    avg_file_size_mb = round(metrics_sum["file_size"] / metrics_count["file_size"] / (1024 * 1024), 2) if metrics_count["file_size"] > 0 else 0
-            
-    with progress_lock:
-        PROGRESS.update({"last_full_scan": now, "last_duration": dur, "scan_completed": True, "status": "idle", "paused": False})
-        ACTIVE_SCAN_FILES.clear()
-        PROGRESS["active_count"] = 0
-        PROGRESS["last_report"] = {
-            "scanned": PROGRESS["total"],
-            "new": PROGRESS["new_found"],
-            "removed": removed,
-            "failed": PROGRESS["failed_count"],
-            "warnings": PROGRESS.get("warning_count", 0),
-            "duration": dur,
-            "date": now,
-            "avg_bitrate": avg_bitrate,
-            "avg_width": avg_width,
-            "avg_height": avg_height,
-            "avg_file_size_mb": avg_file_size_mb,
-            "remove_missing_from_db": remove_missing_from_db,
-            "duplicates": dup_files,
-            "duplicate_groups": dup_groups
-        }
-        history_entry = {
-            "status": "complete",
-            "duration": dur,
-            "scanned": PROGRESS["total"],
-            "new": PROGRESS["new_found"],
-            "removed": removed,
-            "failed": PROGRESS["failed_count"],
-            "warnings": PROGRESS.get("warning_count", 0),
-            "scan_mode": scan_mode,
-            "target_vols": target_vols or [],
-            "scan_folder": scan_folder.get("path") if isinstance(scan_folder, dict) else None,
-            "remove_missing_from_db": remove_missing_from_db,
-            "duplicates": dup_files,
-            "duplicate_groups": dup_groups
-        }
-    record_scan_history(history_entry)
-    update_scan_job(
-        ACTIVE_SCAN_JOB_ID,
-        "completed",
-        {"current": PROGRESS["total"], "total": PROGRESS["total"],
-         "failed": PROGRESS["failed_count"], "new": PROGRESS["new_found"],
-         "duration": dur}
-    )
-            
-    log_debug(f"[SUCCESS] Finished: {dur}. Added: {PROGRESS['new_found']}. Errors: {PROGRESS['failed_count']}", "INFO")
-
-
-def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]] = None, 
-             force_rescan: bool = False, debug: bool = False, scan_mode: str = "all",
-             scan_folder: dict | None = None, scan_scope: str = "all") -> None:
-    """
-    Main scan function that orchestrates the entire scanning process.
-    
-    This function coordinates database loading, file collection, analysis, and cleanup.
-    It handles abort signals and ensures proper cleanup of resources.
-    
-    Args:
-        thread_count: Number of worker threads to use for file analysis. If None, uses saved setting.
-        target_vols: List of volume names to scan. If None, scans all mounted volumes.
-        force_rescan: If True, resets scan attempts and rescans all files regardless of previous status.
-        debug: If True, enables verbose debug logging throughout the scan process.
-        
-    Raises:
-        RuntimeError: If scan is already in progress (race condition protection).
-    """
-    global PROGRESS, ABORT_SCAN, DEBUG_MODE, ACTIVE_SCAN_JOB_ID
-    changed_only = scan_scope == "changed"
-    start_time = time.time()
-    
-    # Check and set status atomically to prevent race condition
-    with progress_lock:
-        if PROGRESS["status"] == "scanning":
-            log_debug(f"[WARNING] Attempted to start scan while already scanning! Current progress: {PROGRESS.get('current', 0)}/{PROGRESS.get('total', 0)}", "WARNING")
-            return
-        # Atomically set status to scanning before releasing lock
-        PROGRESS.update({"status": "scanning", "current": 0, "total": 0, "file": "Initializing...", "scan_completed": False, "new_found": 0, "removed": 0, "failed_count": 0, "warning_count": 0, "last_duration": "0s", "start_time": start_time, "active_count": 0})
-        ACTIVE_SCAN_FILES.clear()
-    
-    ABORT_SCAN = False
-    PAUSE_EVENT.set()
-    with progress_lock:
-        PROGRESS["paused"] = False
-    DEBUG_MODE = debug
-    try:
-        ACTIVE_SCAN_JOB_ID = create_scan_job({
-            "thread_count": thread_count,
-            "target_vols": target_vols or [],
-            "force_rescan": force_rescan,
-            "scan_mode": scan_mode,
-            "scan_folder": scan_folder,
-            "scan_scope": scan_scope,
-        })
-        with progress_lock:
-            PROGRESS["job_id"] = ACTIVE_SCAN_JOB_ID
-    except sqlite3.Error as e:
-        ACTIVE_SCAN_JOB_ID = None
-        log_debug(f"Could not create durable scan job: {e}", "WARNING")
-    
-    # Clear RPU cache on force rescan to ensure fresh data
-    if force_rescan:
-        clear_rpu_cache()
-    
-    setup_new_log_files()
-    cleanup_old_logs()
-
-    final_threads = 4
-    try:
-        with get_db() as conn:
-            saved = conn.execute("SELECT value FROM settings WHERE key='threads'").fetchone()
-            if saved: final_threads = int(saved[0])
-    except sqlite3.Error as e:
-        if DEBUG_MODE: log_debug(f"Error reading thread setting: {e}")
-    if thread_count: final_threads = int(thread_count)
-
-    log_debug("[INIT] Initializing scan...", "INFO")
-    
-    try:
-        with get_db() as conn:
-            settings = dict(conn.execute("SELECT key, value FROM settings").fetchall())
-        
-        skip_words = [w.strip().lower() for w in settings.get('skip_words', '').split(',') if w.strip()]
-        min_size = int(settings.get('min_size_mb', 0)) * 1024 * 1024
-        scan_extras = str(settings.get('scan_extras', 'false')).lower() == 'true'
-        
-        log_debug(f"[STARTED] Scan started. Threads={final_threads}. Force={force_rescan}. Debug={DEBUG_MODE}", "INFO")
-        
-        processed_map = load_processed_map()
-        scan_paths, path_to_vol = prepare_scan_paths(target_vols, force_rescan)
-        scan_folders = []
-        try:
-            scan_folders = json.loads(settings.get('scan_folders', '[]') or '[]')
-        except (json.JSONDecodeError, TypeError):
-            scan_folders = []
-        if isinstance(scan_folders, list) and scan_folders:
-            if scan_folder and isinstance(scan_folder, dict):
-                match = next(
-                    (f for f in scan_folders
-                     if (f.get('volume') or '') == (scan_folder.get('volume') or '')
-                     and (f.get('path') or '') == (scan_folder.get('path') or '')),
-                    None
-                )
-                if match:
-                    folder_paths, folder_map = build_scan_paths_from_folders([match], target_vols, force_rescan, scan_mode)
-                    if folder_paths:
-                        scan_paths, path_to_vol = folder_paths, folder_map
-                else:
-                    folder_paths, folder_map = build_scan_paths_from_folders(scan_folders, target_vols, force_rescan, scan_mode)
-                    if folder_paths:
-                        scan_paths, path_to_vol = folder_paths, folder_map
-            else:
-                folder_paths, folder_map = build_scan_paths_from_folders(scan_folders, target_vols, force_rescan, scan_mode)
-                if folder_paths:
-                    scan_paths, path_to_vol = folder_paths, folder_map
-        changed_after = None
-        if changed_only:
-            try:
-                prior_scan = settings.get("last_full_scan")
-                changed_after = (
-                    datetime.strptime(prior_scan, "%Y-%m-%d %H:%M:%S").timestamp()
-                    if prior_scan else 0
-                )
-            except (TypeError, ValueError, OSError):
-                changed_after = 0
-        files_to_scan, all_found_files = collect_files_to_scan(
-            scan_paths, path_to_vol, processed_map, skip_words, min_size,
-            force_rescan, start_time, scan_extras, changed_only, changed_after
-        )
-        
-        # Removed count only known after crawl completes (all_found_files is complete)
-        removed = count_removed_files(target_vols, scan_paths, all_found_files) if not ABORT_SCAN and not changed_only else 0
-        total_found = len(all_found_files)
-        with progress_lock:
-            PROGRESS["removed"] = removed
-            PROGRESS["total_found"] = total_found
-            PROGRESS["file"] = f"Found {total_found} ({len(files_to_scan)} new / {removed} removed)"
-        
-        metrics = {"metrics_sum": {"bitrate": 0.0, "width": 0, "height": 0, "file_size": 0},
-                   "metrics_count": {"bitrate": 0, "width": 0, "height": 0, "file_size": 0}}
-        
-        if not ABORT_SCAN and files_to_scan:
-            metrics = analyze_files(files_to_scan, processed_map, settings, final_threads, start_time)
-        
-        if not ABORT_SCAN:
-            remove_missing_from_db = str(settings.get('remove_missing_from_db', 'true')).lower() == 'true'
-            if changed_only:
-                removed = 0
-            else:
-                removed = cleanup_deleted_files(target_vols, scan_paths, all_found_files, remove_from_db=remove_missing_from_db)
-            with progress_lock:
-                PROGRESS["removed"] = removed
-                total_found = PROGRESS.get("total_found", PROGRESS.get("total", 0))
-                if total_found > 0:
-                    PROGRESS["file"] = f"Found {total_found} ({PROGRESS['new_found']} new / {removed} removed)"
-                elif removed > 0:
-                    PROGRESS["file"] = f"Cleanup: {removed} removed"
-            finalize_scan(metrics["metrics_sum"], metrics["metrics_count"], start_time, scan_mode, target_vols, scan_folder, removed, remove_missing_from_db)
-        else:
-            log_debug("[ABORT] Killing active subprocesses...")
-            with proc_lock:
-                for p in ACTIVE_PROCS:
-                    try: 
-                        os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                    except (OSError, ProcessLookupError, ValueError) as e:
-                        # Process may already be terminated or invalid
-                        if DEBUG_MODE:
-                            log_debug(f"Failed to kill process {p.pid}: {e}", "DEBUG")
-            log_debug("[ABORT] User aborted.")
-            dur = f"{int(time.time() - start_time)}s"
-            with progress_lock:
-                PROGRESS.update({"status": "idle", "file": "Aborted", "paused": False, "scan_completed": True, "last_duration": dur})
-                ACTIVE_SCAN_FILES.clear()
-                PROGRESS["active_count"] = 0
-                _now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                PROGRESS["last_report"] = {
-                    "scanned": PROGRESS.get("current", 0),
-                    "new": PROGRESS.get("new_found", 0),
-                    "failed": PROGRESS.get("failed_count", 0),
-                    "warnings": PROGRESS.get("warning_count", 0),
-                    "duration": dur,
-                    "date": _now,
-                    "aborted": True,
-                    "duplicates": 0,
-                    "duplicate_groups": 0
-                }
-            record_scan_history({
-                "status": "aborted",
-                "duration": dur,
-                "scanned": PROGRESS.get("current", 0),
-                "new": PROGRESS.get("new_found", 0),
-                "failed": PROGRESS.get("failed_count", 0),
-                "warnings": PROGRESS.get("warning_count", 0),
-                "scan_mode": scan_mode,
-                "target_vols": target_vols or [],
-                "scan_folder": scan_folder.get("path") if isinstance(scan_folder, dict) else None,
-                "duplicates": 0,
-                "duplicate_groups": 0
-            })
-            update_scan_job(
-                ACTIVE_SCAN_JOB_ID,
-                "aborted",
-                {"current": PROGRESS.get("current", 0),
-                 "total": PROGRESS.get("total", 0),
-                 "failed": PROGRESS.get("failed_count", 0),
-                 "duration": dur}
-            )
-
-    except Exception as e:
-        log_debug(f"[ERROR] CRITICAL: {e}")
-        import traceback; traceback.print_exc()
-        with progress_lock:
-            PROGRESS["status"] = "idle"
-            PROGRESS["file"] = "Scan failed"
-        update_scan_job(
-            ACTIVE_SCAN_JOB_ID,
-            "failed",
-            {"current": PROGRESS.get("current", 0),
-             "total": PROGRESS.get("total", 0),
-             "error": str(e)}
-        )
-
-# --- ROUTES ---
-@bp.route('/')
-def index():
-    return render_template('index.html', app_version_label=app_version_label())
-
-@bp.route('/health')
-@bp.route('/api/health')
-def health_check() -> Response:
-    """
-    Health check endpoint for monitoring and load balancers.
-    
-    Checks database connectivity and returns system status.
-    Used by monitoring systems to verify the application is running correctly.
-    
-    Returns:
-        JSON response with status, database connectivity, and scan status
-    """
-    try:
-        # Check database connectivity
-        with get_db() as conn:
-            conn.execute("SELECT 1").fetchone()
-        db_status = "ok"
-    except sqlite3.Error:
-        db_status = "error"
-    
-    status = "healthy" if db_status == "ok" else "degraded"
-    sonarr = _arr_service_status("sonarr", SONARR_URL, SONARR_API_KEY)
-    radarr = _arr_service_status("radarr", RADARR_URL, RADARR_API_KEY)
-    payload = {
-        "status": status,
-        "database": db_status,
-        "scan_status": PROGRESS.get("status", "unknown"),
-        "uptime_seconds": int(time.time() - APP_START_TIME),
-        "version": app_version_label(),
-        "tools": get_tool_versions(),
-        "sonarr": sonarr,
-        "radarr": radarr,
-    }
-    return jsonify(payload), (200 if status == "healthy" else 503)
-
-
-@bp.app_errorhandler(400)
-def api_bad_request(error) -> Response:
-    if not request.path.startswith('/api/'):
-        return error
-    return jsonify({
-        "status": "error",
-        "error": "bad_request",
-        "message": "Bad request"
-    }), 400
-
-
-@bp.app_errorhandler(404)
-def api_not_found(error) -> Response:
-    if not request.path.startswith('/api/'):
-        return error
-    return jsonify({
-        "status": "error",
-        "error": "not_found",
-        "message": "Endpoint not found"
-    }), 404
-
-
-@bp.app_errorhandler(500)
-def api_internal_error(error) -> Response:
-    if not request.path.startswith('/api/'):
-        return error
-    return jsonify({
-        "status": "error",
-        "error": "internal_error",
-        "message": "Internal server error"
-    }), 500
-
-@bp.route('/api/logs')
-def get_logs() -> Response:
-    """
-    Get recent log entries from the in-memory log cache.
-    
-    Returns:
-        JSON array of recent log messages
-    """
-    with progress_lock: 
-        return jsonify(list(LOG_CACHE))
-
-
-@bp.route('/api/log_client_error', methods=['POST'])
-def log_client_error() -> Response:
-    """
-    Append a client-side error to the log cache so it appears in the in-app console.
-    """
-    payload = request.get_json(silent=True) or {}
-    msg = payload.get("message") or payload.get("msg") or ""
-    if msg:
-        log_debug(f"[CLIENT] {msg}", "ERROR")
-    return jsonify({"status": "ok"})
-
-
-@bp.route('/api/scan_history')
-def get_scan_history() -> Response:
-    """
-    Return recent scan history entries.
-    """
-    try:
-        with get_db() as conn:
-            rows = conn.execute(
-                "SELECT entry FROM scan_history ORDER BY id DESC LIMIT 50"
-            ).fetchall()
-        entries: List[dict] = []
-        for row in rows:
-            try:
-                entries.append(json.loads(row[0]))
-            except (TypeError, ValueError):
-                continue
-        return jsonify({"status": "ok", "entries": entries})
-    except Exception as e:
-        log_debug(f"Failed to load scan history: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/scan_jobs')
-def get_scan_jobs() -> Response:
-    """Return recent durable scan jobs, including interrupted jobs after restart."""
-    try:
-        with get_db() as conn:
-            rows = conn.execute(
-                """SELECT job_id, status, started_at, finished_at, options, progress
-                   FROM scan_jobs ORDER BY started_at DESC LIMIT 25"""
-            ).fetchall()
-        jobs = []
-        for row in rows:
-            try:
-                options = json.loads(row[4] or "{}")
-            except (TypeError, ValueError):
-                options = {}
-            try:
-                progress = json.loads(row[5] or "{}")
-            except (TypeError, ValueError):
-                progress = {}
-            jobs.append({
-                "job_id": row[0], "status": row[1], "started_at": row[2],
-                "finished_at": row[3], "options": options, "progress": progress,
-            })
-        return jsonify({"status": "ok", "jobs": jobs})
-    except sqlite3.Error as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/storage_trends')
-def get_storage_trends() -> Response:
-    """Return retained storage and duplicate-savings snapshots."""
-    try:
-        with get_db() as conn:
-            rows = conn.execute(
-                """SELECT captured_at, total_bytes, duplicate_savings_bytes
-                   FROM storage_snapshots ORDER BY id ASC"""
-            ).fetchall()
-            total_bytes = conn.execute(
-                "SELECT COALESCE(SUM(file_size), 0) FROM videos WHERE COALESCE(missing, 0)=0"
-            ).fetchone()[0] or 0
-            duplicate_savings = conn.execute(
-                """SELECT COALESCE(SUM(group_size - keep_size), 0) FROM (
-                     SELECT dup_group_key, SUM(file_size) AS group_size,
-                            MAX(file_size) AS keep_size
-                     FROM videos
-                     WHERE COALESCE(missing, 0)=0 AND dup_group_key IS NOT NULL
-                     GROUP BY dup_group_key HAVING COUNT(*) > 1
-                   )"""
-            ).fetchone()[0] or 0
-        current = {
-            "captured_at": "Current",
-            "total_bytes": int(total_bytes),
-            "duplicate_savings_bytes": int(duplicate_savings),
-        }
-        snapshots = [
-            {"captured_at": row[0], "total_bytes": row[1],
-             "duplicate_savings_bytes": row[2]}
-            for row in rows
-        ]
-        if not snapshots or snapshots[-1] != current:
-            snapshots.append(current)
-        return jsonify({"status": "ok", "snapshots": snapshots})
-    except sqlite3.Error as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/download_log')
-def download_log() -> Union[Response, Tuple[str, int]]:
-    """
-    Download the current scan activity log file.
-    
-    Returns:
-        File download response if log file exists, or 404 error message if not found
-    """
-    if LOG_FILE and os.path.exists(LOG_FILE):
-        return send_file(LOG_FILE, as_attachment=True, download_name=os.path.basename(LOG_FILE))
-    return "No log found", 404
-
-@bp.route('/download_failures')
-def download_failures() -> Union[Response, Tuple[str, int]]:
-    """Download the current scan failures CSV file."""
-    if FAIL_FILE and os.path.exists(FAIL_FILE):
-        return send_file(FAIL_FILE, as_attachment=True, download_name=os.path.basename(FAIL_FILE))
-    return "No failures log found", 404
-
-@bp.route('/api/failures')
-def get_failures() -> Response:
-    """Get recent failures/warnings from the scan failures CSV file."""
-    limit = 200
-    try:
-        limit = int(request.args.get('limit', limit))
-    except (TypeError, ValueError):
-        limit = 200
-    entries: list[dict] = []
-    if FAIL_FILE and os.path.exists(FAIL_FILE):
-        try:
-            with open(FAIL_FILE, 'r', encoding='utf-8', newline='') as f:
-                reader = csv.reader(f, delimiter='|')
-                first_row = True
-                for row in reader:
-                    if len(row) < 5:
-                        continue
-                    ts, vol, path, name, msg = row[:5]
-                    # Skip header row
-                    if first_row and vol == 'Volume':
-                        first_row = False
-                        continue
-                    first_row = False
-                    entry_type = 'warning' if vol == 'WARNING' else 'failure'
-                    entries.append({
-                        "type": entry_type,
-                        "timestamp": ts,
-                        "volume": vol,
-                        "path": path,
-                        "name": name,
-                        "message": msg
-                    })
-        except OSError:
-            pass
-    if limit > 0 and len(entries) > limit:
-        entries = entries[-limit:]
-    failures = [e for e in entries if e["type"] == "failure"]
-    warnings = [e for e in entries if e["type"] == "warning"]
-    return jsonify({"failures": failures, "warnings": warnings})
-
-@bp.route('/api/pre_scan_check')
-def pre_scan_check() -> Response:
-    """
-    Check mount status of all volumes before scanning.
-    
-    Returns volume status (online/offline/empty) for all known volumes,
-    including volumes that exist in the database but may not be currently mounted.
-    
-    Returns:
-        JSON array of volume status objects with name, status, and path
-    """
-    mounted = get_mount_status() 
-    with get_db() as conn:
-        rows = conn.execute("SELECT DISTINCT source_vol FROM videos").fetchall()
-        db_vols = {r[0] for r in rows if r[0]}
-    all_vols = set(mounted.keys()) | db_vols
-    result = []
-    for v in sorted(list(all_vols)):
-        status = "offline"
-        path = mounted.get(v, None)
-        if path and os.path.exists(path):
-            status = "online"
-            try:
-                if not os.listdir(path): 
-                    status = "empty"
-            except (OSError, PermissionError) as e:
-                # Directory may be inaccessible, keep status as "online"
-                if DEBUG_MODE:
-                    log_debug(f"Cannot list directory {path}: {e}", "DEBUG")
-        result.append({"name": v, "status": status, "path": path})
-    return jsonify(result)
-
-def parse_advanced_search(search_query: str) -> Tuple[str, Dict[str, Any]]:
-    """
-    Parse advanced search syntax to extract field:value patterns.
-    
-    Supports patterns like:
-    - field:value (e.g., year:2020, codec:HEVC)
-    - field:>value (e.g., size:>10GB, year:>2020)
-    - field:<value (e.g., size:<5GB)
-    - field:>=value, field:<=value, field:!=value
-    
-    Args:
-        search_query: Search query string that may contain field:value patterns
-        
-    Returns:
-        Tuple of (remaining_search_text, extracted_filters_dict)
-        
-    Examples:
-        text, filters = parse_advanced_search("year:2020 codec:HEVC some movie")
-        # Returns: ("some movie", {'year': '2020', 'video_codec': 'HEVC'})
-        
-        text, filters = parse_advanced_search("size:>10GB year:>=2020")
-        # Returns: ("", {'size_op': '>', 'size_val': '10GB', 'year': '>=2020'})
-    """
-    if not search_query:
-        return '', {}
-    
-    extracted_filters = {}
-    remaining_parts = []
-    
-    # Pattern to match field:operator?value (e.g., year:2020, size:>10GB, codec:HEVC)
-    # Matches: field_name, optional operator (>, <, >=, <=, !=), value (supports quoted strings)
-    # Allows optional whitespace around the operator/value.
-    pattern = r'\b(\w+):\s*(>=|<=|!=|>|<)?\s*("[^"]+"|\'[^\']+\'|[^\s]+)'
-    matches = re.finditer(pattern, search_query)
-    
-    # Field name mapping from search syntax to filter parameter names
-    field_map = {
-        'year': 'year',
-        'codec': 'video_codec',
-        'source': 'video_source',
-        'format': 'source_format',
-        'resolution': 'resolution',
-        'res': 'resolution',
-        'profile': 'profile',
-        'prof': 'profile',
-        'volume': 'volume',
-        'vol': 'volume',
-        'category': 'category',
-        'cat': 'category',
-        'container': 'container',
-        'cont': 'container',
-        'size': 'size',
-        'bitrate': 'bitrate',
-        'bit': 'bitrate',
-        'edition': 'edition',
-        'hybrid': 'source_hybrid',
-        'dual': 'is_hybrid',
-        'dual_hdr': 'is_hybrid',
-        'source_hybrid': 'source_hybrid',
-        'hybrid_src': 'source_hybrid',
-        '3d': 'is_3d',
-        'nfo': 'nfo_missing',
-        'nfo_missing': 'nfo_missing',
-        'missing': 'missing',
-    }
-    
-    # Collect all matches with their positions
-    match_positions = []
-    for match in matches:
-        field_name = match.group(1).lower()
-        operator = match.group(2) or ''
-        value = match.group(3)
-        if value and ((value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'"))):
-            value = value[1:-1]
-        start_pos = match.start()
-        end_pos = match.end()
-        match_positions.append((start_pos, end_pos, field_name, operator, value))
-    
-    # If no advanced filters were found, keep the original search text
-    if not match_positions:
-        return search_query.strip(), {}
-
-    # Remove matched patterns from search query and build remaining text
-    if match_positions:
-        last_pos = 0
-        for start, end, field_name, operator, value in sorted(match_positions):
-            # Add text before this match
-            remaining_parts.append(search_query[last_pos:start])
-            last_pos = end
-            
-            # Process the field:value pattern
-            if field_name in field_map:
-                filter_key = field_map[field_name]
-                
-                # Handle size and bitrate with operators
-                if filter_key == 'size':
-                    if operator:
-                        extracted_filters['size_op'] = operator
-                        extracted_filters['size_val'] = value
-                    else:
-                        # Default to = if no operator
-                        extracted_filters['size_op'] = '='
-                        extracted_filters['size_val'] = value
-                elif filter_key == 'bitrate':
-                    if operator:
-                        extracted_filters['bit_op'] = operator
-                        extracted_filters['bit_val'] = value
-                    else:
-                        extracted_filters['bit_op'] = '='
-                        extracted_filters['bit_val'] = value
-                # Handle year with or without operators
-                elif filter_key == 'year':
-                    if operator:
-                        extracted_filters['year_op'] = operator
-                        extracted_filters['year_val'] = value
-                    else:
-                        extracted_filters['year'] = value
-                elif filter_key == 'is_hybrid':
-                    # Convert boolean-like values
-                    if value.lower() in ('1', 'true', 'yes', 'y'):
-                        extracted_filters['is_hybrid'] = '1'
-                    elif value.lower() in ('0', 'false', 'no', 'n'):
-                        extracted_filters['is_hybrid'] = '0'
-                elif filter_key == 'source_hybrid':
-                    if value.lower() in ('1', 'true', 'yes', 'y'):
-                        extracted_filters['source_hybrid'] = '1'
-                    elif value.lower() in ('0', 'false', 'no', 'n'):
-                        extracted_filters['source_hybrid'] = '0'
-                elif filter_key == 'is_3d':
-                    if value.lower() in ('1', 'true', 'yes', 'y'):
-                        extracted_filters['is_3d'] = '1'
-                    else:
-                        extracted_filters['is_3d'] = '0'
-                else:
-                    # Regular field:value
-                    extracted_filters[filter_key] = value
-        
-        # Add remaining text after last match
-        remaining_parts.append(search_query[last_pos:])
-    
-    # Join remaining parts and clean up whitespace
-    remaining_text = ' '.join(remaining_parts).strip()
-    
-    return remaining_text, extracted_filters
-
-def build_filter_query(args: Dict[str, Any], exclude_key: Optional[str] = None) -> Tuple[str, List[Any]]:
-    """
-    Build SQL WHERE clause and parameters from filter arguments.
-    
-    Constructs a SQL WHERE clause with placeholders and corresponding parameter list
-    based on the provided filter arguments. Supports various filter types including
-    search, category, volume, profile, resolution, status, and custom size/bitrate operators.
-    
-    Args:
-        args: Dictionary of filter arguments (typically from request.args or request.json)
-        exclude_key: Optional key to exclude from the filter query (useful for nested queries)
-        
-    Returns:
-        Tuple of (WHERE clause string, parameter list)
-        
-    Example:
-        where, params = build_filter_query({'category': 'dovi', 'resolution': '4K'})
-        # Returns: ("1=1 AND category = ? AND resolution = ?", ['dovi', '4K'])
-    """
-    conditions = ["1=1"]; params = []
-    
-    # Parse advanced search syntax if search parameter exists
-    # Create a copy of args to avoid modifying the original dict
-    args = dict(args)
-    search_query = args.get('search', '').strip()
-    if search_query:
-        remaining_search, advanced_filters = parse_advanced_search(search_query)
-        # Merge advanced filters into args (advanced filters take precedence)
-        args.update(advanced_filters)
-        # Update search with remaining text
-        args['search'] = remaining_search
-    
-    blank_token = '__blank__'
-    mappings = [('search', 'filename'), ('category', 'category'), ('volume', 'source_vol'), ('profile', 'profile'), ('el', 'el_type'), ('container', 'container'), ('resolution', 'resolution'), ('status', 'scan_error'), ('audio', 'audio_codecs'), ('video_codec', 'video_codec'), ('video_source', 'video_source'), ('source_format', 'source_format'), ('edition', 'edition'), ('media_type', 'media_type'), ('nfo_missing', 'nfo_missing'), ('missing', 'missing')]
-    for key, col in mappings:
-        if key == exclude_key: continue
-        val = args.get(key, '').strip()
-        if val:
-            if key == 'search':
-                conditions.append(f"(LOWER({col}) LIKE ? OR LOWER(full_path) LIKE ?)")
-                params.extend([f"%{val.lower()}%", f"%{val.lower()}%"])
-            elif key == 'status': 
-                if val == 'failed': conditions.append("scan_error IS NOT NULL AND scan_error != ''")
-                elif val == 'ok': conditions.append("(scan_error IS NULL OR scan_error = '')")
-            elif key == 'audio':
-                values = [v.strip() for v in val.split(',') if v.strip()]
-                if blank_token in values:
-                    values = [v for v in values if v != blank_token]
-                    blank_clause = f"({col} IS NULL OR {col} = '')"
-                    if values:
-                        like_clauses = [f"LOWER({col}) LIKE ?" for _ in values]
-                        params.extend([f"%{v.lower()}%" for v in values])
-                        conditions.append(f"({ ' OR '.join(like_clauses + [blank_clause]) })")
-                    else:
-                        conditions.append(blank_clause)
-                else:
-                    conditions.append(f"LOWER({col}) LIKE ?"); params.append(f"%{val.lower()}%")
-            elif key == 'video_codec':
-                values = [v.strip() for v in val.split(',') if v.strip()]
-                if blank_token in values:
-                    values = [v for v in values if v != blank_token]
-                    blank_clause = f"({col} IS NULL OR {col} = '')"
-                    if values:
-                        placeholders = ','.join('?' * len(values))
-                        conditions.append(f"(LOWER({col}) IN ({placeholders}) OR {blank_clause})")
-                        params.extend([v.lower() for v in values])
-                    else:
-                        conditions.append(blank_clause)
-                elif len(values) > 1:
-                    placeholders = ','.join('?' * len(values))
-                    conditions.append(f"LOWER({col}) IN ({placeholders})")
-                    params.extend([v.lower() for v in values])
-                else:
-                    conditions.append(f"LOWER({col}) = ?"); params.append(val.lower())
-            elif key == 'nfo_missing':
-                val_lower = val.lower()
-                if val_lower in ('missing', 'none', '1', 'true', 'yes'):
-                    conditions.append(f"{col} = 1")
-                elif val_lower in ('found', '0', 'false', 'no'):
-                    conditions.append(f"{col} = 0")
-            elif key == 'missing':
-                val_lower = val.lower()
-                if val_lower in ('yes', '1', 'true', 'y'):
-                    conditions.append(f"{col} = 1")
-                elif val_lower in ('no', '0', 'false', 'n'):
-                    conditions.append(f"{col} = 0")
-            elif ',' in val or val == blank_token:
-                # Handle multiple values (comma-separated) for any filter type, including blanks
-                values = [v.strip() for v in val.split(',') if v.strip()]
-                if blank_token in values:
-                    values = [v for v in values if v != blank_token]
-                    blank_clause = f"({col} IS NULL OR {col} = '')"
-                    if values:
-                        placeholders = ','.join('?' * len(values))
-                        conditions.append(f"(LOWER({col}) IN ({placeholders}) OR {blank_clause})")
-                        params.extend([v.lower() for v in values])
-                    else:
-                        conditions.append(blank_clause)
-                elif values:
-                    placeholders = ','.join('?' * len(values))
-                    conditions.append(f"LOWER({col}) IN ({placeholders})")
-                    params.extend([v.lower() for v in values])
-            else:
-                conditions.append(f"LOWER({col}) = ?"); params.append(val.lower())
-    if exclude_key != 'secondary_hdr':
-        sec = args.get('secondary_hdr', '').strip()
-        if sec:
-            values = [v.strip() for v in sec.split(',') if v.strip()]
-            if blank_token in values or sec == 'none':
-                values = [v for v in values if v != blank_token and v != 'none']
-                blank_clause = "(secondary_hdr IS NULL OR secondary_hdr = '')"
-                if values:
-                    placeholders = ','.join('?' * len(values))
-                    conditions.append(f"(LOWER(secondary_hdr) IN ({placeholders}) OR {blank_clause})")
-                    params.extend([v.lower() for v in values])
-                else:
-                    conditions.append(blank_clause)
-            elif ',' in sec:
-                placeholders = ','.join('?' * len(values))
-                conditions.append(f"LOWER(secondary_hdr) IN ({placeholders})")
-                params.extend([v.lower() for v in values])
-            else:
-                conditions.append("LOWER(secondary_hdr) = ?"); params.append(sec.lower())
-    if exclude_key != 'is_hybrid':
-        hyb = args.get('is_hybrid', '').strip()
-        if hyb == "1": conditions.append("is_hybrid = 1")
-        elif hyb == "0": conditions.append("is_hybrid = 0 AND category != 'sdr_only'")
-    if exclude_key != 'source_hybrid':
-        src_hyb = args.get('source_hybrid', '').strip()
-        if src_hyb == "1":
-            conditions.append("is_source_hybrid = 1")
-        elif src_hyb == "0":
-            conditions.append("is_source_hybrid = 0")
-    
-    # Handle size filtering with operators
-    if exclude_key != 'size':
-        size_op = args.get('size_op', '').strip()
-        size_val = args.get('size_val', '').strip()
-        if size_op and size_val:
-            try:
-                # Parse value - handle GB, MB, etc.
-                size_val_clean = size_val.upper().replace('GB', '').replace('MB', '').replace(' ', '').strip()
-                size_bytes = float(size_val_clean)
-                if 'GB' in size_val.upper():
-                    size_bytes = size_bytes * 1024 * 1024 * 1024
-                elif 'MB' in size_val.upper():
-                    size_bytes = size_bytes * 1024 * 1024
-                elif 'KB' in size_val.upper():
-                    size_bytes = size_bytes * 1024
-                
-                if size_op == '>':
-                    conditions.append("file_size > ?")
-                elif size_op == '<':
-                    conditions.append("file_size < ?")
-                elif size_op == '=' or size_op == '==':
-                    conditions.append("file_size = ?")
-                elif size_op == '>=':
-                    conditions.append("file_size >= ?")
-                elif size_op == '<=':
-                    conditions.append("file_size <= ?")
-                params.append(int(size_bytes))
-            except (ValueError, TypeError):
-                pass  # Ignore invalid size values
-    
-    # Handle bitrate filtering with operators
-    if exclude_key != 'bitrate':
-        bit_op = args.get('bit_op', '').strip()
-        bit_val = args.get('bit_val', '').strip()
-        if bit_op and bit_val:
-            try:
-                # Parse value - handle Mbps, etc.
-                bit_val_clean = bit_val.upper().replace('MBPS', '').replace('MBIT/S', '').replace(' ', '').strip()
-                bitrate_val = float(bit_val_clean)
-                
-                if bit_op == '>':
-                    conditions.append("bitrate_mbps > ?")
-                elif bit_op == '<':
-                    conditions.append("bitrate_mbps < ?")
-                elif bit_op == '=' or bit_op == '==':
-                    conditions.append("bitrate_mbps = ?")
-                elif bit_op == '>=':
-                    conditions.append("bitrate_mbps >= ?")
-                elif bit_op == '<=':
-                    conditions.append("bitrate_mbps <= ?")
-                params.append(bitrate_val)
-            except (ValueError, TypeError):
-                pass  # Ignore invalid bitrate values
-    
-    # Handle year filtering with operators
-    if exclude_key != 'year':
-        year_op = args.get('year_op', '').strip()
-        year_val = args.get('year_val', '').strip()
-        year = args.get('year', '').strip()
-        if year_op and year_val:
-            try:
-                year_int = int(year_val)
-                if year_op == '>':
-                    conditions.append("year > ?")
-                elif year_op == '<':
-                    conditions.append("year < ?")
-                elif year_op == '>=':
-                    conditions.append("year >= ?")
-                elif year_op == '<=':
-                    conditions.append("year <= ?")
-                elif year_op == '!=':
-                    conditions.append("year != ?")
-                params.append(year_int)
-            except (ValueError, TypeError):
-                pass
-        elif year:
-            try:
-                year_int = int(year)
-                conditions.append("year = ?")
-                params.append(year_int)
-            except (ValueError, TypeError):
-                pass
-    
-    # Handle is_3d filtering
-    if exclude_key != 'is_3d':
-        is_3d_val = args.get('is_3d', '').strip()
-        if is_3d_val:
-            if is_3d_val == '1':
-                conditions.append("is_3d = 1")
-            elif is_3d_val == '0':
-                conditions.append("is_3d = 0")
-    
-    return " AND ".join(conditions), params
-
-def parse_sort_order(value: Any, default: str = "desc") -> str:
-    """Return a safe SQL sort direction."""
-    order = str(value or default).strip().lower()
-    return "ASC" if order == "asc" else "DESC"
-
-def parse_positive_int(value: Any, default: int, max_value: int) -> int:
-    """Parse a positive integer request value and clamp it."""
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return min(max(1, parsed), max_value)
-
-# Shared SELECT list / sort map for table API + CSV/JSON exports
-_VIDEOS_ROW_COLUMNS = (
-    "filename, category, profile, el_type, container, source_vol, full_path, last_scanned, resolution, "
-    "bitrate_mbps, scan_error, is_hybrid, is_source_hybrid, secondary_hdr, width, height, file_size, "
-    "bl_compatibility_id, audio_codecs, audio_langs, audio_channels, subtitles, max_cll, max_fall, "
-    "video_source, source_format, video_codec, is_3d, edition, year, media_type, show_title, season, "
-    "episode, movie_title, episode_title, nfo_missing, missing, fps, aspect_ratio, imdb_id, tvdb_id, "
-    "tmdb_id, rotten_id, metacritic_id, trakt_id, tvdb_series_id, tvdb_episode_id, imdb_series_id, "
-    "imdb_episode_id, tmdb_series_id, tmdb_episode_id, trakt_series_id, trakt_episode_id, "
-    "rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id, imdb_rating, "
-    "tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating, dup_group_key, "
-    "dup_exact_key, dup_count"
+# --- compatibility barrel: scan + routes + db/queries own implementations ---
+from video_analyzer.db.stats import (  # noqa: E402
+    _audio_codec_counts_sql, _build_stats_sql, _compute_enriched_stats,
+    _group_col_counts, _load_scan_folders, _path_counts_for_where,
+    _secondary_hdr_counts, get_or_build_library_stats_bundle,
 )
-_VIDEOS_COLUMN_NAMES = [c.strip() for c in _VIDEOS_ROW_COLUMNS.split(',') if c.strip()]
-_VIDEOS_SORT_MAP = {
-    'file': 'filename', 'hybrid': 'is_hybrid', 'source_hybrid': 'is_source_hybrid', 'main': 'category',
-    'prof': 'profile', 'el': 'el_type', 'sec': 'secondary_hdr', 'res': 'resolution',
-    'bit': 'bitrate_mbps', 'vol': 'source_vol', 'cont': 'container', 'scan': 'last_scanned',
-    'stat': 'scan_error', 'size': 'file_size', 'dup': 'dup_count', 'video_source': 'video_source',
-    'source_format': 'source_format', 'video_codec': 'video_codec', 'is_3d': 'is_3d',
-    'edition': 'edition', 'year': 'year', 'media_type': 'media_type', 'show_title': 'show_title',
-    'season': 'season', 'episode': 'episode', 'movie_title': 'movie_title',
-    'episode_title': 'episode_title', 'cll': 'max_cll', 'fall': 'max_fall',
-}
-_EXPORT_CHUNK_SIZE = 1000
-
-def _export_query_parts(args: Dict[str, Any]) -> tuple[str, list[Any], str, str, str, list[Any]]:
-    """Build WHERE/ORDER/LIMIT pieces for exports from request args."""
-    where_clause, params = build_filter_query(args)
-    db_sort = _VIDEOS_SORT_MAP.get(args.get('sort'), 'last_scanned')
-    order = parse_sort_order(args.get('order'))
-    page = args.get('page')
-    per_page = args.get('per_page')
-    limit_clause = ""
-    limit_params: list[Any] = []
-    try:
-        if page is not None and per_page is not None:
-            page_val = parse_positive_int(page, 1, 1000000)
-            per_page_val = parse_positive_int(per_page, 50, 100000)
-            offset = (page_val - 1) * per_page_val
-            limit_clause = " LIMIT ? OFFSET ?"
-            limit_params = [per_page_val, offset]
-    except (ValueError, TypeError):
-        limit_clause = ""
-        limit_params = []
-    return where_clause, params, db_sort, order, limit_clause, limit_params
-
-def _row_to_export_dict(row: Any) -> dict[str, Any]:
-    values = list(row)
-    # Pad/truncate defensively if schema drift
-    if len(values) < len(_VIDEOS_COLUMN_NAMES):
-        values.extend([None] * (len(_VIDEOS_COLUMN_NAMES) - len(values)))
-    return {name: values[i] for i, name in enumerate(_VIDEOS_COLUMN_NAMES)}
-
-@bp.route('/download_csv')
-def download_csv() -> Response:
-    """
-    Download filtered video data as CSV (same columns as /api/videos table rows).
-    Streams in chunks to limit peak memory on large libraries.
-    """
-    where_clause, params, db_sort, order, limit_clause, limit_params = _export_query_parts(request.args)
-    # When exporting "current page", limit_clause is set; otherwise stream full filtered set.
-    def generate():
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(_VIDEOS_COLUMN_NAMES)
-        yield buf.getvalue()
-        buf.seek(0)
-        buf.truncate(0)
-        with get_db_readonly() as conn:
-            if limit_clause:
-                rows = conn.execute(
-                    f"SELECT {_VIDEOS_ROW_COLUMNS} FROM videos WHERE {where_clause} "
-                    f"ORDER BY {db_sort} {order}{limit_clause}",
-                    params + limit_params,
-                ).fetchall()
-                for row in rows:
-                    writer.writerow([row[i] if i < len(row) else None for i in range(len(_VIDEOS_COLUMN_NAMES))])
-                yield buf.getvalue()
-                return
-            offset = 0
-            while True:
-                chunk = conn.execute(
-                    f"SELECT {_VIDEOS_ROW_COLUMNS} FROM videos WHERE {where_clause} "
-                    f"ORDER BY {db_sort} {order} LIMIT ? OFFSET ?",
-                    params + [_EXPORT_CHUNK_SIZE, offset],
-                ).fetchall()
-                if not chunk:
-                    break
-                for row in chunk:
-                    writer.writerow([row[i] if i < len(row) else None for i in range(len(_VIDEOS_COLUMN_NAMES))])
-                yield buf.getvalue()
-                buf.seek(0)
-                buf.truncate(0)
-                offset += _EXPORT_CHUNK_SIZE
-                if len(chunk) < _EXPORT_CHUNK_SIZE:
-                    break
-
-    return Response(
-        generate(),
-        mimetype='text/csv; charset=utf-8',
-        headers={"Content-Disposition": "attachment; filename=media_export.csv"},
-    )
-
-@bp.route('/download_json')
-def download_json() -> Response:
-    """
-    Download filtered video data as JSON array of objects (same fields as /api/videos).
-    Streams a JSON array in chunks to limit peak memory on large libraries.
-    """
-    where_clause, params, db_sort, order, limit_clause, limit_params = _export_query_parts(request.args)
-
-    def generate():
-        yield '['
-        first = True
-        with get_db_readonly() as conn:
-            if limit_clause:
-                rows = conn.execute(
-                    f"SELECT {_VIDEOS_ROW_COLUMNS} FROM videos WHERE {where_clause} "
-                    f"ORDER BY {db_sort} {order}{limit_clause}",
-                    params + limit_params,
-                ).fetchall()
-                for row in rows:
-                    if not first:
-                        yield ','
-                    first = False
-                    yield json.dumps(_row_to_export_dict(row), ensure_ascii=False)
-            else:
-                offset = 0
-                while True:
-                    chunk = conn.execute(
-                        f"SELECT {_VIDEOS_ROW_COLUMNS} FROM videos WHERE {where_clause} "
-                        f"ORDER BY {db_sort} {order} LIMIT ? OFFSET ?",
-                        params + [_EXPORT_CHUNK_SIZE, offset],
-                    ).fetchall()
-                    if not chunk:
-                        break
-                    for row in chunk:
-                        if not first:
-                            yield ','
-                        first = False
-                        yield json.dumps(_row_to_export_dict(row), ensure_ascii=False)
-                    offset += _EXPORT_CHUNK_SIZE
-                    if len(chunk) < _EXPORT_CHUNK_SIZE:
-                        break
-        yield ']'
-
-    return Response(
-        generate(),
-        mimetype='application/json; charset=utf-8',
-        headers={"Content-Disposition": "attachment; filename=media_export.json"},
-    )
-
-@bp.route('/api/backup', methods=['POST'])
-def backup_database() -> Response:
-    """
-    Create a backup of the database and settings.
-    
-    Returns:
-        ZIP file download response containing database and settings backup
-    """
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_filename = f"video_analyzer_backup_{timestamp}.zip"
-        backup_path = os.path.join(OUTPUT_DIR, backup_filename)
-        
-        # Create ZIP file
-        with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Backup database
-            if os.path.exists(DB_PATH):
-                zipf.write(DB_PATH, os.path.basename(DB_PATH))
-            
-            # Backup settings from database
-            settings_backup = {}
-            try:
-                with get_db() as conn:
-                    rows = conn.execute("SELECT key, value FROM settings").fetchall()
-                    settings_backup = {row[0]: row[1] for row in rows}
-            except sqlite3.Error as e:
-                log_debug(f"Error reading settings for backup: {e}", "WARNING")
-            
-            # Write settings as JSON to ZIP
-            settings_json = json.dumps(settings_backup, indent=2)
-            zipf.writestr("settings.json", settings_json)
-        
-        # Return file for download
-        return send_file(backup_path, as_attachment=True, download_name=backup_filename, mimetype='application/zip')
-    except Exception as e:
-        log_debug(f"Backup failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-_RESTORE_ALLOWED_BASENAMES = frozenset({'processed_videos.db', 'settings.json'})
-
-def _zip_member_path_is_safe(member_name: str) -> bool:
-    """Reject absolute paths, drive letters, and parent-directory traversal in ZIP names."""
-    if member_name is None:
-        return False
-    name = str(member_name).replace('\\', '/')
-    if not name or name in ('.', '..'):
-        return False
-    # Directory entries are fine to ignore later; still must not traverse
-    parts = [p for p in name.split('/') if p not in ('', '.')]
-    if any(p == '..' for p in parts):
-        return False
-    if name.startswith('/') or name.startswith('../'):
-        return False
-    # Windows drive / UNC style
-    if len(name) >= 2 and name[1] == ':':
-        return False
-    if name.startswith('//'):
-        return False
-    return True
-
-def _validate_restore_zip_members(zipf: zipfile.ZipFile) -> dict[str, str]:
-    """
-    Validate every ZIP member for path traversal and map allowed restore basenames
-    to their archive member names. Raises ValueError on unsafe members.
-    """
-    found: dict[str, str] = {}
-    for info in zipf.infolist():
-        raw = info.filename
-        if not _zip_member_path_is_safe(raw):
-            raise ValueError(f"Unsafe ZIP member path rejected: {raw!r}")
-        # Skip pure directory entries
-        name = raw.replace('\\', '/')
-        if name.endswith('/'):
-            continue
-        # Reject symlink/special entries when detectable (Unix external attrs)
-        is_symlink = ((info.external_attr >> 16) & 0o170000) == 0o120000
-        if is_symlink:
-            raise ValueError(f"Symlink ZIP member rejected: {raw!r}")
-        base = os.path.basename(name)
-        if base in _RESTORE_ALLOWED_BASENAMES:
-            if base in found:
-                raise ValueError(f"Duplicate restore member for {base}")
-            found[base] = raw
-    return found
-
-def _write_zip_member_to_path(zipf: zipfile.ZipFile, member_name: str, dest_path: str) -> None:
-    """Copy a ZIP member to an absolute destination path (never uses extract path logic)."""
-    dest_dir = os.path.dirname(os.path.abspath(dest_path))
-    os.makedirs(dest_dir, exist_ok=True)
-    # Ensure dest stays inside OUTPUT_DIR
-    out_real = os.path.realpath(OUTPUT_DIR)
-    dest_real_parent = os.path.realpath(dest_dir)
-    if not is_path_within_root(dest_real_parent, out_real) and dest_real_parent != out_real:
-        raise ValueError("Restore destination escapes output directory")
-    with zipf.open(member_name, 'r') as src, open(dest_path, 'wb') as dst:
-        shutil.copyfileobj(src, dst)
-
-@bp.route('/api/restore', methods=['POST'])
-def restore_database() -> Response:
-    """
-    Restore database and settings from a backup file.
-    
-    Expects a ZIP file upload containing:
-    - processed_videos.db (database file)
-    - settings.json (settings as JSON)
-    
-    Members are validated against ZIP-slip / symlink tricks; only known basenames
-    are written into OUTPUT_DIR via explicit copy (not zipfile.extract path joins).
-    
-    Returns:
-        JSON response with status and message
-    """
-    try:
-        busy = reject_if_busy()
-        if busy:
-            return busy
-        if 'file' not in request.files:
-            return jsonify({"status": "error", "message": "No file provided"}), 400
-        
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({"status": "error", "message": "No file selected"}), 400
-        
-        # Validate file extension
-        if not file.filename.lower().endswith('.zip'):
-            return jsonify({"status": "error", "message": "Invalid file type. Only ZIP files are supported"}), 400
-        
-        # Save uploaded file temporarily
-        temp_zip = os.path.join(OUTPUT_DIR, f"restore_temp_{uuid.uuid4().hex[:8]}.zip")
-        file.save(temp_zip)
-        
-        try:
-            db_restored = False
-            settings_restored = False
-            db_basename = os.path.basename(DB_PATH)
-            
-            with zipfile.ZipFile(temp_zip, 'r') as zipf:
-                members = _validate_restore_zip_members(zipf)
-                
-                # Restore database by streaming member bytes to a temp file under OUTPUT_DIR
-                if db_basename in members:
-                    if os.path.exists(DB_PATH):
-                        backup_old = DB_PATH + f".pre_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                        shutil.copy2(DB_PATH, backup_old)
-                    dest_tmp = os.path.join(OUTPUT_DIR, f"{db_basename}.restore_{uuid.uuid4().hex[:8]}")
-                    try:
-                        _write_zip_member_to_path(zipf, members[db_basename], dest_tmp)
-                        os.replace(dest_tmp, DB_PATH)
-                    finally:
-                        if os.path.exists(dest_tmp):
-                            try:
-                                os.remove(dest_tmp)
-                            except OSError:
-                                pass
-                    db_restored = True
-                    invalidate_library_stats_cache()
-                
-                # Restore settings (read JSON bytes; never extract to arbitrary paths)
-                if 'settings.json' in members:
-                    settings_data = zipf.read(members['settings.json']).decode('utf-8')
-                    settings_dict = json.loads(settings_data)
-                    if not isinstance(settings_dict, dict):
-                        raise ValueError("settings.json must be a JSON object")
-                    with get_db() as conn:
-                        for key, value in settings_dict.items():
-                            conn.execute(
-                                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                                (str(key), str(value)),
-                            )
-                        conn.commit()
-                    settings_restored = True
-            
-            if db_restored and settings_restored:
-                return jsonify({"status": "success", "message": "Database and settings restored successfully"}), 200
-            elif db_restored:
-                return jsonify({"status": "success", "message": "Database restored successfully (settings not found in backup)"}), 200
-            elif settings_restored:
-                return jsonify({"status": "success", "message": "Settings restored successfully (database not found in backup)"}), 200
-            else:
-                return jsonify({"status": "error", "message": "Backup file does not contain database or settings"}), 400
-                
-        except zipfile.BadZipFile:
-            return jsonify({"status": "error", "message": "Invalid ZIP file format"}), 400
-        except json.JSONDecodeError:
-            return jsonify({"status": "error", "message": "Invalid settings.json format"}), 400
-        except ValueError as ve:
-            return jsonify({"status": "error", "message": str(ve)}), 400
-        except Exception as e:
-            log_debug(f"Restore failed: {e}", "ERROR")
-            return jsonify({"status": "error", "message": f"Restore failed: {str(e)}"}), 500
-        finally:
-            if os.path.exists(temp_zip):
-                try:
-                    os.remove(temp_zip)
-                except OSError:
-                    pass
-            
-    except Exception as e:
-        log_debug(f"Restore failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/filter_presets', methods=['GET'])
-def get_filter_presets() -> Response:
-    """
-    Get all saved filter presets.
-    
-    Returns:
-        JSON object with preset names as keys and filter configurations as values
-    """
-    try:
-        with get_db() as conn:
-            row = conn.execute("SELECT value FROM settings WHERE key='filter_presets'").fetchone()
-            if row:
-                presets = json.loads(row[0])
-                return jsonify(presets), 200
-            else:
-                return jsonify({}), 200
-    except json.JSONDecodeError:
-        return jsonify({}), 200
-    except Exception as e:
-        log_debug(f"Failed to get filter presets: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/filter_presets', methods=['POST'])
-def save_filter_preset() -> Response:
-    """
-    Save a filter preset.
-    
-    Expects JSON body:
-    {
-        "name": "preset_name",
-        "filters": { ... filter configuration ... }
-    }
-    
-    Returns:
-        JSON response with status and message
-    """
-    try:
-        data = request.get_json()
-        if not data or 'name' not in data or 'filters' not in data:
-            return jsonify({"status": "error", "message": "Missing 'name' or 'filters' in request"}), 400
-        
-        preset_name = data['name'].strip()
-        if not preset_name:
-            return jsonify({"status": "error", "message": "Preset name cannot be empty"}), 400
-        
-        preset_filters = data['filters']
-        
-        # Load existing presets
-        with get_db() as conn:
-            row = conn.execute("SELECT value FROM settings WHERE key='filter_presets'").fetchone()
-            if row:
-                presets = json.loads(row[0])
-            else:
-                presets = {}
-            
-            # Add or update preset
-            presets[preset_name] = preset_filters
-            
-            # Save back to database
-            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", 
-                        ('filter_presets', json.dumps(presets)))
-            conn.commit()
-        
-        return jsonify({"status": "success", "message": f"Preset '{preset_name}' saved successfully"}), 200
-    except json.JSONDecodeError:
-        return jsonify({"status": "error", "message": "Invalid JSON format"}), 400
-    except Exception as e:
-        log_debug(f"Failed to save filter preset: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/filter_presets/<preset_name>', methods=['DELETE'])
-def delete_filter_preset(preset_name: str) -> Response:
-    """
-    Delete a filter preset.
-    
-    Args:
-        preset_name: Name of the preset to delete
-    
-    Returns:
-        JSON response with status and message
-    """
-    try:
-        # Load existing presets
-        with get_db() as conn:
-            row = conn.execute("SELECT value FROM settings WHERE key='filter_presets'").fetchone()
-            if not row:
-                return jsonify({"status": "error", "message": "No presets found"}), 404
-            
-            presets = json.loads(row[0])
-            if preset_name not in presets:
-                return jsonify({"status": "error", "message": f"Preset '{preset_name}' not found"}), 404
-            
-            # Remove preset
-            del presets[preset_name]
-            
-            # Save back to database
-            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", 
-                        ('filter_presets', json.dumps(presets)))
-            conn.commit()
-        
-        return jsonify({"status": "success", "message": f"Preset '{preset_name}' deleted successfully"}), 200
-    except json.JSONDecodeError:
-        return jsonify({"status": "error", "message": "Invalid preset data format"}), 500
-    except Exception as e:
-        log_debug(f"Failed to delete filter preset: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-def _build_videos_meta_payload(args: Dict[str, Any], include_filter_options: bool = True) -> Dict[str, Any]:
-    """Build heavy stats (+ optional filter_options) payload for the current filter args."""
-    main_where, main_params = build_filter_query(args)
-    media_type_arg = (args.get('media_type') or '').strip().lower()
-    if media_type_arg == 'movie':
-        media_scope_key = "stats_movie"
-    elif media_type_arg == 'tv':
-        media_scope_key = "stats_tv"
-    else:
-        media_scope_key = "stats"
-
-    with get_db_readonly() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
-
-        # Unfiltered totals come from cache (rebuilt only after DB writes).
-        lib_bundle = get_or_build_library_stats_bundle(conn)
-        stats = lib_bundle["stats"]
-        stats["last_scan_time"] = PROGRESS["last_duration"]
-        stats_media_scoped = lib_bundle[media_scope_key]
-        stats_media_scoped["last_scan_time"] = PROGRESS["last_duration"]
-
-        stats_filtered = _compute_enriched_stats(conn, main_where, main_params, include_sizes=False)
-
-        payload = {
-            "stats": stats,
-            "stats_filtered": stats_filtered,
-            "stats_media_scoped": stats_media_scoped,
-            "total_items": total,
-        }
-        if not include_filter_options:
-            return payload
-
-        where_cache: dict[str | None, tuple[str, list[Any]]] = {}
-
-        def get_where(exclude_key: str | None):
-            if exclude_key in where_cache:
-                return where_cache[exclude_key]
-            w, p = build_filter_query(args, exclude_key=exclude_key)
-            where_cache[exclude_key] = (w, p)
-            return w, p
-
-        def get_cnt(col, key):
-            w, p = get_where(key)
-            return {
-                r[0]: r[1]
-                for r in conn.execute(
-                    f"SELECT {col}, COUNT(*) FROM videos WHERE {col} != '' AND {col} IS NOT NULL AND {w} GROUP BY {col}",
-                    p,
-                ).fetchall()
-            }
-
-        def get_blank_cnt(col, key):
-            w, p = get_where(key)
-            return conn.execute(
-                f"SELECT COUNT(*) FROM videos WHERE ({col} IS NULL OR {col} = '') AND {w}",
-                p,
-            ).fetchone()[0]
-
-        def get_audio_codecs(key):
-            """Count codecs from comma-separated audio_codecs via SQL (no Python row scan)."""
-            w, p = get_where(key)
-            return _audio_codec_counts_sql(conn, w, p)
-
-        cnt_vol = get_cnt('source_vol', 'volume')
-        cnt_res = get_cnt('resolution', 'resolution')
-
-        w_status, p_status = build_filter_query(args, exclude_key='status')
-        failed_cnt = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_status} AND scan_error IS NOT NULL AND scan_error != ''",
-            p_status,
-        ).fetchone()[0]
-        ok_cnt = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_status} AND (scan_error IS NULL OR scan_error = '')",
-            p_status,
-        ).fetchone()[0]
-        w_hyb, p_hyb = build_filter_query(args, exclude_key='is_hybrid')
-        hyb_yes = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_hyb} AND is_hybrid = 1", p_hyb
-        ).fetchone()[0]
-        hyb_no = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_hyb} AND is_hybrid = 0 AND category != 'sdr_only'",
-            p_hyb,
-        ).fetchone()[0]
-        w_src_hyb, p_src_hyb = build_filter_query(args, exclude_key='source_hybrid')
-        src_hyb_yes = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_src_hyb} AND is_source_hybrid = 1", p_src_hyb
-        ).fetchone()[0]
-        src_hyb_no = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_src_hyb} AND is_source_hybrid = 0", p_src_hyb
-        ).fetchone()[0]
-        w_3d, p_3d = build_filter_query(args, exclude_key='is_3d')
-        d3d_yes = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_3d} AND is_3d = 1", p_3d
-        ).fetchone()[0]
-        d3d_no = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_3d} AND is_3d = 0", p_3d
-        ).fetchone()[0]
-        w_missing, p_missing = build_filter_query(args, exclude_key='missing')
-        missing_yes = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_missing} AND missing = 1", p_missing
-        ).fetchone()[0]
-        missing_no = conn.execute(
-            f"SELECT COUNT(*) FROM videos WHERE {w_missing} AND (missing = 0 OR missing IS NULL)",
-            p_missing,
-        ).fetchone()[0]
-
-        payload["filter_options"] = {
-            'categories': get_cnt('category', 'category'),
-            'profiles': get_cnt('profile', 'profile'),
-            'el_types': get_cnt('el_type', 'el'),
-            'containers': get_cnt('container', 'container'),
-            'volumes': cnt_vol,
-            'resolutions': cnt_res,
-            'secondary_hdrs': get_cnt('secondary_hdr', 'secondary_hdr'),
-            'audio_codecs': get_audio_codecs('audio'),
-            'video_sources': get_cnt('video_source', 'video_source'),
-            'source_formats': get_cnt('source_format', 'source_format'),
-            'video_codecs': get_cnt('video_codec', 'video_codec'),
-            'editions': get_cnt('edition', 'edition'),
-            'media_types': get_cnt('media_type', 'media_type'),
-            'blank_counts': {
-                'category': get_blank_cnt('category', 'category'),
-                'profile': get_blank_cnt('profile', 'profile'),
-                'el': get_blank_cnt('el_type', 'el'),
-                'container': get_blank_cnt('container', 'container'),
-                'volume': get_blank_cnt('source_vol', 'volume'),
-                'resolution': get_blank_cnt('resolution', 'resolution'),
-                'secondary_hdr': get_blank_cnt('secondary_hdr', 'secondary_hdr'),
-                'audio': get_blank_cnt('audio_codecs', 'audio'),
-                'video_source': get_blank_cnt('video_source', 'video_source'),
-                'source_format': get_blank_cnt('source_format', 'source_format'),
-                'video_codec': get_blank_cnt('video_codec', 'video_codec'),
-                'edition': get_blank_cnt('edition', 'edition'),
-                'media_type': get_blank_cnt('media_type', 'media_type'),
-            },
-            'special_hybrid': {'1': hyb_yes, '0': hyb_no},
-            'special_source_hybrid': {'1': src_hyb_yes, '0': src_hyb_no},
-            'special_status': {'ok': ok_cnt, 'failed': failed_cnt},
-            'special_is_3d': {'1': d3d_yes, '0': d3d_no},
-            'special_missing': {'1': missing_yes, '0': missing_no},
-        }
-        return payload
-
-
-@bp.route('/api/videos')
-def get_videos() -> Response:
-    """
-    Fast paginated video rows for the table.
-
-    Returns rows + pagination only. Ribbons/charts/filter facet counts come from
-    GET /api/videos/meta so the table can render without waiting on aggregations.
-    """
-    ensure_video_column('is_source_hybrid', 'INTEGER DEFAULT 0')
-    main_where, main_params = build_filter_query(request.args)
-    page = parse_positive_int(request.args.get('page'), 1, 1000000)
-    per_page = parse_positive_int(request.args.get('per_page'), 50, 500)
-    db_sort = _VIDEOS_SORT_MAP.get(request.args.get('sort'), 'last_scanned')
-    order = parse_sort_order(request.args.get('order'))
-
-    with get_db_readonly() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM videos WHERE {main_where}", main_params).fetchone()[0]
-        library_total = None
-        with library_stats_cache_lock:
-            cached_bundle = LIBRARY_STATS_CACHE.get("bundle")
-            if cached_bundle is not None:
-                library_total = cached_bundle.get("library_total")
-        if library_total is None:
-            library_total = conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
-        rows = conn.execute(
-            f"SELECT {_VIDEOS_ROW_COLUMNS} FROM videos WHERE {main_where} ORDER BY {db_sort} {order} LIMIT ? OFFSET ?",
-            main_params + [per_page, (page - 1) * per_page],
-        ).fetchall()
-        global API_LOG_TS
-        now = time.time()
-        if PROGRESS.get("status") == "scanning" and now - API_LOG_TS >= 5:
-            log_debug(
-                f"[API_VIDEOS] total={total} rows={len(rows)} page={page} per_page={per_page}",
-                "INFO",
-            )
-            API_LOG_TS = now
-        return jsonify({
-            "rows": [list(r) for r in rows],
-            "page": page,
-            "total_items": total,
-            "total_pages": (total + per_page - 1) // per_page,
-            "library_total": library_total,
-        })
-
-
-@bp.route('/api/videos/meta')
-def get_videos_meta() -> Response:
-    """
-    Heavy dashboard metadata for current filters: stats, charts data, optional filter options.
-
-    Query:
-      include_options=0|1 (default 1). Set 0 to skip expensive facet/dropdown count queries.
-    """
-    ensure_video_column('is_source_hybrid', 'INTEGER DEFAULT 0')
-    include_raw = str(request.args.get('include_options', '1')).strip().lower()
-    include_filter_options = include_raw not in ('0', 'false', 'no', 'off')
-    return jsonify(_build_videos_meta_payload(request.args, include_filter_options=include_filter_options))
-
-
-@bp.route('/api/filter_paths', methods=['POST'])
-def filter_paths() -> Response:
-    """
-    Return full_path list for current filters.
-    """
-    payload = request.get_json(silent=True) or {}
-    filters = payload.get('filters') or {}
-    where_clause, params = build_filter_query(filters)
-    with get_db_readonly() as conn:
-        rows = conn.execute(f"SELECT full_path FROM videos WHERE {where_clause}", params).fetchall()
-    return jsonify({"paths": [r[0] for r in rows]})
-
-
-@bp.route('/api/arr_search_replace', methods=['POST'])
-def arr_search_replace() -> Response:
-    """
-    Queue Sonarr/Radarr searches for one or more selected files.
-    """
-    payload = request.get_json(silent=True) or {}
-    raw_paths = payload.get("paths")
-    single_path = payload.get("full_path")
-    if isinstance(raw_paths, list):
-        paths = [str(p).strip() for p in raw_paths if str(p).strip()]
-    elif single_path:
-        paths = [str(single_path).strip()]
-    else:
-        paths = []
-
-    if not paths:
-        return jsonify({"status": "error", "message": "Missing paths"}), 400
-    if len(paths) > 500:
-        return jsonify({"status": "error", "message": "Too many paths in one request (max 500)"}), 400
-
-    placeholders = ",".join(["?"] * len(paths))
-    sql = (
-        "SELECT full_path, filename, media_type, season, episode, tmdb_id, tvdb_id, tvdb_series_id, imdb_id, show_title "
-        f"FROM videos WHERE full_path IN ({placeholders})"
-    )
-    with get_db_readonly() as conn:
-        rows = conn.execute(sql, paths).fetchall()
-
-    by_path: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        by_path[str(row[0])] = {
-            "full_path": row[0],
-            "filename": row[1],
-            "media_type": row[2],
-            "season": row[3],
-            "episode": row[4],
-            "tmdb_id": row[5],
-            "tvdb_id": row[6],
-            "tvdb_series_id": row[7] if len(row) > 7 else None,
-            "imdb_id": row[8] if len(row) > 8 else None,
-            "show_title": row[9] if len(row) > 9 else None,
-        }
-
-    results = []
-    success_count = 0
-    for path in paths:
-        item = by_path.get(path)
-        if not item:
-            log_debug(f"[ARR] Path not in DB: {path[:80]}...", "WARNING")
-            results.append({"full_path": path, "status": "error", "message": "Path not found in database"})
-            continue
-
-        media_type = str(item.get("media_type") or "").strip().lower()
-        fn = item.get("filename") or "(unknown)"
-        log_debug(f"[ARR] Processing: {fn} media_type={media_type or '(blank)'} tvdb={item.get('tvdb_id')} tmdb={item.get('tmdb_id')}", "INFO")
-        try:
-            if media_type == "movie":
-                ok, message = _queue_radarr_search(item)
-            elif media_type == "tv":
-                ok, message = _queue_sonarr_search(item)
-            else:
-                # Fallback inference when media_type is blank/missing
-                if _as_int(item.get("tmdb_id")) is not None:
-                    ok, message = _queue_radarr_search(item)
-                elif _as_int(item.get("tvdb_series_id")) is not None:
-                    ok, message = _queue_sonarr_search(item)
-                elif _as_int(item.get("season")) is not None and _as_int(item.get("episode")) is not None:
-                    ok, message = _queue_sonarr_search(item)
-                else:
-                    ok, message = False, "Unknown media_type and no tmdb_id/tvdb_series_id/season+episode for ARR lookup"
-        except Exception as e:
-            log_debug(f"[ARR] Exception for {fn}: {e}", "ERROR")
-            ok, message = False, str(e)
-
-        if ok:
-            success_count += 1
-            results.append({"full_path": path, "status": "ok", "message": message})
-        else:
-            results.append({"full_path": path, "status": "error", "message": message})
-
-    failed_count = len(paths) - success_count
-    return jsonify({
-        "status": "ok",
-        "processed": len(paths),
-        "success": success_count,
-        "failed": failed_count,
-        "results": results
-    })
-
-
-@bp.route('/api/arr_status', methods=['GET'])
-def arr_status() -> Response:
-    """
-    Get Sonarr/Radarr connectivity status for menu indicator.
-    """
-    now = time.time()
-    cached = ARR_STATUS_CACHE.get("payload")
-    cached_ts = float(ARR_STATUS_CACHE.get("ts") or 0.0)
-    # Short cache keeps context menu snappy while avoiding constant network calls.
-    if cached and (now - cached_ts) < 15:
-        return jsonify(cached)
-
-    sonarr = _arr_service_status("sonarr", SONARR_URL, SONARR_API_KEY)
-    radarr = _arr_service_status("radarr", RADARR_URL, RADARR_API_KEY)
-    overall_ok = bool(sonarr.get("ok")) and bool(radarr.get("ok"))
-    payload = {
-        "status": "ok",
-        "overall_ok": overall_ok,
-        "sonarr": sonarr,
-        "radarr": radarr
-    }
-    ARR_STATUS_CACHE["ts"] = now
-    ARR_STATUS_CACHE["payload"] = payload
-    return jsonify(payload)
-
-
-@bp.route('/api/rescan_file', methods=['POST'])
-def rescan_file() -> Response:
-    """
-    Rescan a single file and update its database entry.
-    Path must resolve under a configured/discovered media mount.
-    """
-    busy = reject_if_busy()
-    if busy:
-        return busy
-    try:
-        payload = request.get_json(silent=True) or {}
-        full_path = payload.get('full_path')
-        allowed, err = resolve_allowed_media_path(full_path)
-        if err:
-            return jsonify({"status": "error", "message": err}), 400
-
-        res = scan_file_worker(pathlib.Path(allowed))
-        save_batch_to_db([res])
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        log_debug(f"Rescan failed for {(request.get_json(silent=True) or {}).get('full_path')}: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-_RESCAN_FILES_MAX_BATCH = 50
-
-@bp.route('/api/rescan_files', methods=['POST'])
-def rescan_files() -> Response:
-    """
-    Rescan multiple files in one request (threaded analysis, batched DB writes).
-
-    Body: { "paths": ["..."], "threads": 2 }
-    Max 50 paths per call — clients should chunk larger selections.
-    """
-    busy = reject_if_busy()
-    if busy:
-        return busy
-    try:
-        payload = request.get_json(silent=True) or {}
-        paths = payload.get('paths')
-        if not isinstance(paths, list) or not paths:
-            return jsonify({"status": "error", "message": "Missing paths"}), 400
-        if len(paths) > _RESCAN_FILES_MAX_BATCH:
-            return jsonify({
-                "status": "error",
-                "message": f"Max {_RESCAN_FILES_MAX_BATCH} paths per request; chunk larger selections",
-            }), 400
-
-        threads = parse_positive_int(payload.get('threads'), 2, 8)
-        allowed_items: list[tuple[str, str]] = []
-        errors: list[dict[str, str]] = []
-        for raw in paths:
-            allowed, err = resolve_allowed_media_path(raw)
-            if err:
-                errors.append({"path": str(raw), "message": err})
-            else:
-                allowed_items.append((str(raw), allowed))
-
-        ok_paths: list[str] = []
-        batch_buffer: list[dict] = []
-
-        def _work(item: tuple[str, str]) -> tuple[str, str, Optional[dict], Optional[str]]:
-            orig, allowed = item
-            try:
-                result = scan_file_worker(pathlib.Path(allowed))
-                return ("ok", orig, result, None)
-            except Exception as exc:
-                return ("err", orig, None, str(exc))
-
-        if allowed_items:
-            with ThreadPoolExecutor(max_workers=min(threads, len(allowed_items))) as executor:
-                futures = [executor.submit(_work, item) for item in allowed_items]
-                for fut in as_completed(futures):
-                    status, orig, result, err_msg = fut.result()
-                    if status == "ok" and result is not None:
-                        ok_paths.append(orig)
-                        batch_buffer.append(result)
-                        if len(batch_buffer) >= 10:
-                            save_batch_to_db(batch_buffer)
-                            batch_buffer = []
-                    else:
-                        errors.append({"path": orig, "message": err_msg or "Rescan failed"})
-            if batch_buffer:
-                save_batch_to_db(batch_buffer)
-
-        failed = len(errors)
-        ok_count = len(ok_paths)
-        if failed == 0:
-            status = "ok"
-        elif ok_count == 0:
-            status = "error"
-        else:
-            status = "partial"
-        return jsonify({
-            "status": status,
-            "ok": ok_count,
-            "failed": failed,
-            "total": len(paths),
-            "errors": errors[:50],
-        })
-    except Exception as e:
-        log_debug(f"Batch rescan failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/debug_deep', methods=['POST'])
-def debug_deep_file() -> Response:
-    """
-    Run debug_deep.py for a single file and return raw output.
-    Path must resolve under a configured/discovered media mount.
-    """
-    busy = reject_if_busy()
-    if busy:
-        return busy
-    payload = request.get_json(silent=True) or {}
-    full_path = payload.get('full_path')
-    allowed, err = resolve_allowed_media_path(full_path)
-    if err:
-        return jsonify({"status": "error", "message": err}), 400
-    if not os.path.exists(allowed):
-        return jsonify({"status": "error", "message": "File not found"}), 404
-
-    script_path = os.path.join(BASE_DIR, 'debug_deep.py')
-    if not os.path.exists(script_path):
-        return jsonify({"status": "error", "message": "debug_deep.py not found"}), 500
-
-    try:
-        rc, out, err_out = run_command([sys.executable, script_path, allowed], capture=True, capture_stderr=True, timeout_seconds=180)
-        output = (out or "")
-        if err_out:
-            output += f"\n\n--- STDERR ---\n{err_out}"
-        # Keep payload bounded to avoid huge API responses.
-        if len(output) > 200000:
-            output = output[-200000:]
-        return jsonify({"status": "ok", "return_code": rc, "output": output})
-    except Exception as e:
-        log_debug(f"debug_deep failed for {allowed}: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/update_media_type', methods=['POST'])
-def update_media_type() -> Response:
-    """
-    Update media_type for a single file.
-    """
-    try:
-        payload = request.get_json(silent=True) or {}
-        full_path = payload.get('full_path')
-        media_type = (payload.get('media_type') or '').strip().lower()
-        if not full_path:
-            return jsonify({"status": "error", "message": "Missing full_path"}), 400
-        if media_type not in ('movie', 'tv'):
-            media_type = None
-        with get_db() as conn:
-            conn.execute("UPDATE videos SET media_type=? WHERE full_path=?", (media_type, full_path))
-            update_validation_flag_for_path(conn, full_path)
-            recompute_duplicate_group_keys_for_paths(conn, [full_path])
-            recompute_duplicate_counts(conn)
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        log_debug(f"Update media_type failed for {payload.get('full_path')}: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/update_metadata', methods=['POST'])
-def update_metadata() -> Response:
-    """
-    Update show/movie metadata fields for a single file.
-    """
-    try:
-        payload = request.get_json(silent=True) or {}
-        full_path = payload.get('full_path')
-        if not full_path:
-            return jsonify({"status": "error", "message": "Missing full_path"}), 400
-        text_fields = {
-            'show_title': 'show_title',
-            'episode_title': 'episode_title',
-            'movie_title': 'movie_title',
-            'video_source': 'video_source',
-            'source_format': 'source_format',
-            'category': 'category',
-            'secondary_hdr': 'secondary_hdr'
-        }
-        int_fields = {
-            'season': 'season',
-            'episode': 'episode',
-            'year': 'year'
-        }
-        updates = []
-        params = []
-
-        for key in text_fields:
-            if key in payload:
-                val = (payload.get(key) or '').strip() or None
-                updates.append(f"{text_fields[key]}=?")
-                params.append(val)
-
-        for key in int_fields:
-            if key in payload:
-                raw_val = payload.get(key)
-                try:
-                    val = int(raw_val) if raw_val is not None and raw_val != '' else None
-                except (ValueError, TypeError):
-                    val = None
-                updates.append(f"{int_fields[key]}=?")
-                params.append(val)
-
-        if not updates:
-            return jsonify({"status": "ok"})
-
-        with get_db() as conn:
-            conn.execute(
-                f"UPDATE videos SET {', '.join(updates)} WHERE full_path=?",
-                params + [full_path]
-            )
-            update_validation_flag_for_path(conn, full_path)
-            recompute_duplicate_group_keys_for_paths(conn, [full_path])
-            recompute_duplicate_counts(conn)
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        log_debug(f"Update metadata failed for {payload.get('full_path')}: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/bulk_update_metadata', methods=['POST'])
-def bulk_update_metadata() -> Response:
-    """
-    Update metadata fields (and optional media_type) for multiple files.
-    """
-    try:
-        payload = request.get_json(silent=True) or {}
-        paths = payload.get('paths') or []
-        updates_payload = payload.get('updates') or {}
-        media_type = (payload.get('media_type') or '').strip().lower()
-        if not isinstance(paths, list) or not paths:
-            return jsonify({"status": "error", "message": "Missing paths"}), 400
-
-        text_fields = {
-            'show_title': 'show_title',
-            'episode_title': 'episode_title',
-            'movie_title': 'movie_title',
-            'video_source': 'video_source',
-            'source_format': 'source_format',
-            'category': 'category',
-            'secondary_hdr': 'secondary_hdr'
-        }
-        int_fields = {
-            'season': 'season',
-            'episode': 'episode',
-            'year': 'year'
-        }
-
-        updates = []
-        params = []
-        for key in text_fields:
-            if key in updates_payload:
-                val = (updates_payload.get(key) or '').strip() or None
-                updates.append(f"{text_fields[key]}=?")
-                params.append(val)
-
-        for key in int_fields:
-            if key in updates_payload:
-                raw_val = updates_payload.get(key)
-                try:
-                    val = int(raw_val) if raw_val is not None and raw_val != '' else None
-                except (ValueError, TypeError):
-                    val = None
-                updates.append(f"{int_fields[key]}=?")
-                params.append(val)
-
-        if media_type:
-            if media_type not in ('movie', 'tv'):
-                media_type = None
-            updates.append("media_type=?")
-            params.append(media_type)
-        elif 'media_type' in payload:
-            updates.append("media_type=?")
-            params.append(None)
-
-        if not updates:
-            return jsonify({"status": "ok", "updated": 0})
-
-        updated = 0
-        with get_db() as conn:
-            for full_path in paths:
-                conn.execute(
-                    f"UPDATE videos SET {', '.join(updates)} WHERE full_path=?",
-                    params + [full_path]
-                )
-                update_validation_flag_for_path(conn, full_path)
-                updated += 1
-            recompute_duplicate_group_keys_for_paths(conn, paths)
-            recompute_duplicate_counts(conn)
-        return jsonify({"status": "ok", "updated": updated})
-    except Exception as e:
-        log_debug(f"Bulk update metadata failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/backfill_metadata', methods=['POST'])
-def backfill_metadata() -> Response:
-    """
-    Backfill missing metadata fields using .nfo and filename heuristics.
-    """
-    try:
-        busy = reject_if_busy()
-        if busy:
-            return busy
-        payload = request.get_json(silent=True) or {}
-        fill_blanks_only = payload.get('fill_blanks_only', True)
-        updated = 0
-        with get_db() as conn:
-            rows = conn.execute(
-                """SELECT full_path, filename, media_type, show_title, episode_title, season, episode, movie_title, year,
-                          imdb_id, tvdb_id, tmdb_id, rotten_id, metacritic_id, trakt_id,
-                          tvdb_series_id, tvdb_episode_id, imdb_series_id, imdb_episode_id, tmdb_series_id, tmdb_episode_id,
-                          trakt_series_id, trakt_episode_id, rotten_series_id, rotten_episode_id, metacritic_series_id, metacritic_episode_id,
-                          imdb_rating, tvdb_rating, tmdb_rating, rotten_rating, metacritic_rating, trakt_rating
-                   FROM videos
-                   WHERE media_type IS NULL OR media_type = ''
-                      OR show_title IS NULL OR show_title = ''
-                      OR episode_title IS NULL OR episode_title = ''
-                      OR movie_title IS NULL OR movie_title = ''
-                      OR season IS NULL OR episode IS NULL OR year IS NULL
-                      OR imdb_id IS NULL OR imdb_id = ''
-                      OR tvdb_id IS NULL OR tvdb_id = ''
-                      OR tmdb_id IS NULL OR tmdb_id = ''
-                      OR rotten_id IS NULL OR rotten_id = ''
-                      OR metacritic_id IS NULL OR metacritic_id = ''
-                      OR trakt_id IS NULL OR trakt_id = ''
-                      OR imdb_rating IS NULL OR tvdb_rating IS NULL OR tmdb_rating IS NULL
-                      OR rotten_rating IS NULL OR metacritic_rating IS NULL OR trakt_rating IS NULL"""
-            ).fetchall()
-            total = len(rows)
-            with progress_lock:
-                PROGRESS.update({
-                    "status": "scanning",
-                    "current": 0,
-                    "total": total,
-                    "file": "Backfilling metadata...",
-                    "start_time": time.time(),
-                    "last_duration": "0s",
-                    "eta": ""
-                })
-            log_debug(f"[BACKFILL] Starting backfill for {total} files (blanks_only={fill_blanks_only})", "INFO")
-            for row in rows:
-                current = {
-                    'media_type': row['media_type'],
-                    'show_title': row['show_title'],
-                    'episode_title': row['episode_title'],
-                    'season': row['season'],
-                    'episode': row['episode'],
-                    'movie_title': row['movie_title'],
-                    'year': row['year'],
-                    'imdb_id': row['imdb_id'],
-                    'tvdb_id': row['tvdb_id'],
-                    'tmdb_id': row['tmdb_id'],
-                    'rotten_id': row['rotten_id'],
-                    'metacritic_id': row['metacritic_id'],
-                    'trakt_id': row['trakt_id'],
-                    'tvdb_series_id': row['tvdb_series_id'] if 'tvdb_series_id' in row.keys() else None,
-                    'tvdb_episode_id': row['tvdb_episode_id'] if 'tvdb_episode_id' in row.keys() else None,
-                    'imdb_series_id': row['imdb_series_id'] if 'imdb_series_id' in row.keys() else None,
-                    'imdb_episode_id': row['imdb_episode_id'] if 'imdb_episode_id' in row.keys() else None,
-                    'tmdb_series_id': row['tmdb_series_id'] if 'tmdb_series_id' in row.keys() else None,
-                    'tmdb_episode_id': row['tmdb_episode_id'] if 'tmdb_episode_id' in row.keys() else None,
-                    'trakt_series_id': row['trakt_series_id'] if 'trakt_series_id' in row.keys() else None,
-                    'trakt_episode_id': row['trakt_episode_id'] if 'trakt_episode_id' in row.keys() else None,
-                    'rotten_series_id': row['rotten_series_id'] if 'rotten_series_id' in row.keys() else None,
-                    'rotten_episode_id': row['rotten_episode_id'] if 'rotten_episode_id' in row.keys() else None,
-                    'metacritic_series_id': row['metacritic_series_id'] if 'metacritic_series_id' in row.keys() else None,
-                    'metacritic_episode_id': row['metacritic_episode_id'] if 'metacritic_episode_id' in row.keys() else None,
-                    'imdb_rating': row['imdb_rating'],
-                    'tvdb_rating': row['tvdb_rating'],
-                    'tmdb_rating': row['tmdb_rating'],
-                    'rotten_rating': row['rotten_rating'],
-                    'metacritic_rating': row['metacritic_rating'],
-                    'trakt_rating': row['trakt_rating']
-                }
-                updates = build_backfill_metadata(row['full_path'], row['filename'], current)
-                if not updates:
-                    continue
-                if fill_blanks_only:
-                    updates = {k: v for k, v in updates.items() if v is not None and (current.get(k) is None or current.get(k) == '')}
-                if not updates:
-                    continue
-                new_media_type = updates.get('media_type', current.get('media_type'))
-                new_show_title = updates.get('show_title', current.get('show_title'))
-                new_episode_title = updates.get('episode_title', current.get('episode_title'))
-                new_season = updates.get('season', current.get('season'))
-                new_episode = updates.get('episode', current.get('episode'))
-                new_movie_title = updates.get('movie_title', current.get('movie_title'))
-                new_year = updates.get('year', current.get('year'))
-                new_imdb_id = updates.get('imdb_id', current.get('imdb_id'))
-                new_tvdb_id = updates.get('tvdb_id', current.get('tvdb_id'))
-                new_tmdb_id = updates.get('tmdb_id', current.get('tmdb_id'))
-                new_rotten_id = updates.get('rotten_id', current.get('rotten_id'))
-                new_metacritic_id = updates.get('metacritic_id', current.get('metacritic_id'))
-                new_trakt_id = updates.get('trakt_id', current.get('trakt_id'))
-                new_tvdb_series_id = updates.get('tvdb_series_id', current.get('tvdb_series_id'))
-                new_tvdb_episode_id = updates.get('tvdb_episode_id', current.get('tvdb_episode_id'))
-                new_imdb_series_id = updates.get('imdb_series_id', current.get('imdb_series_id'))
-                new_imdb_episode_id = updates.get('imdb_episode_id', current.get('imdb_episode_id'))
-                new_tmdb_series_id = updates.get('tmdb_series_id', current.get('tmdb_series_id'))
-                new_tmdb_episode_id = updates.get('tmdb_episode_id', current.get('tmdb_episode_id'))
-                new_trakt_series_id = updates.get('trakt_series_id', current.get('trakt_series_id'))
-                new_trakt_episode_id = updates.get('trakt_episode_id', current.get('trakt_episode_id'))
-                new_rotten_series_id = updates.get('rotten_series_id', current.get('rotten_series_id'))
-                new_rotten_episode_id = updates.get('rotten_episode_id', current.get('rotten_episode_id'))
-                new_metacritic_series_id = updates.get('metacritic_series_id', current.get('metacritic_series_id'))
-                new_metacritic_episode_id = updates.get('metacritic_episode_id', current.get('metacritic_episode_id'))
-                new_imdb_rating = updates.get('imdb_rating', current.get('imdb_rating'))
-                new_tvdb_rating = updates.get('tvdb_rating', current.get('tvdb_rating'))
-                new_tmdb_rating = updates.get('tmdb_rating', current.get('tmdb_rating'))
-                new_rotten_rating = updates.get('rotten_rating', current.get('rotten_rating'))
-                new_metacritic_rating = updates.get('metacritic_rating', current.get('metacritic_rating'))
-                new_trakt_rating = updates.get('trakt_rating', current.get('trakt_rating'))
-                validation_flag = compute_validation_flag({
-                    "media_type": new_media_type,
-                    "show_title": new_show_title,
-                    "episode_title": new_episode_title,
-                    "movie_title": new_movie_title,
-                    "season": new_season,
-                    "episode": new_episode
-                })
-                conn.execute(
-                    "UPDATE videos SET media_type=?, show_title=?, episode_title=?, season=?, episode=?, movie_title=?, year=?, imdb_id=?, tvdb_id=?, tmdb_id=?, rotten_id=?, metacritic_id=?, trakt_id=?, tvdb_series_id=?, tvdb_episode_id=?, imdb_series_id=?, imdb_episode_id=?, tmdb_series_id=?, tmdb_episode_id=?, trakt_series_id=?, trakt_episode_id=?, rotten_series_id=?, rotten_episode_id=?, metacritic_series_id=?, metacritic_episode_id=?, imdb_rating=?, tvdb_rating=?, tmdb_rating=?, rotten_rating=?, metacritic_rating=?, trakt_rating=?, validation_flag=? WHERE full_path=?",
-                    (
-                        new_media_type,
-                        new_show_title,
-                        new_episode_title,
-                        new_season,
-                        new_episode,
-                        new_movie_title,
-                        new_year,
-                        new_imdb_id,
-                        new_tvdb_id,
-                        new_tmdb_id,
-                        new_rotten_id,
-                        new_metacritic_id,
-                        new_trakt_id,
-                        new_tvdb_series_id,
-                        new_tvdb_episode_id,
-                        new_imdb_series_id,
-                        new_imdb_episode_id,
-                        new_tmdb_series_id,
-                        new_tmdb_episode_id,
-                        new_trakt_series_id,
-                        new_trakt_episode_id,
-                        new_rotten_series_id,
-                        new_rotten_episode_id,
-                        new_metacritic_series_id,
-                        new_metacritic_episode_id,
-                        new_imdb_rating,
-                        new_tvdb_rating,
-                        new_tmdb_rating,
-                        new_rotten_rating,
-                        new_metacritic_rating,
-                        new_trakt_rating,
-                        validation_flag,
-                        row['full_path']
-                    )
-                )
-                updated += 1
-                with progress_lock:
-                    PROGRESS["current"] += 1
-                    PROGRESS["file"] = f"Backfilling: {row['filename']}"
-                    elapsed = int(time.time() - PROGRESS.get("start_time", time.time()))
-                    PROGRESS["last_duration"] = f"{elapsed}s"
-                    if PROGRESS["current"] > 0 and PROGRESS["total"] > 0 and elapsed > 0:
-                        rate = PROGRESS["current"] / elapsed
-                        remaining = PROGRESS["total"] - PROGRESS["current"]
-                        eta_seconds = int(remaining / rate) if rate > 0 else 0
-                        PROGRESS["eta"] = f"{eta_seconds}s" if eta_seconds > 0 else "calculating..."
-            log_debug(f"[BACKFILL] Completed. Updated {updated} files.", "INFO")
-            if updated > 0:
-                recompute_duplicate_group_keys_for_paths(conn, [row['full_path'] for row in rows])
-                recompute_duplicate_counts(conn)
-            with progress_lock:
-                PROGRESS.update({"status": "idle", "current": 0, "total": 0, "file": "Waiting...", "eta": ""})
-        return jsonify({"status": "ok", "updated": updated})
-    except Exception as e:
-        log_debug(f"Backfill metadata failed: {e}", "ERROR")
-        with progress_lock:
-            PROGRESS.update({"status": "idle", "current": 0, "total": 0, "file": "Waiting...", "eta": ""})
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-def parse_duplicate_group_info(group_key: str | None) -> dict:
-    key = (group_key or '').strip()
-    if not key:
-        return {"basis": "unknown", "media_type": None}
-    parts = key.split(':')
-    if len(parts) >= 2:
-        media_type = parts[0]
-        basis = parts[1]
-        return {"basis": basis, "media_type": media_type}
-    return {"basis": "unknown", "media_type": None}
-
-@bp.route('/api/duplicates/rebuild', methods=['POST'])
-def rebuild_duplicates() -> Response:
-    """
-    Rebuild persistent duplicate keys/counters.
-    Optionally includes exact fingerprint refresh.
-    """
-    busy = reject_if_busy()
-    if busy:
-        return busy
-    try:
-        payload = request.get_json(silent=True) or {}
-        filters = payload.get('filters') or {}
-        include_exact = bool(payload.get('include_exact', False))
-        where, params = build_filter_query(filters)
-        updated = 0
-        with get_db() as conn:
-            rows = conn.execute(
-                f"""SELECT full_path, filename, media_type, movie_title, show_title, season, episode, year,
-                            tmdb_id, imdb_id, tvdb_series_id, imdb_series_id, file_size, dup_exact_key
-                     FROM videos WHERE {where}""",
-                params
-            ).fetchall()
-            updates: list[tuple[str | None, str | None, str]] = []
-            for row in rows:
-                row_dict = dict(row)
-                group_key = build_duplicate_group_key(row_dict)
-                exact_key = row['dup_exact_key']
-                if include_exact:
-                    exact_key = build_duplicate_exact_key(row['full_path'], row['file_size'])
-                updates.append((group_key, exact_key, row['full_path']))
-            if updates:
-                conn.executemany(
-                    "UPDATE videos SET dup_group_key=?, dup_exact_key=? WHERE full_path=?",
-                    updates
-                )
-                updated = len(updates)
-            recompute_duplicate_counts(conn)
-        return jsonify({"status": "ok", "updated": updated, "include_exact": include_exact})
-    except Exception as e:
-        log_debug(f"Rebuild duplicates failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/duplicates/groups', methods=['POST'])
-def list_duplicate_groups() -> Response:
-    """
-    Return duplicate groups (logical + exact).
-
-    When filters are present: include a group if ANY member matches the filter,
-    but report the full group size (all members). This avoids hiding 3+ copy
-    groups when a table filter only matches one of the copies.
-    """
-    try:
-        payload = request.get_json(silent=True) or {}
-        filters = payload.get('filters') or {}
-        where, params = build_filter_query(filters)
-        filters_active = where.replace(' ', '') != '1=1' or bool(params)
-        groups: list[dict[str, Any]] = []
-        with get_db() as conn:
-            if filters_active:
-                # Full group counts; restrict to keys touched by the filter.
-                logical_sql = f"""
-                    SELECT dup_group_key, COUNT(*) AS file_count, SUM(COALESCE(file_size,0)) AS total_size,
-                           MAX(media_type) AS media_type, MAX(COALESCE(movie_title, show_title, filename)) AS title_sample,
-                           MAX(year) AS year_sample, MAX(season) AS season_sample, MAX(episode) AS episode_sample
-                    FROM videos
-                    WHERE dup_group_key IS NOT NULL AND dup_group_key != ''
-                      AND dup_group_key IN (
-                          SELECT DISTINCT dup_group_key FROM videos
-                          WHERE ({where}) AND dup_group_key IS NOT NULL AND dup_group_key != ''
-                      )
-                    GROUP BY dup_group_key
-                    HAVING COUNT(*) > 1
-                """
-                exact_sql = f"""
-                    SELECT dup_exact_key, COUNT(*) AS file_count, SUM(COALESCE(file_size,0)) AS total_size,
-                           MAX(COALESCE(movie_title, show_title, filename)) AS title_sample,
-                           MAX(media_type) AS media_type
-                    FROM videos
-                    WHERE dup_exact_key IS NOT NULL AND dup_exact_key != ''
-                      AND dup_exact_key IN (
-                          SELECT DISTINCT dup_exact_key FROM videos
-                          WHERE ({where}) AND dup_exact_key IS NOT NULL AND dup_exact_key != ''
-                      )
-                    GROUP BY dup_exact_key
-                    HAVING COUNT(*) > 1
-                """
-            else:
-                logical_sql = f"""
-                    SELECT dup_group_key, COUNT(*) AS file_count, SUM(COALESCE(file_size,0)) AS total_size,
-                           MAX(media_type) AS media_type, MAX(COALESCE(movie_title, show_title, filename)) AS title_sample,
-                           MAX(year) AS year_sample, MAX(season) AS season_sample, MAX(episode) AS episode_sample
-                    FROM videos
-                    WHERE {where} AND dup_group_key IS NOT NULL AND dup_group_key != ''
-                    GROUP BY dup_group_key
-                    HAVING COUNT(*) > 1
-                """
-                exact_sql = f"""
-                    SELECT dup_exact_key, COUNT(*) AS file_count, SUM(COALESCE(file_size,0)) AS total_size,
-                           MAX(COALESCE(movie_title, show_title, filename)) AS title_sample,
-                           MAX(media_type) AS media_type
-                    FROM videos
-                    WHERE {where} AND dup_exact_key IS NOT NULL AND dup_exact_key != ''
-                    GROUP BY dup_exact_key
-                    HAVING COUNT(*) > 1
-                """
-
-            logical_rows = conn.execute(logical_sql, params).fetchall()
-            for row in logical_rows:
-                info = parse_duplicate_group_info(row['dup_group_key'])
-                label = row['title_sample'] or 'Unknown title'
-                if (row['media_type'] or info.get('media_type')) == 'tv' and row['season_sample'] is not None and row['episode_sample'] is not None:
-                    label = f"{label} S{int(row['season_sample']):02}E{int(row['episode_sample']):02}"
-                elif row['year_sample']:
-                    label = f"{label} ({int(row['year_sample'])})"
-                groups.append({
-                    "group_id": f"logical|{row['dup_group_key']}",
-                    "group_key": row['dup_group_key'],
-                    "group_type": "logical",
-                    "match_basis": info.get('basis') or 'logical',
-                    "media_type": row['media_type'] or info.get('media_type'),
-                    "title": label,
-                    "file_count": int(row['file_count'] or 0),
-                    "total_size": int(row['total_size'] or 0)
-                })
-
-            exact_rows = conn.execute(exact_sql, params).fetchall()
-            for row in exact_rows:
-                groups.append({
-                    "group_id": f"exact|{row['dup_exact_key']}",
-                    "group_key": row['dup_exact_key'],
-                    "group_type": "exact",
-                    "match_basis": "size+fingerprint",
-                    "media_type": row['media_type'],
-                    "title": row['title_sample'] or 'Exact duplicate set',
-                    "file_count": int(row['file_count'] or 0),
-                    "total_size": int(row['total_size'] or 0)
-                })
-        groups.sort(key=lambda g: (g.get('file_count', 0), g.get('total_size', 0)), reverse=True)
-        return jsonify({
-            "status": "ok",
-            "groups": groups,
-            "group_count": len(groups),
-            "filters_applied": filters_active,
-        })
-    except Exception as e:
-        log_debug(f"List duplicate groups failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/duplicates/members', methods=['POST'])
-def list_duplicate_members() -> Response:
-    """
-    Return files belonging to a duplicate group.
-    """
-    try:
-        payload = request.get_json(silent=True) or {}
-        group_id = (payload.get('group_id') or '').strip()
-        if not group_id or '|' not in group_id:
-            return jsonify({"status": "error", "message": "Missing/invalid group_id"}), 400
-        group_type, group_key = group_id.split('|', 1)
-        if group_type not in ('logical', 'exact'):
-            return jsonify({"status": "error", "message": "Invalid group type"}), 400
-        key_col = 'dup_group_key' if group_type == 'logical' else 'dup_exact_key'
-        with get_db() as conn:
-            rows = conn.execute(
-                f"""SELECT filename, full_path, source_vol, file_size, resolution, bitrate_mbps, video_codec, source_format,
-                            category, secondary_hdr, audio_codecs, profile, el_type, media_type, movie_title, show_title,
-                            season, episode, year, scan_error, last_scanned
-                     FROM videos
-                     WHERE {key_col}=?
-                     ORDER BY
-                       CASE LOWER(COALESCE(source_format,'')) WHEN 'remux' THEN 4 WHEN 'bluray' THEN 3 WHEN 'web-dl' THEN 2 WHEN 'webrip' THEN 1 ELSE 0 END DESC,
-                       CASE LOWER(COALESCE(resolution,'')) WHEN '8k' THEN 5 WHEN '4k' THEN 4 WHEN '2160p' THEN 4 WHEN '1080p' THEN 3 WHEN '720p' THEN 2 ELSE 0 END DESC,
-                       COALESCE(bitrate_mbps, 0) DESC,
-                       COALESCE(file_size, 0) DESC,
-                       COALESCE(last_scanned, '') DESC""",
-                (group_key,)
-            ).fetchall()
-            members: list[dict[str, Any]] = []
-            for idx, row in enumerate(rows):
-                members.append({
-                    "filename": row['filename'],
-                    "full_path": row['full_path'],
-                    "source_vol": row['source_vol'],
-                    "file_size": int(row['file_size'] or 0),
-                    "resolution": row['resolution'],
-                    "bitrate_mbps": row['bitrate_mbps'],
-                    "video_codec": row['video_codec'],
-                    "source_format": row['source_format'],
-                    "category": row['category'],
-                    "secondary_hdr": row['secondary_hdr'],
-                    "audio_codecs": row['audio_codecs'],
-                    "profile": row['profile'],
-                    "el_type": row['el_type'],
-                    "media_type": row['media_type'],
-                    "movie_title": row['movie_title'],
-                    "show_title": row['show_title'],
-                    "season": row['season'],
-                    "episode": row['episode'],
-                    "year": row['year'],
-                    "scan_error": row['scan_error'],
-                    "last_scanned": row['last_scanned'],
-                    "keep_recommended": idx == 0
-                })
-        return jsonify({"status": "ok", "group_id": group_id, "members": members, "member_count": len(members)})
-    except Exception as e:
-        log_debug(f"List duplicate members failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/delete', methods=['POST'])
-def delete_files() -> Response:
-    """
-    Delete video records from the database, optionally removing files/folders on disk.
-
-    Body:
-      paths: list of full paths (required unless delete_all_filter)
-      delete_all_filter: delete all DB rows matching filters (DB-only; disk delete forbidden)
-      filters: filter object when delete_all_filter is true
-      delete_files_on_disk: bool — remove video files under allowed mounts
-      delete_folders: bool — after file delete, remove parent folders when safe
-    """
-    busy = reject_if_busy()
-    if busy:
-        return busy
-    data = request.json or {}
-    paths = data.get('paths') or []
-    if not isinstance(paths, list):
-        paths = []
-    paths = [str(p).strip() for p in paths if str(p).strip()]
-    delete_all = bool(data.get('delete_all_filter', False))
-    delete_files_on_disk = bool(data.get('delete_files_on_disk', False))
-    delete_folders = bool(data.get('delete_folders', False))
-
-    if delete_folders and not delete_files_on_disk:
-        return jsonify({
-            "status": "error",
-            "message": "delete_folders requires delete_files_on_disk",
-        }), 400
-    if delete_all and (delete_files_on_disk or delete_folders):
-        return jsonify({
-            "status": "error",
-            "message": "Disk/folder delete is not allowed with delete-all-filtered; select explicit paths",
-        }), 400
-    if not delete_all and not paths:
-        return jsonify({"status": "error", "message": "No paths provided"}), 400
-
-    files_deleted: list[str] = []
-    folders_deleted: list[str] = []
-    disk_errors: list[dict[str, str]] = []
-    folders_skipped: list[dict[str, str]] = []
-
-    # Resolve allowed realpaths for disk ops
-    allowed_by_orig: dict[str, str] = {}
-    if delete_files_on_disk:
-        for p in paths:
-            allowed, err = resolve_allowed_media_path(p)
-            if err:
-                disk_errors.append({"path": p, "message": err})
-            else:
-                allowed_by_orig[p] = allowed
-
-        deleting_reals = set(allowed_by_orig.values())
-
-        for orig, allowed in list(allowed_by_orig.items()):
-            try:
-                if os.path.isfile(allowed) or os.path.islink(allowed):
-                    os.remove(allowed)
-                    files_deleted.append(allowed)
-                elif not os.path.exists(allowed):
-                    # Already gone on disk — still remove DB row
-                    pass
-                else:
-                    disk_errors.append({"path": orig, "message": "Not a regular file"})
-            except OSError as e:
-                disk_errors.append({"path": orig, "message": str(e)})
-
-        if delete_folders:
-            # Unique parent folders of successfully targeted files
-            folder_candidates: dict[str, set[str]] = {}
-            for allowed in allowed_by_orig.values():
-                parent = os.path.dirname(allowed)
-                if not parent:
-                    continue
-                folder_candidates.setdefault(parent, set()).add(allowed)
-
-            mount_roots = {os.path.realpath(r) for r in get_allowed_media_roots()}
-            for folder, members in folder_candidates.items():
-                folder_allowed, folder_err = resolve_allowed_media_path(folder)
-                if folder_err:
-                    folders_skipped.append({"path": folder, "message": folder_err})
-                    continue
-                folder_real = folder_allowed
-                if folder_real in mount_roots:
-                    folders_skipped.append({
-                        "path": folder_real,
-                        "message": "Refusing to delete media mount root",
-                    })
-                    continue
-                # Block if any other video remains in the folder (after this delete set)
-                others = []
-                try:
-                    for name in os.listdir(folder_real):
-                        fp = os.path.join(folder_real, name)
-                        try:
-                            if not os.path.isfile(fp) and not os.path.islink(fp):
-                                continue
-                        except OSError:
-                            continue
-                        if pathlib.Path(name).suffix.lower() not in VIDEO_EXTENSIONS:
-                            continue
-                        fp_real = os.path.realpath(fp)
-                        if fp_real in deleting_reals:
-                            continue  # targeted by this request (may already be removed)
-                        if os.path.exists(fp_real):
-                            others.append(fp_real)
-                except OSError as e:
-                    folders_skipped.append({"path": folder_real, "message": str(e)})
-                    continue
-                if others:
-                    folders_skipped.append({
-                        "path": folder_real,
-                        "message": f"Folder still contains {len(others)} other video file(s)",
-                    })
-                    continue
-                try:
-                    shutil.rmtree(folder_real)
-                    folders_deleted.append(folder_real)
-                    log_debug(f"[DELETE] Removed folder {folder_real}", "WARNING")
-                except OSError as e:
-                    disk_errors.append({"path": folder_real, "message": str(e)})
-
-    with get_db() as conn:
-        count = 0
-        if delete_all:
-            w, p = build_filter_query(data.get('filters', {}))
-            count = conn.execute(f"DELETE FROM videos WHERE {w}", p).rowcount
-        else:
-            db_paths = set(paths)
-            for allowed in allowed_by_orig.values():
-                db_paths.add(allowed)
-            for p in db_paths:
-                count += conn.execute("DELETE FROM videos WHERE full_path = ?", (p,)).rowcount
-        recompute_duplicate_counts(conn)
-
-    return jsonify({
-        "status": "deleted",
-        "count": count,
-        "files_deleted": len(files_deleted),
-        "folders_deleted": len(folders_deleted),
-        "files_deleted_paths": files_deleted[:100],
-        "folders_deleted_paths": folders_deleted[:100],
-        "folders_skipped": folders_skipped[:50],
-        "disk_errors": disk_errors[:50],
-        "delete_files_on_disk": delete_files_on_disk,
-        "delete_folders": delete_folders,
-    })
-
-
-@bp.route('/api/delete/preview', methods=['POST'])
-def delete_preview() -> Response:
-    """
-    Preview disk/folder impact for an explicit path list (no mutations).
-    """
-    data = request.json or {}
-    paths = data.get('paths') or []
-    if not isinstance(paths, list):
-        paths = []
-    paths = [str(p).strip() for p in paths if str(p).strip()]
-    if not paths:
-        return jsonify({"status": "error", "message": "No paths provided"}), 400
-
-    allowed_by_orig: dict[str, str] = {}
-    path_errors: list[dict[str, str]] = []
-    for p in paths:
-        allowed, err = resolve_allowed_media_path(p)
-        if err:
-            path_errors.append({"path": p, "message": err})
-        else:
-            allowed_by_orig[p] = allowed
-
-    deleting_reals = set(allowed_by_orig.values())
-    mount_roots = {os.path.realpath(r) for r in get_allowed_media_roots()}
-    folder_map: dict[str, dict[str, Any]] = {}
-    for allowed in allowed_by_orig.values():
-        parent = os.path.dirname(allowed)
-        if not parent:
-            continue
-        if parent not in folder_map:
-            folder_map[parent] = {"path": parent, "files": [], "ok": True, "reason": ""}
-        folder_map[parent]["files"].append(allowed)
-
-    folders = []
-    for parent, info in folder_map.items():
-        folder_allowed, folder_err = resolve_allowed_media_path(parent)
-        if folder_err:
-            info["ok"] = False
-            info["reason"] = folder_err
-            info["path"] = parent
-            folders.append(info)
-            continue
-        info["path"] = folder_allowed
-        if folder_allowed in mount_roots:
-            info["ok"] = False
-            info["reason"] = "Media mount root — will not be deleted"
-            folders.append(info)
-            continue
-        others = []
-        try:
-            for name in os.listdir(folder_allowed):
-                fp = os.path.join(folder_allowed, name)
-                if not os.path.isfile(fp) and not os.path.islink(fp):
-                    continue
-                if pathlib.Path(name).suffix.lower() not in VIDEO_EXTENSIONS:
-                    continue
-                fp_real = os.path.realpath(fp)
-                if fp_real not in deleting_reals:
-                    others.append(fp_real)
-        except OSError as e:
-            info["ok"] = False
-            info["reason"] = str(e)
-            folders.append(info)
-            continue
-        if others:
-            info["ok"] = False
-            info["reason"] = f"Contains {len(others)} other video file(s)"
-            info["other_videos"] = others[:20]
-        folders.append(info)
-
-    return jsonify({
-        "status": "ok",
-        "file_count": len(allowed_by_orig),
-        "files": list(allowed_by_orig.values()),
-        "folders": folders,
-        "path_errors": path_errors,
-        "deletable_folder_count": sum(1 for f in folders if f.get("ok")),
-    })
-
-
-@bp.route('/api/settings', methods=['GET', 'POST'])
-def handle_settings() -> Response:
-    """
-    Get or update application settings.
-    
-    GET: Returns all current settings as JSON
-    POST: Updates specified settings and optionally configures scheduled scans
-    
-    Request Body (POST):
-        mode: Scan schedule mode ('manual', 'daily', 'interval', 'weekly', or 'monthly')
-        value: Schedule value (HH:MM for daily; hours for interval;
-               dow or dow|HH:MM for weekly; day or day|HH:MM for monthly)
-        threads: Number of worker threads
-        skip_words: Comma-separated words to skip in filenames
-        min_size_mb: Minimum file size in MB
-        batch_size: Database batch insert size
-        And other settings...
-        
-    Returns:
-        JSON response with settings (GET) or status (POST)
-    """
-    if request.method == 'POST':
-        d = request.json
-        try:
-            with get_db() as conn:
-                if 'mode' in d:
-                    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_mode', ?)", (d['mode'],))
-                    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_value', ?)", (d['value'],))
-                    apply_scan_schedule(d.get('mode', 'manual'), d.get('value', ''))
-                if 'threads' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('threads', ?)", (str(d['threads']),))
-                if 'skip_words' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('skip_words', ?)", (d['skip_words'],))
-                if 'min_size_mb' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('min_size_mb', ?)", (str(d['min_size_mb']),))
-                if 'log_limit' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_limit', ?)", (str(d['log_limit']),))
-                if 'debug_mode' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('debug_mode', ?)", (str(d['debug_mode']).lower(),))
-                if 'refresh_interval' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('refresh_interval', ?)", (str(d['refresh_interval']),))
-                if 'visible_cols' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('visible_cols', ?)", (d['visible_cols'],))
-                if 'column_widths' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('column_widths', ?)", (d['column_widths'],))
-                if 'sort_order' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sort_order', ?)", (d['sort_order'],))
-                if 'notif_style' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('notif_style', ?)", (d['notif_style'],))
-                if 'batch_size' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('batch_size', ?)", (str(d['batch_size']),))
-                if 'rpu_fel_threshold' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('rpu_fel_threshold', ?)", (str(d['rpu_fel_threshold']),))
-                if 'force_rescan' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_rescan', ?)", (str(d['force_rescan']).lower(),))
-                if 'column_order' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('column_order', ?)", (d['column_order'],))
-                for key, value in d.items():
-                    if key.startswith(('visible_cols_', 'column_order_', 'column_widths_')):
-                        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-                if 'scan_folders' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_folders', ?)", (d['scan_folders'],))
-                if 'scan_extras' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_extras', ?)", (str(d['scan_extras']).lower(),))
-                if 'remove_missing_from_db' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('remove_missing_from_db', ?)", (str(d['remove_missing_from_db']).lower(),))
-                if 'duplicate_check_on_scan' in d: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('duplicate_check_on_scan', ?)", (str(d['duplicate_check_on_scan']).lower(),))
-            return jsonify({"status": "success"})
-        except Exception as e:
-            import traceback
-            log_debug(f"Settings save failed: {e}", "ERROR")
-            log_debug(traceback.format_exc(), "ERROR")
-            return jsonify({"status": "error", "message": str(e)}), 500
-    else:
-        with get_db() as conn: res = dict(conn.execute("SELECT key, value FROM settings").fetchall())
-        return jsonify(res)
-
-@bp.route('/api/scan_profiles', methods=['GET', 'POST', 'DELETE'])
-def handle_scan_profiles() -> Response:
-    """Manage named scan setting presets stored in the application database."""
-    try:
-        with get_db() as conn:
-            raw = conn.execute(
-                "SELECT value FROM settings WHERE key='scan_profiles'"
-            ).fetchone()
-            try:
-                profiles = json.loads(raw[0]) if raw and raw[0] else []
-            except (TypeError, ValueError):
-                profiles = []
-            if not isinstance(profiles, list):
-                profiles = []
-
-            if request.method == "GET":
-                return jsonify({"status": "ok", "profiles": profiles})
-
-            payload = request.get_json(silent=True) or {}
-            name = str(payload.get("name") or "").strip()
-            if not name or len(name) > 64:
-                return jsonify({"status": "error", "message": "A profile name is required"}), 400
-            if request.method == "DELETE":
-                profiles = [p for p in profiles if p.get("name") != name]
-            else:
-                values = payload.get("settings") or {}
-                if not isinstance(values, dict):
-                    return jsonify({"status": "error", "message": "Invalid profile settings"}), 400
-                profile = {"name": name, "settings": values}
-                profiles = [p for p in profiles if p.get("name") != name]
-                profiles.append(profile)
-            conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_profiles', ?)",
-                (json.dumps(profiles),)
-            )
-            return jsonify({"status": "ok", "profiles": profiles})
-    except (sqlite3.Error, TypeError, ValueError) as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/api/anomalies')
-def get_quality_anomalies() -> Response:
-    """Return analyzed titles with codec/quality anomaly flags."""
-    try:
-        with get_db() as conn:
-            rows = conn.execute(
-                """SELECT full_path, filename, resolution, bitrate_mbps, video_codec,
-                          validation_flag
-                   FROM videos
-                   WHERE validation_flag LIKE '%bitrate_%'
-                      OR validation_flag LIKE '%legacy_codec_%'
-                      OR validation_flag LIKE '%frame_rate%'
-                   ORDER BY filename COLLATE NOCASE"""
-            ).fetchall()
-        return jsonify({"status": "ok", "anomalies": [
-            {"full_path": r[0], "filename": r[1], "resolution": r[2],
-             "bitrate_mbps": r[3], "video_codec": r[4], "flags": r[5]}
-            for r in rows
-        ]})
-    except sqlite3.Error as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@bp.route('/api/nfo_content', methods=['GET'])
-def get_nfo_content() -> Response:
-    """
-    Return the raw NFO file content for a video path.
-    Looks up NFO candidates (same-stem, tvshow.nfo for TV) and returns the first found.
-    Video path and resolved NFO must lie under an allowed media mount.
-    """
-    path_arg = request.args.get('path', '').strip()
-    allowed, err = resolve_allowed_media_path(path_arg)
-    if err:
-        return jsonify({"status": "error", "message": err}), 400
-    full_path = allowed
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT media_type FROM videos WHERE full_path = ?", (full_path,)
-        ).fetchone()
-        if row is None:
-            # Also try original path form in case DB stored a non-realpath variant
-            row = conn.execute(
-                "SELECT media_type FROM videos WHERE full_path = ?", (path_arg,)
-            ).fetchone()
-    media_type = row[0] if row else None
-    candidates = find_kodi_nfo_candidates(full_path, media_type)
-    if not candidates:
-        return jsonify({"status": "error", "message": "No NFO found for this file"}), 404
-    nfo_path = candidates[0]
-    nfo_allowed, nfo_err = resolve_allowed_media_path(nfo_path)
-    if nfo_err:
-        return jsonify({"status": "error", "message": "NFO path is outside allowed media mounts"}), 400
-    try:
-        with open(nfo_allowed, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-    except OSError as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-    return jsonify({"status": "ok", "content": content, "nfo_path": nfo_allowed})
-
-
-@bp.route('/api/browse', methods=['GET'])
-def browse_volume() -> Response:
-    """
-    Browse directories within a mounted volume.
-    """
-    volume = (request.args.get('volume') or '').strip()
-    rel_path = (request.args.get('path') or '').strip()
-    mounts = get_mount_status()
-    base = mounts.get(volume)
-    if not base:
-        return jsonify({"status": "error", "message": "Invalid volume"}), 400
-    if rel_path:
-        target = os.path.join(base, rel_path.lstrip('/\\'))
-    else:
-        target = base
-    base_real = os.path.realpath(base)
-    target_real = os.path.realpath(target)
-    if not is_path_within_root(target_real, base_real):
-        return jsonify({"status": "error", "message": "Invalid path"}), 400
-    if not os.path.isdir(target_real):
-        return jsonify({"status": "error", "message": "Path not found"}), 404
-    try:
-        dirs = sorted([
-            d for d in os.listdir(target_real)
-            if os.path.isdir(os.path.join(target_real, d)) and not d.startswith('.')
-        ])
-    except OSError as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-    return jsonify({"status": "ok", "volume": volume, "path": rel_path, "dirs": dirs})
-
-
-@bp.route('/api/cleanup_db', methods=['POST'])
-def cleanup_db() -> Response:
-    """
-    Remove DB entries for offline volumes or paths outside selected scan folders.
-    """
-    busy = reject_if_busy()
-    if busy:
-        return busy
-    try:
-        deleted = perform_cleanup_db(delete=True)
-        return jsonify({"status": "ok", "deleted": deleted})
-    except Exception as e:
-        log_debug(f"Cleanup DB failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@bp.route('/api/cleanup_db_preview', methods=['GET'])
-def cleanup_db_preview() -> Response:
-    """
-    Preview count of DB entries that would be removed.
-    """
-    try:
-        count = perform_cleanup_db(delete=False)
-        return jsonify({"status": "ok", "count": count})
-    except Exception as e:
-        log_debug(f"Cleanup DB preview failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-def perform_cleanup_db(delete: bool) -> int:
-    mounts = get_mount_status()
-    online_vols = set(mounts.keys())
-    with get_db() as conn:
-        settings = dict(conn.execute("SELECT key, value FROM settings").fetchall())
-        scan_folders = []
-        try:
-            scan_folders = json.loads(settings.get('scan_folders', '[]') or '[]')
-        except (json.JSONDecodeError, TypeError):
-            scan_folders = []
-        allowed_bases = []
-        if isinstance(scan_folders, list):
-            for entry in scan_folders:
-                if entry.get('muted'):
-                    continue
-                vol_name = (entry.get('volume') or '').strip()
-                if not vol_name or vol_name not in mounts:
-                    continue
-                base = mounts.get(vol_name)
-                rel_path = (entry.get('path') or '').strip()
-                if rel_path:
-                    candidate = rel_path
-                    if not os.path.isabs(candidate):
-                        candidate = os.path.join(base, rel_path.lstrip('/\\'))
-                else:
-                    candidate = base
-                base_real = os.path.realpath(base)
-                target_real = os.path.realpath(candidate)
-                if is_path_within_root(target_real, base_real) and os.path.isdir(target_real):
-                    allowed_bases.append(target_real)
-
-        rows = conn.execute("SELECT full_path, source_vol FROM videos").fetchall()
-        to_delete = []
-        for row in rows:
-            full_path = row["full_path"]
-            vol = row["source_vol"]
-            if vol not in online_vols:
-                to_delete.append((full_path,))
-                continue
-            if allowed_bases:
-                try:
-                    real_path = os.path.realpath(full_path)
-                except OSError:
-                    to_delete.append((full_path,))
-                    continue
-                if not any(is_path_within_root(real_path, base) for base in allowed_bases):
-                    to_delete.append((full_path,))
-        if delete and to_delete:
-            conn.executemany("DELETE FROM videos WHERE full_path=?", to_delete)
-    return len(to_delete)
-
-
-def update_validation_flag_for_path(conn: sqlite3.Connection, full_path: str) -> None:
-    row = conn.execute(
-        "SELECT media_type, show_title, episode_title, movie_title, season, episode FROM videos WHERE full_path=?",
-        (full_path,)
-    ).fetchone()
-    if not row:
-        return
-    validation_flag = compute_validation_flag(dict(row))
-    conn.execute("UPDATE videos SET validation_flag=? WHERE full_path=?", (validation_flag, full_path))
-
-@bp.route('/api/db/maintenance', methods=['POST'])
-def db_maintenance() -> Response:
-    """
-    Run database maintenance operations (VACUUM and ANALYZE).
-    Optimizes the database by reclaiming space and updating query statistics.
-    
-    Returns:
-        JSON response with status and message
-    """
-    busy = reject_if_busy()
-    if busy:
-        return busy
-    try:
-        with get_db() as conn:
-            log_debug("[DB_MAINT] Starting database maintenance (VACUUM)...", "INFO")
-            conn.execute("VACUUM")
-            log_debug("[DB_MAINT] VACUUM completed. Running ANALYZE...", "INFO")
-            conn.execute("ANALYZE")
-            log_debug("[DB_MAINT] Database maintenance completed successfully", "INFO")
-        return jsonify({"status": "success", "message": "Database maintenance completed successfully"}), 200
-    except Exception as e:
-        log_debug(f"[DB_MAINT] Database maintenance failed: {e}", "ERROR")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@bp.route('/start', methods=['POST'])
-def start() -> Tuple[Response, int] | Response:
-    """
-    Start a new scan with specified parameters.
-    
-    Request Body:
-        targets: List of volume names to scan (optional, scans all if empty)
-        threads: Number of worker threads (optional, default: 4)
-        force_rescan: Force rescan of all files (optional, default: False)
-        debug_mode: Enable debug logging (optional, default: False)
-        
-    Returns:
-        JSON response with status "started" or "busy" (400 if already scanning)
-    """
-    busy = reject_if_busy(status_code=400)
-    if busy:
-        return busy
-    targets = request.json.get('targets', [])
-    threads = int(request.json.get('threads', 4))
-    force = request.json.get('force_rescan', False)
-    debug = request.json.get('debug_mode', False)
-    scan_mode = (request.json.get('scan_mode') or 'all').lower()
-    if scan_mode not in ('all', 'tv', 'movie'):
-        scan_mode = 'all'
-    scan_scope = (request.json.get('scan_scope') or 'all').lower()
-    if scan_scope not in ('all', 'changed'):
-        scan_scope = 'all'
-    scan_folder = request.json.get('scan_folder')
-    threading.Thread(
-        target=run_scan,
-        args=(threads, targets, force, debug, scan_mode, scan_folder, scan_scope),
-        daemon=True
-    ).start()
-    return jsonify({"status": "started"})
-
-@bp.route('/abort', methods=['POST'])
-def abort() -> Response:
-    """
-    Abort the currently running scan.
-    
-    Immediately sets ABORT_SCAN flag and kills all active subprocesses.
-    """
-    global ABORT_SCAN
-    # Only log and process abort if a scan is actually running
-    with progress_lock:
-        is_scanning = PROGRESS.get("status") == "scanning"
-    
-    if not is_scanning:
-        # If no scan is running, just return success without logging or setting ABORT_SCAN
-        return jsonify({"status": "idle", "killed_processes": 0, "message": "No scan in progress"})
-    
-    log_debug("[ABORT] Abort requested by user", "INFO")
-    ABORT_SCAN = True
-    PAUSE_EVENT.set()
-    
-    # Immediately kill all active subprocesses
-    killed_count = 0
-    with proc_lock:
-        active_procs = list(ACTIVE_PROCS)  # Create a copy to iterate over
-        log_debug(f"[ABORT] Found {len(active_procs)} active subprocesses to kill", "INFO")
-        for p in active_procs:
-            try:
-                log_debug(f"[ABORT] Killing subprocess PID {p.pid}", "INFO")
-                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                killed_count += 1
-            except (OSError, ProcessLookupError, ValueError) as e:
-                log_debug(f"[ABORT] Failed to kill process {p.pid}: {e}", "WARNING")
-                # Try direct kill as fallback
-                try:
-                    p.kill()
-                    killed_count += 1
-                except (OSError, ProcessLookupError, ValueError):
-                    pass
-    
-    log_debug(f"[ABORT] Abort acknowledged. Killed {killed_count} subprocesses. Scan will stop at next check.", "INFO")
-    
-    # Update PROGRESS immediately so UI reflects abort status
-    with progress_lock:
-        PROGRESS["file"] = "Aborting..."
-        PROGRESS["paused"] = False
-        # Don't change status to "idle" yet - let run_scan do that when it finishes
-    
-    return jsonify({"status": "aborting", "killed_processes": killed_count})
-
-@bp.route('/pause', methods=['POST'])
-def toggle_pause():
-    """Toggle pause/resume for the active scan."""
-    with progress_lock:
-        if PROGRESS.get("status") != "scanning":
-            return jsonify({"status": "idle", "paused": False})
-    if PAUSE_EVENT.is_set():
-        PAUSE_EVENT.clear()
-        with progress_lock:
-            PROGRESS["paused"] = True
-        return jsonify({"status": "paused", "paused": True})
-    PAUSE_EVENT.set()
-    with progress_lock:
-        PROGRESS["paused"] = False
-    return jsonify({"status": "scanning", "paused": False})
-
-@bp.route('/progress')
-def get_progress():
-    """Get current scan progress information."""
-    with progress_lock: 
-        d = PROGRESS.copy()
-    return jsonify(d)
-
-@bp.route('/clear_completed', methods=['POST'])
-def clear_completed():
-    """Clear the scan completion flag after user acknowledges the result."""
-    with progress_lock: 
-        PROGRESS["scan_completed"] = False
-    return jsonify({"status": "cleared"})
+from video_analyzer.db.maintenance import cleanup_old_rpu_files, perform_cleanup_db  # noqa: E402
+from video_analyzer.queries.filters import (  # noqa: E402
+    build_filter_query, parse_advanced_search, parse_positive_int, parse_sort_order,
+)
+from video_analyzer.queries.videos_export import (  # noqa: E402
+    _VIDEOS_COLUMN_NAMES, _VIDEOS_ROW_COLUMNS, _VIDEOS_SORT_MAP,
+    _export_query_parts, _row_to_export_dict,
+)
+from video_analyzer.scan.pipeline import (  # noqa: E402
+    analyze_files, cleanup_deleted_files, collect_files_to_scan, count_removed_files,
+    finalize_scan, iter_bounded_scan_futures, iter_job_scan_paths, load_interrupted_job,
+    load_processed_map, mark_scan_job_file, pending_scan_file_count, persist_pending_scan_paths,
+    prepare_scan_paths, build_scan_paths_from_folders, parse_skip_rules,
+    folder_matches_skip_rules, file_matches_skip_rules, record_seen_paths,
+    reset_scan_seen_files, run_scan, take_pending_scan_batch, clear_scan_job_files,
+)
+from video_analyzer.routes import handlers as _routes  # noqa: E402
+
+
+def __getattr__(name: str):
+    if hasattr(_routes, name):
+        return getattr(_routes, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

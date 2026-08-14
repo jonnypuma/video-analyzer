@@ -13,8 +13,6 @@ def test_bounded_scan_futures_limit_queued_work(analyzer_mod):
         return value * 2
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        # Use the production helper's scheduling contract with a lightweight
-        # executor-compatible worker by temporarily replacing the worker.
         original = core.scan_file_worker
         core.scan_file_worker = work
         try:

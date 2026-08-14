@@ -43,9 +43,13 @@ async function confirmScan(fromModal = false, mode = scanMode) {
     triggerScan(selected, force, mode);
 }
 
-async function triggerScan(targets, force, mode = scanMode) {
+async function triggerScan(targets, force, mode = scanMode, resumeJobId = null) {
     document.body.classList.add('scanning');
     document.getElementById('scan-info-box').innerHTML = `STARTING <div class="spinner"></div>`;
+    const resumeBtn = document.getElementById('btn-resume-scan');
+    if (resumeBtn) resumeBtn.style.display = 'none';
+    const durEl = document.getElementById('stat-duration');
+    if (durEl) durEl.innerText = formatDuration(0);
     const debug = document.getElementById('chk-debug').checked;
     // Initialize scanStartTime immediately to start timer right away
     scanStartTime = Date.now() / 1000;
@@ -61,7 +65,8 @@ async function triggerScan(targets, force, mode = scanMode) {
                 debug_mode: debug,
                 scan_mode: mode,
                 scan_folder: scanFolderTarget,
-                scan_scope: document.getElementById('chk-changed-folders')?.checked ? 'changed' : 'all'
+                scan_scope: document.getElementById('chk-changed-folders')?.checked ? 'changed' : 'all',
+                resume_job_id: resumeJobId || undefined
             }) 
         }); 
         setTimeout(poll, 500); 
@@ -227,6 +232,8 @@ async function poll() {
                 scanStartTime = 0; // Reset timer when scan completes
                 lastFilterUpdate = 0; // Reset filter update timer
                 document.getElementById('scan-info-box').innerText = "IDLE";
+                if (typeof checkInterruptedScan === 'function') checkInterruptedScan();
+                if (data.last_full_scan) setLastScanDisplay(data.last_full_scan);
                 const btn = document.getElementById('btn-abort');
                 if(btn) { btn.disabled = false; btn.innerText = "Abort Scan"; }
                 loadData(); 
@@ -276,4 +283,46 @@ async function poll() {
         // Continue polling even on error to handle temporary network issues
         setTimeout(poll, 1000);
     }
+}
+
+let interruptedResumeJobId = null;
+
+async function checkInterruptedScan() {
+    const btn = document.getElementById('btn-resume-scan');
+    if (!btn) return;
+    try {
+        const res = await fetch('/api/scan_jobs');
+        const data = await res.json();
+        const job = (data.jobs || []).find(item =>
+            (item.status === 'interrupted' || item.status === 'aborted')
+            && (item.pending_count || 0) > 0
+        );
+        if (job && !document.body.classList.contains('scanning')) {
+            interruptedResumeJobId = job.job_id;
+            btn.style.display = '';
+            btn.textContent = `Resume (${job.pending_count})`;
+            const info = document.getElementById('scan-info-box');
+            if (info && (info.innerText || '').trim() === 'IDLE') {
+                info.innerText = `INTERRUPTED — ${job.pending_count} pending`;
+            }
+        } else {
+            interruptedResumeJobId = null;
+            btn.style.display = 'none';
+        }
+    } catch (e) {
+        interruptedResumeJobId = null;
+        btn.style.display = 'none';
+    }
+}
+
+async function resumeInterruptedScan() {
+    if (!interruptedResumeJobId) {
+        await checkInterruptedScan();
+    }
+    if (!interruptedResumeJobId) return;
+    const jobId = interruptedResumeJobId;
+    interruptedResumeJobId = null;
+    const btn = document.getElementById('btn-resume-scan');
+    if (btn) btn.style.display = 'none';
+    await triggerScan([], false, scanMode, jobId);
 }

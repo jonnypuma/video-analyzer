@@ -21,6 +21,20 @@ if str(APP_DIR) not in sys.path:
 import pytest  # noqa: E402
 
 
+def csrf_request(client, method, path, **kwargs):
+    """Issue a mutating request with the CSRF token from this client session."""
+    token = client.get("/api/health").headers.get("X-CSRF-Token", "")
+    headers = dict(kwargs.pop("headers", None) or {})
+    if token:
+        headers["X-CSRF-Token"] = token
+    kwargs["headers"] = headers
+    return client.open(path, method=method, **kwargs)
+
+
+def csrf_post(client, path, **kwargs):
+    return csrf_request(client, "POST", path, **kwargs)
+
+
 @pytest.fixture
 def media_root(tmp_path, monkeypatch):
     """Create a fake media mount and point SCAN_PATHS at it."""

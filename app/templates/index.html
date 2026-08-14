@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Analyzer | HDR Intelligence</title>
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    <script>window.CSRF_TOKEN = {{ csrf_token | tojson }};</script>
     <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
     <script src="{{ url_for('static', filename='chart.js') }}?v={{ app_version_label }}"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v={{ app_version_label }}">
@@ -489,6 +491,21 @@
         </div>
     </div>
 
+    <div id="anomaly-modal" class="modal-bg" style="z-index: 700; display:none;" onclick="if(event.target===this)closeAnomalyModal()">
+        <div class="report-content" style="width: min(640px, 92vw); margin: 8% auto; text-align: left; border-color: #f39c12;">
+            <h2 style="margin-top:0; letter-spacing: 1px;">QUALITY <span style="color:#f39c12">ANOMALY</span></h2>
+            <div id="anomaly-modal-filename" style="color:#fff; font-weight:bold; margin-bottom:4px; word-break:break-all;"></div>
+            <div id="anomaly-modal-path" style="font-family: monospace; font-size: 0.8em; color:#888; margin-bottom: 8px; word-break: break-all;"></div>
+            <div id="anomaly-modal-meta" style="font-size: 0.85em; color:#bbb; margin-bottom: 14px;"></div>
+            <div id="anomaly-modal-flags"></div>
+            <p style="color:#888; font-size:0.82em; line-height:1.4; margin-top:14px;">These are conservative heuristics, not proof the file is broken. Click File Details for the full scan JSON.</p>
+            <div style="display:flex; gap:10px; margin-top:12px;">
+                <button class="btn-orange" style="flex:1;" onclick="openDetailsFromAnomalyModal()">File Details</button>
+                <button class="btn-blue" style="flex:1;" onclick="closeAnomalyModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
     <div id="storage-trend-modal" class="modal-bg" style="z-index: 700; display:none;" onclick="if(event.target===this)closeStorageTrends()">
         <div class="report-content" style="width:min(900px, 92vw); margin:5% auto; text-align:left;">
             <div class="details-header">
@@ -508,6 +525,9 @@
                 <div class="app-title-wrap">
                     <h1 style="margin:0; font-weight: 300; letter-spacing: -1px;">Video <span style="font-weight: 800; color:#3498db">Analyzer</span></h1>
                     <span class="app-version-badge" title="Application version">{{ app_version_label }}</span>
+                    {% if auth_enabled %}
+                    <a class="app-logout" href="{{ url_for('logout') }}">Logout</a>
+                    {% endif %}
                 </div>
                 <button id="btn-main-menu" class="settings-toggle" type="button" aria-label="Open main menu" aria-expanded="false" onclick="toggleMainMenu()" style="position: relative; z-index: 101;">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
@@ -530,6 +550,7 @@
             </div>
             <div id="scan-info-wrap">
                 <div id="scan-info-box" role="status" aria-live="polite" title="Jump to logs" onclick="scrollToConsole()">IDLE</div>
+                <button id="btn-resume-scan" class="btn-grey" type="button" style="display:none;" onclick="resumeInterruptedScan()">Resume</button>
                 <button id="scan-history-btn" class="btn-grey" onclick="openScanHistory()">History</button>
             </div>
         </div>
@@ -584,77 +605,89 @@
         </div>
 
         <div class="summary-ribbon">
-            <div class="stat-card" onclick="clearFilters()">
+            <div class="stat-card" onclick="clearFilters()" title="Clear all filters">
                 <div class="stat-label">Total Files</div>
                 <div class="stat-value" id="stat-total">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px solid var(--col-mel);" onclick="applyRibbonFilter('format', 'dovi')">
+            <div class="stat-card" data-ribbon="format:dovi" style="--ribbon-accent: var(--col-mel); border-bottom: 3px solid var(--col-mel);" onclick="applyRibbonFilter('format', 'dovi')">
                 <div class="stat-label">DV Titles (All)</div>
                 <div class="stat-value" id="stat-dovi" style="color:var(--col-mel)">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px dashed var(--col-p5);" onclick="applyRibbonFilter('dovi_prof', '5')">
+            <div class="stat-card" data-ribbon="dovi_prof:5" style="--ribbon-accent: var(--col-p5); border-bottom: 3px dashed var(--col-p5);" onclick="applyRibbonFilter('dovi_prof', '5')">
                 <div class="stat-label">P5</div>
                 <div class="stat-value" id="stat-p5" style="color: var(--col-p5);">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px dashed var(--col-fel);" onclick="applyRibbonFilter('el', 'FEL')">
+            <div class="stat-card" data-ribbon="el:FEL" style="--ribbon-accent: var(--col-fel); border-bottom: 3px dashed var(--col-fel);" onclick="applyRibbonFilter('el', 'FEL')">
                 <div class="stat-label">P7 FEL</div>
                 <div class="stat-value" id="stat-fel" style="color: var(--col-fel);">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px dashed var(--col-p7-mel);" onclick="applyRibbonFilter('el', 'MEL')">
+            <div class="stat-card" data-ribbon="el:MEL" style="--ribbon-accent: var(--col-p7-mel); border-bottom: 3px dashed var(--col-p7-mel);" onclick="applyRibbonFilter('el', 'MEL')">
                 <div class="stat-label">P7 MEL</div>
                 <div class="stat-value" id="stat-mel" style="color: var(--col-p7-mel);">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px dashed #e74c3c;" onclick="applyRibbonFilter('dovi_prof', '8.1')">
+            <div class="stat-card" data-ribbon="dovi_prof:8.1" style="--ribbon-accent: #e74c3c; border-bottom: 3px dashed #e74c3c;" onclick="applyRibbonFilter('dovi_prof', '8.1')">
                 <div class="stat-label">P8.1</div>
                 <div class="stat-value" id="stat-p81" style="color: #e74c3c;">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px dashed #fd79a8;" onclick="applyRibbonFilter('dovi_prof', '8.4')">
+            <div class="stat-card" data-ribbon="dovi_prof:8.4" style="--ribbon-accent: #fd79a8; border-bottom: 3px dashed #fd79a8;" onclick="applyRibbonFilter('dovi_prof', '8.4')">
                 <div class="stat-label">P8.4</div>
                 <div class="stat-value" id="stat-p84" style="color: #fd79a8;">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px dashed var(--col-p10);" onclick="applyRibbonFilter('dovi_prof', '10')">
-                <div class="stat-label">P10</div>
-                <div class="stat-value" id="stat-p10" style="color: var(--col-p10);">0</div>
-            </div>
-            <div class="stat-card" style="border-bottom: 3px dashed var(--col-p101);" onclick="applyRibbonFilter('dovi_prof', '10.1')">
+            <div class="stat-card" data-ribbon="dovi_prof:10.1" style="--ribbon-accent: var(--col-p101); border-bottom: 3px dashed var(--col-p101);" onclick="applyRibbonFilter('dovi_prof', '10.1')">
                 <div class="stat-label">P10.1</div>
                 <div class="stat-value" id="stat-p101" style="color: var(--col-p101);">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px dashed var(--col-p104);" onclick="applyRibbonFilter('dovi_prof', '10.4')">
+            <div class="stat-card" data-ribbon="dovi_prof:10.4" style="--ribbon-accent: var(--col-p104); border-bottom: 3px dashed var(--col-p104);" onclick="applyRibbonFilter('dovi_prof', '10.4')">
                 <div class="stat-label">P10.4</div>
                 <div class="stat-value" id="stat-p104" style="color: var(--col-p104);">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px solid #ffb6c1;" onclick="applyRibbonFilter('hybrid', '1')">
+            <div class="stat-card" data-ribbon="dovi_prof:20" style="--ribbon-accent: var(--col-p20); border-bottom: 3px dashed var(--col-p20);" onclick="applyRibbonFilter('dovi_prof', '20')">
+                <div class="stat-label">P20</div>
+                <div class="stat-value" id="stat-p20" style="color: var(--col-p20);">0</div>
+            </div>
+            <div class="stat-card" data-ribbon="hybrid:1" style="--ribbon-accent: #ffb6c1; border-bottom: 3px solid #ffb6c1;" onclick="applyRibbonFilter('hybrid', '1')">
                 <div class="stat-label">Dual HDR</div>
                 <div class="stat-value" id="stat-hybrid" style="color:#ffb6c1">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px solid #A0DE14;" onclick="applyRibbonFilter('source_hybrid', '1')">
+            <div class="stat-card" data-ribbon="source_hybrid:1" style="--ribbon-accent: #A0DE14; border-bottom: 3px solid #A0DE14;" onclick="applyRibbonFilter('source_hybrid', '1')">
                 <div class="stat-label">Hybrid</div>
                 <div class="stat-value" id="stat-source-hybrid" style="color:#A0DE14">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px solid var(--col-10p);" onclick="applyRibbonFilter('format', 'hdr10plus')">
+            <div class="stat-card" data-ribbon="format:hdr10plus" style="--ribbon-accent: var(--col-10p); border-bottom: 3px solid var(--col-10p);" onclick="applyRibbonFilter('format', 'hdr10plus')">
                 <div class="stat-label">HDR10+</div>
                 <div class="stat-value" id="stat-hdr10plus" style="color:var(--col-10p)">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px solid var(--col-10);" onclick="applyRibbonFilter('format', 'hdr10')">
+            <div class="stat-card" data-ribbon="format:hdr10" style="--ribbon-accent: var(--col-10); border-bottom: 3px solid var(--col-10);" onclick="applyRibbonFilter('format', 'hdr10')">
                 <div class="stat-label">HDR10</div>
                 <div class="stat-value" id="stat-hdr10" style="color:var(--col-10)">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px solid var(--col-hlg);" onclick="applyRibbonFilter('format', 'hlg')">
+            <div class="stat-card" data-ribbon="format:hlg" style="--ribbon-accent: var(--col-hlg); border-bottom: 3px solid var(--col-hlg);" onclick="applyRibbonFilter('format', 'hlg')">
                 <div class="stat-label">HLG</div>
                 <div class="stat-value" id="stat-hlg" style="color:var(--col-hlg)">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px solid var(--col-sdr);" onclick="applyRibbonFilter('format', 'sdr_only')">
+            <div class="stat-card" data-ribbon="format:sdr_only" style="--ribbon-accent: var(--col-sdr); border-bottom: 3px solid var(--col-sdr);" onclick="applyRibbonFilter('format', 'sdr_only')">
                 <div class="stat-label">SDR</div>
                 <div class="stat-value" id="stat-sdr" style="color:var(--col-sdr)">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px solid var(--col-fail);" onclick="applyRibbonFilter('status', 'failed')">
+            <div class="stat-card" data-ribbon="status:failed" style="--ribbon-accent: var(--col-fail); border-bottom: 3px solid var(--col-fail);" onclick="applyRibbonFilter('status', 'failed')">
                 <div class="stat-label">Failed</div>
                 <div class="stat-value" id="stat-failed" style="color:var(--col-fail)">0</div>
             </div>
-            <div class="stat-card" style="border-bottom: 3px solid #2ecc71;">
-                <div class="stat-label">Duration</div>
-                <div class="stat-value" id="stat-duration" style="color:#2ecc71">0s</div>
+            <div class="stat-card" data-ribbon="anomaly:1" style="--ribbon-accent: #f39c12; border-bottom: 3px solid #f39c12;" onclick="applyRibbonFilter('anomaly', '1')">
+                <div class="stat-label">Anomalies</div>
+                <div class="stat-value" id="stat-anomalies" style="color:#f39c12">0</div>
+            </div>
+            <div class="stat-card duration-card" style="border-bottom: 3px solid #2ecc71; cursor: default;" onclick="event.stopPropagation()">
+                <div class="duration-flip">
+                    <div class="duration-face duration-face-idle">
+                        <div class="stat-label">Last scan</div>
+                        <div class="stat-value" id="stat-last-scan" style="color:#2ecc71">—</div>
+                    </div>
+                    <div class="duration-face duration-face-live">
+                        <div class="stat-label">Duration</div>
+                        <div class="stat-value" id="stat-duration" style="color:#2ecc71">00:00:00</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -754,7 +787,7 @@
                         </div>
                         <div style="display:flex; align-items:center; gap:5px;">
                             <input type="checkbox" id="chk-changed-folders" class="set-chk" style="width:16px; height:16px;">
-                            <span style="font-size: 0.7em; color: #2ecc71; font-weight: bold;" title="Only traverse folders whose directory timestamp changed since the last full scan">Changed Folders Only</span>
+                            <span style="font-size: 0.7em; color: #2ecc71; font-weight: bold;" title="Walk all files; skip analysis when size matches and file mtime is not newer than last scan">Skip unchanged files</span>
                         </div>
                         <div style="display:flex; align-items:center; gap:5px;">
                             <input type="checkbox" id="chk-debug" class="set-chk" style="width:16px; height:16px;">
@@ -776,7 +809,7 @@
                     <div id="group-filters" class="filter-group hidden">
                         <div class="filter-group-row">
                             <span class="filter-label">IGNORE:</span>
-                            <input type="text" id="skip-words" placeholder="extras, sample..." class="filter-input" onkeypress="if(event.key==='Enter') triggerPulse(this)">
+                            <input type="text" id="skip-words" placeholder="sample,/extrathumbs,/*.trickplay" class="filter-input" title="Comma-separated. No prefix = files only. /name = folders only (exact; use * for globs). %name = files + folders." onkeypress="if(event.key==='Enter') triggerPulse(this)">
                             <span class="filter-label">MIN(MB):</span>
                             <input type="number" id="min-size" placeholder="50" class="filter-input-num" onkeypress="if(event.key==='Enter') triggerPulse(this)">
                             <span class="filter-label">LOGS:</span>
@@ -887,6 +920,7 @@
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-stat" checked onclick="toggleCol(this)"> Status</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-nfo" checked onclick="toggleCol(this)"> NFO</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-missing" checked onclick="toggleCol(this)"> Missing</div>
+                <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-anomaly" checked onclick="toggleCol(this)"> Anomaly</div>
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-dup" checked onclick="toggleCol(this)"> Duplicates</div>
                 <div style="width:1px; height:15px; background:#444; margin:0 5px;"></div> 
                 <div class="col-toggle-item"><input type="checkbox" class="col-chk-input" data-target="col-audio" onclick="toggleCol(this)"> Audio</div>
@@ -966,11 +1000,27 @@
                                 <span id="sort-hybrid" class="sort-icon"></span>
                             </div>
                             <div class="th-filter-row">
-                                <select id="hybrid-filter-header" class="filter-item" onchange="resetAndLoad()" onmousedown="event.stopPropagation()" onclick="event.stopPropagation()" style="width:100%;">
-                                    <option value="">All</option>
-                                    <option value="1">Yes</option>
-                                    <option value="0">No</option>
-                                </select>
+                                <div class="multiselect-wrapper" id="hybrid-filter-wrapper">
+                                    <div class="multiselect-button" onclick="event.stopPropagation(); toggleMultiselect('hybrid-filter');">
+                                        <span id="hybrid-filter-text">All</span>
+                                        <span class="multiselect-arrow">▼</span>
+                                    </div>
+                                    <div class="multiselect-dropdown" id="hybrid-filter-dropdown">
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="hybrid-filter-chk-all" checked>
+                                            <label for="hybrid-filter-chk-all">All</label>
+                                        </div>
+                                        <div class="multiselect-divider"></div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="hybrid-filter-chk-1" value="1" onchange="updateMultiselectFilter('hybrid-filter')">
+                                            <label for="hybrid-filter-chk-1">Yes</label>
+                                        </div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="hybrid-filter-chk-0" value="0" onchange="updateMultiselectFilter('hybrid-filter')">
+                                            <label for="hybrid-filter-chk-0">No</label>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </th>
                         <th class="col-hybrid-src td-center" onclick="sortBy('source_hybrid', event)" style="cursor: pointer;" title="Hybrid Source">
@@ -979,11 +1029,27 @@
                                 <span id="sort-source_hybrid" class="sort-icon"></span>
                             </div>
                             <div class="th-filter-row">
-                                <select id="source-hybrid-filter-header" class="filter-item" onchange="resetAndLoad()" onmousedown="event.stopPropagation()" onclick="event.stopPropagation()" style="width:100%;">
-                                    <option value="">All</option>
-                                    <option value="1">Yes</option>
-                                    <option value="0">No</option>
-                                </select>
+                                <div class="multiselect-wrapper" id="source-hybrid-filter-wrapper">
+                                    <div class="multiselect-button" onclick="event.stopPropagation(); toggleMultiselect('source-hybrid-filter');">
+                                        <span id="source-hybrid-filter-text">All</span>
+                                        <span class="multiselect-arrow">▼</span>
+                                    </div>
+                                    <div class="multiselect-dropdown" id="source-hybrid-filter-dropdown">
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="source-hybrid-filter-chk-all" checked>
+                                            <label for="source-hybrid-filter-chk-all">All</label>
+                                        </div>
+                                        <div class="multiselect-divider"></div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="source-hybrid-filter-chk-1" value="1" onchange="updateMultiselectFilter('source-hybrid-filter')">
+                                            <label for="source-hybrid-filter-chk-1">Yes</label>
+                                        </div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="source-hybrid-filter-chk-0" value="0" onchange="updateMultiselectFilter('source-hybrid-filter')">
+                                            <label for="source-hybrid-filter-chk-0">No</label>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </th>
                         <th class="col-main td-center" onclick="sortBy('main', event)" style="cursor: pointer;" title="Main HDR Format">
@@ -1201,11 +1267,27 @@
                                 <span id="sort-stat" class="sort-icon"></span>
                             </div>
                             <div class="th-filter-row">
-                                <select id="status-filter-header" class="filter-item" onchange="resetAndLoad()" onmousedown="event.stopPropagation()" onclick="event.stopPropagation()" style="width:100%;">
-                                    <option value="">All</option>
-                                    <option value="ok">OK</option>
-                                    <option value="failed">Failed</option>
-                                </select>
+                                <div class="multiselect-wrapper" id="status-filter-wrapper">
+                                    <div class="multiselect-button" onclick="event.stopPropagation(); toggleMultiselect('status-filter');">
+                                        <span id="status-filter-text">All</span>
+                                        <span class="multiselect-arrow">▼</span>
+                                    </div>
+                                    <div class="multiselect-dropdown" id="status-filter-dropdown">
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="status-filter-chk-all" checked>
+                                            <label for="status-filter-chk-all">All</label>
+                                        </div>
+                                        <div class="multiselect-divider"></div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="status-filter-chk-ok" value="ok" onchange="updateMultiselectFilter('status-filter')">
+                                            <label for="status-filter-chk-ok">OK</label>
+                                        </div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="status-filter-chk-failed" value="failed" onchange="updateMultiselectFilter('status-filter')">
+                                            <label for="status-filter-chk-failed">Failed</label>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </th>
                         <th class="col-nfo td-center" title="Missing NFO">
@@ -1213,11 +1295,27 @@
                                 <span>NFO</span>
                             </div>
                             <div class="th-filter-row">
-                                <select id="nfo-filter-header" class="filter-item" onchange="resetAndLoad()" onmousedown="event.stopPropagation()" onclick="event.stopPropagation()" style="width:100%;">
-                                    <option value="">All</option>
-                                    <option value="1">Missing</option>
-                                    <option value="0">Found</option>
-                                </select>
+                                <div class="multiselect-wrapper" id="nfo-filter-wrapper">
+                                    <div class="multiselect-button" onclick="event.stopPropagation(); toggleMultiselect('nfo-filter');">
+                                        <span id="nfo-filter-text">All</span>
+                                        <span class="multiselect-arrow">▼</span>
+                                    </div>
+                                    <div class="multiselect-dropdown" id="nfo-filter-dropdown">
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="nfo-filter-chk-all" checked>
+                                            <label for="nfo-filter-chk-all">All</label>
+                                        </div>
+                                        <div class="multiselect-divider"></div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="nfo-filter-chk-1" value="1" onchange="updateMultiselectFilter('nfo-filter')">
+                                            <label for="nfo-filter-chk-1">Missing</label>
+                                        </div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="nfo-filter-chk-0" value="0" onchange="updateMultiselectFilter('nfo-filter')">
+                                            <label for="nfo-filter-chk-0">Found</label>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </th>
                         <th class="col-missing td-center" title="File Missing on Disk">
@@ -1225,11 +1323,55 @@
                                 <span>Missing</span>
                             </div>
                             <div class="th-filter-row">
-                                <select id="missing-filter-header" class="filter-item" onchange="resetAndLoad()" onmousedown="event.stopPropagation()" onclick="event.stopPropagation()" style="width:100%;">
-                                    <option value="">All</option>
-                                    <option value="1">Yes</option>
-                                    <option value="0">No</option>
-                                </select>
+                                <div class="multiselect-wrapper" id="missing-filter-wrapper">
+                                    <div class="multiselect-button" onclick="event.stopPropagation(); toggleMultiselect('missing-filter');">
+                                        <span id="missing-filter-text">All</span>
+                                        <span class="multiselect-arrow">▼</span>
+                                    </div>
+                                    <div class="multiselect-dropdown" id="missing-filter-dropdown">
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="missing-filter-chk-all" checked>
+                                            <label for="missing-filter-chk-all">All</label>
+                                        </div>
+                                        <div class="multiselect-divider"></div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="missing-filter-chk-1" value="1" onchange="updateMultiselectFilter('missing-filter')">
+                                            <label for="missing-filter-chk-1">Yes</label>
+                                        </div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="missing-filter-chk-0" value="0" onchange="updateMultiselectFilter('missing-filter')">
+                                            <label for="missing-filter-chk-0">No</label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </th>
+                        <th class="col-anomaly td-center" title="Quality anomaly">
+                            <div class="th-header-row">
+                                <span>Anomaly</span>
+                            </div>
+                            <div class="th-filter-row">
+                                <div class="multiselect-wrapper" id="anomaly-filter-wrapper">
+                                    <div class="multiselect-button" onclick="event.stopPropagation(); toggleMultiselect('anomaly-filter');">
+                                        <span id="anomaly-filter-text">All</span>
+                                        <span class="multiselect-arrow">▼</span>
+                                    </div>
+                                    <div class="multiselect-dropdown" id="anomaly-filter-dropdown">
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="anomaly-filter-chk-all" checked>
+                                            <label for="anomaly-filter-chk-all">All</label>
+                                        </div>
+                                        <div class="multiselect-divider"></div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="anomaly-filter-chk-1" value="1" onchange="updateMultiselectFilter('anomaly-filter')">
+                                            <label for="anomaly-filter-chk-1">Yes</label>
+                                        </div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="anomaly-filter-chk-0" value="0" onchange="updateMultiselectFilter('anomaly-filter')">
+                                            <label for="anomaly-filter-chk-0">No</label>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </th>
                         <th class="col-dup td-center" onclick="sortBy('dup', event)" style="cursor: pointer;" title="Duplicate Group Count">
@@ -1351,11 +1493,27 @@
                                 <span id="sort-is_3d" class="sort-icon"></span>
                             </div>
                             <div class="th-filter-row">
-                                <select id="is-3d-filter-header" class="filter-item" onchange="resetAndLoad()" onclick="event.stopPropagation();" style="width:100%;">
-                                    <option value="">All</option>
-                                    <option value="1">3D</option>
-                                    <option value="0">2D</option>
-                                </select>
+                                <div class="multiselect-wrapper" id="is-3d-filter-wrapper">
+                                    <div class="multiselect-button" onclick="event.stopPropagation(); toggleMultiselect('is-3d-filter');">
+                                        <span id="is-3d-filter-text">All</span>
+                                        <span class="multiselect-arrow">▼</span>
+                                    </div>
+                                    <div class="multiselect-dropdown" id="is-3d-filter-dropdown">
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="is-3d-filter-chk-all" checked>
+                                            <label for="is-3d-filter-chk-all">All</label>
+                                        </div>
+                                        <div class="multiselect-divider"></div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="is-3d-filter-chk-1" value="1" onchange="updateMultiselectFilter('is-3d-filter')">
+                                            <label for="is-3d-filter-chk-1">3D</label>
+                                        </div>
+                                        <div class="multiselect-option" onclick="event.stopPropagation()">
+                                            <input type="checkbox" id="is-3d-filter-chk-0" value="0" onchange="updateMultiselectFilter('is-3d-filter')">
+                                            <label for="is-3d-filter-chk-0">2D</label>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </th>
                         <th class="col-edition hide-col-edition" onclick="sortBy('edition', event)" style="cursor: pointer;" title="Edition">
@@ -1560,6 +1718,7 @@
                             </div>
                         </th>
 
+                        <th class="end-pad" aria-hidden="true"></th>
                         <th class="col-del">
                             <div id="burger-btn" onclick="toggleColMenu()">
                                 <div class="settings-toggle table-mode">

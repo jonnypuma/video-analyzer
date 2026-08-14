@@ -2,11 +2,43 @@
 
 All notable changes to Video Analyzer are documented here.
 
-<<<<<<< Updated upstream
-=======
-<<<<<<< HEAD
-=======
->>>>>>> Stashed changes
+## 3.1.6
+
+- Import `re` in the scan crawl so skipping `extras` folders no longer crashes the scan with `name 're' is not defined`.
+
+## 3.1.5
+
+- Shrink the trailing table spacer before the sticky delete column from 40px to 15px.
+
+## 3.1.4
+
+- Wire `apply_scan_schedule` (and other leftover names) into the settings/scan route modules so saving settings no longer 500s after the 3.1.0 package split.
+
+## 3.1.3
+
+- Refresh the CSRF token from `X-CSRF-Token` response headers and retry a mutating request once after an invalid-token 403, so Settings save (and other POSTs) succeed after a stale page token.
+
+## 3.1.2
+
+- Add a trailing table spacer so the last data column can scroll fully clear of the sticky delete column.
+
+## 3.1.1
+
+- Open file details from the filename via a row-index lookup instead of embedding encoded JSON in `onclick`, so the details modal works on long paths and large rows.
+- Make Anomaly **Yes** a link that opens a modal explaining each quality flag with the file’s measured resolution, bitrate, codec, and fps.
+
+## 3.1.0
+
+- Persist Flask `secret_key` in `/output/.flask_secret` (or `SECRET_KEY`); session cookies are HttpOnly with SameSite=Lax.
+- Require CSRF on POST/PUT/PATCH/DELETE even when auth is off; login and the UI send `X-CSRF-Token`.
+- Show Logout next to the version badge when `BASIC_AUTH` is enabled.
+- Resume interrupted scans from remaining pending paths without recrawling; the UI offers Resume and does not auto-start after reboot.
+- Store quality flags in `quality_anomaly` and add a Yes/No table filter; bulk/NFO edits no longer wipe those tokens.
+- Walk all files on incremental scans and skip unchanged ones by size + mtime (“Skip unchanged files”); missing-file cleanup still runs.
+- Bound the analysis queue and persist seen paths in SQLite instead of giant in-memory collections.
+- Apply real `schema_migrations` (baseline v1, 3.1.0 columns/tables in v2).
+- Invert the package split so scan, routes, db, and queries own implementations; `core.py` is a compatibility barrel.
+
 ## 3.0.50
 
 - Expand README scan-ignore documentation with file, folder-only, combined, and glob examples including `.extras` and `.trickplay`.
@@ -159,7 +191,6 @@ All notable changes to Video Analyzer are documented here.
 - Convert Dual HDR, Hybrid, Status, NFO, Missing, and 3D column filters to checkbox multiselects (same style as other header filters).
 - Scan support for raw AV1 (`.obu`, `.ivf`, `.av1`), raw HEVC/H.264 (`.hevc`, `.h265`, `.265`, `.h264`, `.264`, `.avc`), and raw H.266/VVC (`.vvc`, `.h266`, `.266`).
 
->>>>>>> 36c746e2294d8d14cc7c82658e797c6e61a42eee
 ## 3.0.13
 
 - DT-DL FEL: when multiple video streams exist, try RPU extract on secondary maps first (EL is usually not `v:0`); treat MediaInfo `EL+RPU` as FEL.

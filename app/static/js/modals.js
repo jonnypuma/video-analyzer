@@ -1,7 +1,45 @@
 // --- NEW DETAILS MODAL LOGIC ---
+const QUALITY_ANOMALY_REASONS = {
+    low_bitrate_4k: {
+        title: 'Low bitrate for 4K',
+        text: 'UHD video (3840× or 2160p and up) with a video bitrate under 8 Mbps. Typical 4K encodes are much higher; this often means heavy compression or a mislabeled file.',
+    },
+    legacy_codec_4k: {
+        title: 'Legacy codec for 4K',
+        text: 'UHD video encoded as H.264/AVC or MPEG-4. 4K is usually HEVC (H.265), AV1, or VP9; H.264 at UHD is uncommon and often inefficient.',
+    },
+    low_bitrate_1080p: {
+        title: 'Low bitrate for 1080p',
+        text: '1080p video with a video bitrate under 2 Mbps. Typical 1080p encodes are higher; this often means a heavily compressed file.',
+    },
+    unusual_frame_rate: {
+        title: 'Unusual frame rate',
+        text: 'Frame rate above 120 fps, which is outside typical film, TV, and sports rates. This can be a probe error or an unusual encode.',
+    },
+};
+
+function showDetailsByIndex(index) {
+    const data = currentRowData[Number(index)];
+    if (!data) return;
+    renderDetailsModal(data);
+}
+
 function showDetails(rowDataStr) {
     try {
+        if (rowDataStr && typeof rowDataStr === 'object') {
+            renderDetailsModal(rowDataStr);
+            return;
+        }
         const data = JSON.parse(decodeURIComponent(rowDataStr));
+        renderDetailsModal(data);
+    } catch (e) {
+        console.error("Error showing details", e);
+        if (typeof showToast === 'function') showToast('Could not open file details', {isError: true});
+    }
+}
+
+function renderDetailsModal(data) {
+    try {
         document.getElementById('det-path').innerText = data.full_path;
         currentDetailsPath = data.full_path || '';
         const mediaTypeEl = document.getElementById('det-media-type');
@@ -47,7 +85,57 @@ function showDetails(rowDataStr) {
         delete viewData.full_path; 
         document.getElementById('det-json').innerText = JSON.stringify(viewData, null, 2);
         document.getElementById('details-modal').style.display = 'block';
-    } catch(e) { console.error("Error showing details", e); }
+    } catch (e) {
+        console.error("Error showing details", e);
+        if (typeof showToast === 'function') showToast('Could not open file details', {isError: true});
+    }
+}
+
+function showAnomalyDetails(index) {
+    const data = currentRowData[Number(index)];
+    if (!data) return;
+    const flags = String(data.quality_anomaly || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (!flags.length) return;
+    const filenameEl = document.getElementById('anomaly-modal-filename');
+    const pathEl = document.getElementById('anomaly-modal-path');
+    const metaEl = document.getElementById('anomaly-modal-meta');
+    const listEl = document.getElementById('anomaly-modal-flags');
+    const modal = document.getElementById('anomaly-modal');
+    if (!modal || !listEl) return;
+    if (filenameEl) filenameEl.textContent = data.filename || '';
+    if (pathEl) pathEl.textContent = data.full_path || '';
+    const bits = [];
+    if (data.width || data.height) bits.push(`${data.width || '?'}×${data.height || '?'}`);
+    if (data.resolution) bits.push(data.resolution);
+    if (data.bitrate != null && data.bitrate !== '') bits.push(`${data.bitrate} Mbps`);
+    if (data.video_codec) bits.push(data.video_codec);
+    if (data.fps) bits.push(`${data.fps} fps`);
+    if (metaEl) metaEl.textContent = bits.join(' · ');
+    listEl.innerHTML = flags.map((flag) => {
+        const reason = QUALITY_ANOMALY_REASONS[flag] || {
+            title: flag,
+            text: 'This file matched a quality heuristic stored as ' + flag + '.',
+        };
+        return `<div class="anomaly-reason">
+            <div class="anomaly-reason-title">${escHtml(reason.title)}</div>
+            <div class="anomaly-reason-code">${escHtml(flag)}</div>
+            <div class="anomaly-reason-text">${escHtml(reason.text)}</div>
+        </div>`;
+    }).join('');
+    modal.dataset.rowIndex = String(index);
+    modal.style.display = 'block';
+}
+
+function closeAnomalyModal() {
+    const modal = document.getElementById('anomaly-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function openDetailsFromAnomalyModal() {
+    const modal = document.getElementById('anomaly-modal');
+    const index = modal ? modal.dataset.rowIndex : '';
+    closeAnomalyModal();
+    if (index !== '' && index != null) showDetailsByIndex(index);
 }
 function updateDetailsTypeVisibility(typeValue) {
     const showTitleRow = document.getElementById('det-show-title-row');
@@ -408,10 +496,10 @@ async function getBulkTargetPaths() {
         try { currentFilters.el = getMultiselectValue('el-filter'); } catch(e) { currentFilters.el = ''; }
         try { currentFilters.container = getMultiselectValue('container-filter'); } catch(e) { currentFilters.container = ''; }
         try { currentFilters.media_type = getMultiselectValue('media-type-filter'); } catch(e) { currentFilters.media_type = ''; }
-        currentFilters.is_hybrid = document.getElementById('hybrid-filter-header') ? document.getElementById('hybrid-filter-header').value : '';
-        currentFilters.source_hybrid = document.getElementById('source-hybrid-filter-header') ? document.getElementById('source-hybrid-filter-header').value : '';
+        try { currentFilters.is_hybrid = getMultiselectValue('hybrid-filter'); } catch(e) { currentFilters.is_hybrid = ''; }
+        try { currentFilters.source_hybrid = getMultiselectValue('source-hybrid-filter'); } catch(e) { currentFilters.source_hybrid = ''; }
         try { currentFilters.secondary_hdr = getMultiselectValue('secondary-filter'); } catch(e) { currentFilters.secondary_hdr = ''; }
-        currentFilters.status = document.getElementById('status-filter-header') ? document.getElementById('status-filter-header').value : '';
+        try { currentFilters.status = getMultiselectValue('status-filter'); } catch(e) { currentFilters.status = ''; }
         try { currentFilters.resolution = getMultiselectValue('res-filter'); } catch(e) { currentFilters.resolution = ''; }
         const sizeFilter = document.getElementById('size-filter-header') ? document.getElementById('size-filter-header').value : '';
         const sizeParsed = parseFilterValue(sizeFilter);
@@ -425,7 +513,7 @@ async function getBulkTargetPaths() {
         try { currentFilters.video_source = getMultiselectValue('video-source-filter'); } catch(e) { currentFilters.video_source = ''; }
         try { currentFilters.source_format = getMultiselectValue('source-format-filter'); } catch(e) { currentFilters.source_format = ''; }
         try { currentFilters.video_codec = getMultiselectValue('video-codec-filter'); } catch(e) { currentFilters.video_codec = ''; }
-        currentFilters.is_3d = document.getElementById('is-3d-filter-header') ? document.getElementById('is-3d-filter-header').value : '';
+        try { currentFilters.is_3d = getMultiselectValue('is-3d-filter'); } catch(e) { currentFilters.is_3d = ''; }
         try { currentFilters.edition = getMultiselectValue('edition-filter'); } catch(e) { currentFilters.edition = ''; }
         try {
             const res = await fetch('/api/filter_paths', {

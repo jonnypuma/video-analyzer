@@ -120,6 +120,13 @@ def test_build_filter_query_missing_flag():
     assert where.count("?") >= 0  # may be equality without param for 1/0 flags
 
 
+def test_build_filter_query_anomaly_flag():
+    from video_analyzer.queries import build_filter_query
+
+    where, params = build_filter_query({"anomaly": "1"})
+    assert "quality_anomaly" in where.lower()
+
+
 def test_parse_sort_order():
     from video_analyzer.queries import parse_sort_order
 

@@ -10,12 +10,14 @@ def test_idle_scan_controls_are_safe(analyzer_mod):
         core.PROGRESS["paused"] = False
 
     client = analyzer_mod.app.test_client()
-    assert client.post("/abort").json["status"] == "idle"
-    assert client.post("/pause").json == {"status": "idle", "paused": False}
+    from tests.conftest import csrf_post
+    assert csrf_post(client, "/abort").json["status"] == "idle"
+    assert csrf_post(client, "/pause").json == {"status": "idle", "paused": False}
 
 
 def test_invalid_scan_request_is_normalized_without_starting_job(monkeypatch):
     import video_analyzer.core as core
+    import video_analyzer.routes.scan as scan_routes
     from video_analyzer import create_app
 
     called = []
@@ -27,10 +29,12 @@ def test_invalid_scan_request_is_normalized_without_starting_job(monkeypatch):
         def start(self):
             self.target(*self.args)
 
-    monkeypatch.setattr(core.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(scan_routes.threading, "Thread", ImmediateThread)
     with core.progress_lock:
         core.PROGRESS["status"] = "idle"
-    response = create_app().test_client().post(
+    from tests.conftest import csrf_post
+    response = csrf_post(
+        create_app().test_client(),
         "/start",
         json={"threads": 1, "scan_mode": "not-a-mode"},
     )

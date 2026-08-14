@@ -1,18 +1,37 @@
-"""Public facade for state (implementation in core)."""
+"""Mutable process-wide application state."""
 from __future__ import annotations
-import video_analyzer.core as _core
 
-PROGRESS = _core.PROGRESS
-ABORT_SCAN = _core.ABORT_SCAN
-PAUSE_EVENT = _core.PAUSE_EVENT
-progress_lock = _core.progress_lock
-db_access_lock = _core.db_access_lock
-LIBRARY_STATS_CACHE = _core.LIBRARY_STATS_CACHE
-library_stats_cache_lock = _core.library_stats_cache_lock
-RPU_CACHE = _core.RPU_CACHE
-rpu_cache_lock = _core.rpu_cache_lock
-scheduler = _core.scheduler
-LOG_CACHE = _core.LOG_CACHE
-DEBUG_MODE = _core.DEBUG_MODE
-ACTIVE_PROCS = _core.ACTIVE_PROCS
-proc_lock = _core.proc_lock
+import threading
+import time
+from collections import OrderedDict
+from typing import Any, Dict
+
+APP_START_TIME = time.time()
+ARR_STATUS_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": None}
+TOOL_VERSION_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": None}
+LIBRARY_STATS_CACHE: Dict[str, Any] = {"bundle": None}
+library_stats_cache_lock = threading.Lock()
+PROGRESS = {
+    "status": "idle", "current": 0, "total": 0, "file": "Waiting...",
+    "last_full_scan": "Never", "last_duration": "--",
+    "scan_completed": False, "new_found": 0, "failed_count": 0, "last_duration": "0s",
+    "eta": "", "start_time": 0, "paused": False, "warning_count": 0, "job_id": None,
+}
+ABORT_SCAN = False
+ACTIVE_SCAN_JOB_ID: str | None = None
+PAUSE_EVENT = threading.Event()
+PAUSE_EVENT.set()
+LOG_CACHE: list = []
+DIAG_LOG_TS = 0.0
+API_LOG_TS = 0.0
+progress_lock = threading.Lock()
+ACTIVE_SCAN_FILES: OrderedDict[str, str] = OrderedDict()
+db_access_lock = threading.Lock()
+LOG_FILE = ""
+FAIL_FILE = ""
+DEBUG_MODE = False
+ACTIVE_PROCS: set = set()
+proc_lock = threading.Lock()
+RPU_CACHE: OrderedDict = OrderedDict()
+rpu_cache_lock = threading.Lock()
+scheduler = None
