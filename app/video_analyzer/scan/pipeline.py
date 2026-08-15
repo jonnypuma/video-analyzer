@@ -907,7 +907,7 @@ def finalize_scan(metrics_sum: dict, metrics_count: dict, start_time: float,
 def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]] = None, 
              force_rescan: bool = False, debug: bool = False, scan_mode: str = "all",
              scan_folder: dict | None = None, scan_scope: str = "all",
-             resume_job_id: str | None = None) -> None:
+             resume_job_id: str | None = None, preclaimed: bool = False) -> None:
     """
     Main scan function that orchestrates the entire scanning process.
     
@@ -920,6 +920,7 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
         force_rescan: If True, resets scan attempts and rescans all files regardless of previous status.
         debug: If True, enables verbose debug logging throughout the scan process.
         resume_job_id: If set, skip crawl and analyze remaining pending paths from that job.
+        preclaimed: True when POST /start already set PROGRESS status to scanning.
         
     Raises:
         RuntimeError: If scan is already in progress (race condition protection).
@@ -938,14 +939,24 @@ def run_scan(thread_count: Optional[int] = None, target_vols: Optional[List[str]
         scan_scope = options.get("scan_scope") or scan_scope
         changed_only = scan_scope == "changed"
     
-    # Check and set status atomically to prevent race condition
+    # Check and set status atomically to prevent race condition.
+    # /start may already have claimed scanning (preclaimed=True) so /progress
+    # cannot look idle before this thread actually runs.
+    already_running = False
+    running_progress = (0, 0)
     with progress_lock:
-        if PROGRESS["status"] == "scanning":
-            log_debug(f"[WARNING] Attempted to start scan while already scanning! Current progress: {PROGRESS.get('current', 0)}/{PROGRESS.get('total', 0)}", "WARNING")
-            return
-        # Atomically set status to scanning before releasing lock
-        PROGRESS.update({"status": "scanning", "current": 0, "total": 0, "file": "Initializing...", "scan_completed": False, "new_found": 0, "removed": 0, "failed_count": 0, "warning_count": 0, "last_duration": "0s", "start_time": start_time, "active_count": 0})
-        ACTIVE_SCAN_FILES.clear()
+        if PROGRESS["status"] == "scanning" and not preclaimed:
+            already_running = True
+            running_progress = (PROGRESS.get("current", 0), PROGRESS.get("total", 0))
+        elif PROGRESS["status"] != "scanning":
+            PROGRESS.update({"status": "scanning", "current": 0, "total": 0, "file": "Initializing...", "scan_completed": False, "new_found": 0, "removed": 0, "failed_count": 0, "warning_count": 0, "last_duration": "0s", "start_time": start_time, "active_count": 0})
+            ACTIVE_SCAN_FILES.clear()
+        elif preclaimed:
+            PROGRESS["start_time"] = start_time
+            PROGRESS["file"] = PROGRESS.get("file") or "Initializing..."
+    if already_running:
+        log_debug(f"[WARNING] Attempted to start scan while already scanning! Current progress: {running_progress[0]}/{running_progress[1]}", "WARNING")
+        return
     
     va_state.ABORT_SCAN = False
     PAUSE_EVENT.set()

@@ -38,3 +38,11 @@ def test_table_end_pad_precedes_delete_column(analyzer_mod):
     assert "width: 15px !important;" in css
     core_js = analyzer_mod.app.test_client().get("/static/js/core.js").text
     assert "TABLE_END_PAD_PX = 15" in core_js
+
+
+def test_scan_js_waits_for_progress_before_treating_idle_as_complete(analyzer_mod):
+    js = analyzer_mod.app.test_client().get("/static/js/scan.js").text
+    assert "pollSawScanning" in js
+    assert "if (!res.ok)" in js
+    assert "preclaimed" not in js
+    assert "setTimeout(poll, 250)" in js

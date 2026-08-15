@@ -2,6 +2,10 @@
 
 All notable changes to Video Analyzer are documented here.
 
+## 3.1.7
+
+- Claim scan status in `POST /start` before the worker thread runs, and keep the UI polling until it has seen `scanning`, so the first Scan click no longer flashes STARTING then IDLE.
+
 ## 3.1.6
 
 - Import `re` in the scan crawl so skipping `extras` folders no longer crashes the scan with `name 're' is not defined`.

@@ -53,7 +53,7 @@ Layout (3.1+): domain modules under `video_analyzer/` own implementations (`conf
    docker compose build --no-cache
    docker compose up -d
    ```
-   Confirm the UI version badge matches the latest entry in `CHANGELOG.md` / `app/CHANGELOG.md` (e.g. **v3.1.6**). Sync the full repo to the NAS before building (not just `docker-compose.yml`). Prefer leaving `APP_VERSION` unset in `.env` so the changelog drives the badge.
+   Confirm the UI version badge matches the latest entry in `CHANGELOG.md` / `app/CHANGELOG.md` (e.g. **v3.1.7**). Sync the full repo to the NAS before building (not just `docker-compose.yml`). Prefer leaving `APP_VERSION` unset in `.env` so the changelog drives the badge.
 4. Open: `http://localhost:6002` (or host IP)
 
 The compose service uses `restart: unless-stopped` and a health check against `/api/health`. Python deps are pinned in `app/requirements.txt`. Images build for **amd64** and **arm64** (`dovi_tool` musl binaries).

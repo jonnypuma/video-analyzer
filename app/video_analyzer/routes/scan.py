@@ -43,7 +43,7 @@ from video_analyzer.queries.videos_export import (
 )
 from video_analyzer.state import (
     APP_START_TIME, LIBRARY_STATS_CACHE, LOG_CACHE, PAUSE_EVENT, PROGRESS,
-    ACTIVE_PROCS, library_stats_cache_lock, proc_lock, progress_lock,
+    ACTIVE_PROCS, ACTIVE_SCAN_FILES, library_stats_cache_lock, proc_lock, progress_lock,
 )
 
 log_debug = core.log_debug
@@ -549,11 +549,33 @@ def start() -> Tuple[Response, int] | Response:
         scan_scope = 'all'
     scan_folder = request.json.get('scan_folder')
     resume_job_id = request.json.get('resume_job_id') or None
-    thread_kwargs = {"resume_job_id": resume_job_id} if resume_job_id else {}
-    start_kw = {"target": core.run_scan, "args": (threads, targets, force, debug, scan_mode, scan_folder, scan_scope), "daemon": True}
-    if thread_kwargs:
-        start_kw["kwargs"] = thread_kwargs
-    threading.Thread(**start_kw).start()
+    # Claim scanning in this request so /progress cannot still look idle
+    # between Thread.start() and the worker's first lock.
+    with progress_lock:
+        if PROGRESS.get("status") == "scanning":
+            file_msg = PROGRESS.get("file") or "in progress"
+            return jsonify({
+                "status": "busy",
+                "message": f"A scan or heavy job is already running: {file_msg}",
+            }), 400
+        PROGRESS.update({
+            "status": "scanning", "current": 0, "total": 0, "file": "Initializing...",
+            "scan_completed": False, "new_found": 0, "removed": 0, "failed_count": 0,
+            "warning_count": 0, "last_duration": "0s", "start_time": time.time(),
+            "active_count": 0, "paused": False,
+        })
+        ACTIVE_SCAN_FILES.clear()
+    va_state.ABORT_SCAN = False
+    PAUSE_EVENT.set()
+    thread_kwargs = {"preclaimed": True}
+    if resume_job_id:
+        thread_kwargs["resume_job_id"] = resume_job_id
+    threading.Thread(
+        target=core.run_scan,
+        args=(threads, targets, force, debug, scan_mode, scan_folder, scan_scope),
+        kwargs=thread_kwargs,
+        daemon=True,
+    ).start()
     return jsonify({"status": "started"})
 
 @bp.route('/abort', methods=['POST'])

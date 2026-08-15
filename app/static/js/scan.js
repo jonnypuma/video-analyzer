@@ -43,6 +43,9 @@ async function confirmScan(fromModal = false, mode = scanMode) {
     triggerScan(selected, force, mode);
 }
 
+let pollSawScanning = false;
+let startWaitTries = 0;
+
 async function triggerScan(targets, force, mode = scanMode, resumeJobId = null) {
     document.body.classList.add('scanning');
     document.getElementById('scan-info-box').innerHTML = `STARTING <div class="spinner"></div>`;
@@ -53,9 +56,11 @@ async function triggerScan(targets, force, mode = scanMode, resumeJobId = null) 
     const debug = document.getElementById('chk-debug').checked;
     // Initialize scanStartTime immediately to start timer right away
     scanStartTime = Date.now() / 1000;
+    pollSawScanning = false;
+    startWaitTries = 0;
     
     try { 
-        await fetch('/start', { 
+        const res = await fetch('/start', { 
             method: 'POST', 
             headers: {'Content-Type': 'application/json'}, 
             body: JSON.stringify({ 
@@ -68,11 +73,27 @@ async function triggerScan(targets, force, mode = scanMode, resumeJobId = null) 
                 scan_scope: document.getElementById('chk-changed-folders')?.checked ? 'changed' : 'all',
                 resume_job_id: resumeJobId || undefined
             }) 
-        }); 
-        setTimeout(poll, 500); 
+        });
+        if (!res.ok) {
+            document.body.classList.remove('scanning');
+            scanStartTime = 0;
+            const info = document.getElementById('scan-info-box');
+            if (info) info.innerText = 'IDLE';
+            let detail = 'Failed to start scan.';
+            try {
+                const errBody = await res.json();
+                if (errBody && errBody.message) detail = errBody.message;
+            } catch (parseErr) { /* keep default */ }
+            alert(detail);
+            if (typeof checkInterruptedScan === 'function') checkInterruptedScan();
+            return;
+        }
+        setTimeout(poll, 200); 
     } catch (e) { 
         document.body.classList.remove('scanning'); 
         scanStartTime = 0;
+        const info = document.getElementById('scan-info-box');
+        if (info) info.innerText = 'IDLE';
         alert("Failed to start scan."); 
     }
 }
@@ -163,6 +184,8 @@ async function poll() {
         const res = await fetch('/progress');
         const data = await res.json();
         if (data.status === 'scanning') {
+            pollSawScanning = true;
+            startWaitTries = 0;
             document.body.classList.add('scanning');
             // Sync scanStartTime with server only on first poll or if timer hasn't started yet
             if (!scanStartTime) {
@@ -222,7 +245,14 @@ async function poll() {
             // Only refresh table data during scan, don't call loadData() which resets duration timer
             // Table will refresh when scan completes
             setTimeout(poll, 1000);
-        } else { 
+        } else {
+            if (document.body.classList.contains('scanning') && !pollSawScanning && startWaitTries < 20) {
+                startWaitTries += 1;
+                setTimeout(poll, 250);
+                return;
+            }
+            pollSawScanning = false;
+            startWaitTries = 0;
             // Stop refresh interval when scan is not active
             isAnalyzingFiles = false; // Clear flag when scan completes
             stopRefreshInterval();
