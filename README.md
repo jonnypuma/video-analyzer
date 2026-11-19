@@ -1,5 +1,7 @@
 # 🎬 Video Analyzer | HDR Detection
 
+**Project page:** [jonnypuma.github.io/#/video-analyzer](https://jonnypuma.github.io/#/video-analyzer) · **All add-ons and apps by jonnypuma:** [jonnypuma.github.io](https://jonnypuma.github.io/)
+
 Video analyzer and library for HDR content with deep metadata extraction, flexible filtering, and data cleanup tooling.
 
 See `CHANGELOG.md` for release notes and notable changes.
